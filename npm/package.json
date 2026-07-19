@@ -1,0 +1,37 @@
+{
+  "name": "cloo",
+  "version": "0.0.1",
+  "description": "A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.",
+  "keywords": [
+    "terminal",
+    "multiplexer",
+    "tmux",
+    "zellij",
+    "tui",
+    "cli",
+    "pty",
+    "session",
+    "split",
+    "rust"
+  ],
+  "homepage": "https://github.com/AG9898/cloo#readme",
+  "bugs": {
+    "url": "https://github.com/AG9898/cloo/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AG9898/cloo.git"
+  },
+  "license": "MIT",
+  "author": "AG9898",
+  "files": [
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ]
+}

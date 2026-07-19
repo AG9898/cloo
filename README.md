@@ -47,4 +47,4 @@ macOS and Linux. Windows is out of scope for v1.
 
 ## License
 
-TBD.
+MIT — see [LICENSE](./LICENSE).
