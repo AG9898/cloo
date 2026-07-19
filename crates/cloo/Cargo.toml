@@ -1,0 +1,19 @@
+[package]
+name = "cloo"
+description = "A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal."
+keywords = ["terminal", "multiplexer", "tmux", "tui", "pty"]
+categories = ["command-line-utilities"]
+readme = "README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "cloo"
+path = "src/main.rs"
+
+[dependencies]

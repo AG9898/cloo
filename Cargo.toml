@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["AG9898"]
+repository = "https://github.com/AG9898/cloo"
+homepage = "https://github.com/AG9898/cloo"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
