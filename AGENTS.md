@@ -70,7 +70,6 @@ docs/
   TESTING.md        Test strategy and inventory
   STYLEGUIDE.md     Terminal chrome visual language and fallbacks
   AGENT_WORKFLOWS.md  Harness profiles, attention, and compatibility contract
-  V1_TASK_DRAFT.md  Proposed bounded implementation tasks for the v1 CLI
   workboard.json    Canonical task queue
   workboard.schema.json  JSON Schema for the queue
   workboard.md      Workboard field definitions and usage rules
