@@ -229,6 +229,36 @@ fn typed_input_reaches_the_child_and_the_terminal_is_handed_back() {
 }
 
 #[test]
+fn a_terminating_signal_still_hands_the_terminal_back() {
+    use std::os::unix::process::ExitStatusExt;
+
+    let tty = open_tty();
+    // A child that outlives the signal, so what restores the terminal is the
+    // handler and not an ordinary exit path. It self-terminates well inside the
+    // timeout, since the signal leaves cloo no chance to reap it.
+    let mut child = spawn_on(&tty, &["sleep", "30"]);
+
+    read_until(&tty.master, "\x1b[?25l")
+        .unwrap_or_else(|seen| panic!("no frame was ever drawn; saw:\n{seen}"));
+    assert!(is_raw(&tty.slave), "the terminal is raw while cloo runs");
+
+    // SAFETY: `child` has not been reaped, so its pid is still its own.
+    let rc = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGTERM) };
+    assert_ne!(rc, -1, "SIGTERM could not be delivered");
+
+    let status = child.wait().expect("the child is reaped");
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "the handler must re-raise, so the shell sees a signalled child"
+    );
+    assert!(
+        !is_raw(&tty.slave),
+        "cloo left the terminal raw after a signal"
+    );
+}
+
+#[test]
 fn the_childs_exit_code_becomes_cloos_exit_code() {
     let tty = open_tty();
     let mut child = spawn_on(&tty, &["sh", "-c", "exit 7"]);

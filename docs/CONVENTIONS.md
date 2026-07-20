@@ -56,12 +56,12 @@ crates/
   cloo/          the binary — client-vs-server dispatch, CLI surface
 ```
 
-- Dependencies flow one way: `cloo` → {`cloo-server`, `cloo-client`} → `cloo-core` →
-  {`cloo-proto`, `cloo-term`}. Never introduce a cycle or a back-edge. Skipping a level *down*
-  the graph is allowed when it avoids re-exporting a surface through a crate that has no use for
-  it — `cloo-server` depends on `cloo-term` directly so the PTY reactor can own an `Emulator`
-  without `cloo-core` re-exporting one, and `cloo-client` depends on `cloo-proto` directly so the
-  grid cache can store wire `Cell`s without `cloo-core` re-exporting the message surface.
+- Dependencies are constrained by a layering: `cloo` over {`cloo-server`, `cloo-client`} over
+  `cloo-core` over the leaves {`cloo-proto`, `cloo-term`}. A crate may depend on any crate in a
+  lower layer; naming a leaf directly is ordinary, not an exception, and needs no justifying
+  comment. Never introduce a back-edge, a cycle, or an edge between `cloo-server` and
+  `cloo-client` — the two halves stay independent. The current edges are tabulated in
+  [ARCHITECTURE.md](ARCHITECTURE.md); update that table when you add one.
 - Intra-workspace dependencies are declared once in the root `[workspace.dependencies]` and
   pulled into members with `cloo-core.workspace = true`. Never write a bare `path = "../…"`
   dependency in a member crate — a published crate needs the version alongside the path.

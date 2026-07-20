@@ -86,11 +86,12 @@ Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
 All six crates are wired together end to end as of M0-07; the rest of their contents land across
-M1–M2. Dependencies flow one way — `cloo` → {`cloo-server`, `cloo-client`} → `cloo-core` →
-{`cloo-proto`, `cloo-term`} — and are declared in the root `[workspace.dependencies]`. Four edges
-skip a level down the graph: `cloo-server` → `cloo-term` for the PTY reactor's `Emulator`, and
-`cloo-server`, `cloo-client`, and `cloo` → `cloo-proto` for wire contents and geometry. None is a
-back-edge. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+M1–M2. Dependencies are declared in the root `[workspace.dependencies]` and are constrained by a
+**layering**, not a single chain: `cloo` over {`cloo-server`, `cloo-client`} over `cloo-core` over
+the leaves {`cloo-proto`, `cloo-term`}. Any crate may name any crate in a lower layer — in
+particular every crate that speaks the wire names `cloo-proto` directly. Forbidden: a back-edge, a
+cycle, and any edge between `cloo-server` and `cloo-client`. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current edge table.
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
 
@@ -404,6 +405,19 @@ The render loop paints on a ~60fps timer, so a child that writes and exits withi
 last output sitting in the grid, never drawn — `printf hello; exit` shows nothing at all. The loop
 therefore renders once more after EOF if the grid is still dirty. Any future coalescing scheme
 needs the same flush, and `crates/cloo/tests/cli.rs` is what catches its absence.
+
+### 2026-07-20 — The crate graph is a layering, not a chain
+Four M0 tasks each added an edge that "skipped a level" in the old `cloo → {server, client} →
+core → {proto, term}` diagram, and each documented it as an exception. They were not exceptions:
+`cloo-proto` is the wire vocabulary, so every crate that speaks the wire names it directly. The
+rule is now stated as a layering with a real edge table in `docs/ARCHITECTURE.md` — depend
+downward freely, never sideways between `cloo-server` and `cloo-client`, never upward.
+
+### 2026-07-20 — Test the signal restore path from the binary, not the library
+`cloo-client`'s own tests cannot assert the `SIGTERM` restore path, because a library test that
+signals itself kills the test runner. Signal the *binary* as a child instead: `crates/cloo/tests/
+cli.rs` spawns `cloo` on a pseudoterminal and asserts the terminal came back cooked. When adding
+an exit path, check the assertion is not vacuous by breaking the restore and watching it fail.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

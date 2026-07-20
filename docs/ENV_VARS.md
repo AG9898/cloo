@@ -17,7 +17,7 @@ the user's shell and desktop session. cloo defines none of its own except `CLOO_
 | Variable | Required | Default | Description |
 |---|---|---|---|
 | `XDG_RUNTIME_DIR` | Yes | Falls back to `/tmp/cloo-$UID` when unset | Parent of the session socket directory. Sockets live at `$XDG_RUNTIME_DIR/cloo/<session>.sock`. |
-| `TERM` | Yes | — | Terminal type. Drives capability detection at attach. A client that cannot resolve `TERM` refuses to attach rather than guessing. **Read as of M0-07**, where there is no attach yet: an unset or `dumb` `TERM` makes the local client claim no capabilities at all rather than refuse to start. |
+| `TERM` | Yes | — | Terminal type. Drives capability detection at attach. **Read as of M0-07**, where there is no attach yet: an unset or `dumb` `TERM` makes the local client claim no capabilities at all rather than refuse to start. Whether a client that cannot resolve `TERM` *refuses to attach* — this file's original contract — or falls back the way M0-07 does is unsettled; see [DECISIONS.md](DECISIONS.md) OPEN-01, which M1-06 must resolve before writing the attach path. |
 | `SHELL` | No | `/bin/sh` | Program spawned in each new pane. **Read as of M0-07.** A bare `cloo` runs it; `cloo <program>` overrides it. The `/etc/passwd` lookup for an unset `SHELL` is not implemented — the POSIX-guaranteed `/bin/sh` is used instead. |
 | `XDG_CONFIG_HOME` | No | `~/.config` | Config lookup root. cloo reads `$XDG_CONFIG_HOME/cloo/config.toml`. |
 | `COLORTERM` | No | Unset | Set to `truecolor`/`24bit` by capable terminals. Used to enable 24-bit color output. **Read as of M0-07.** Without it the renderer downsamples RGB to the 256-colour palette rather than emitting a sequence the terminal may not understand. |

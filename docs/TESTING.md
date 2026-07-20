@@ -132,8 +132,12 @@ frame is asserted against an exact expected string rather than eyeballed — all
 
 Raw-mode behaviour needs a real tty, so it lives in `crates/cloo-client/tests/raw_mode.rs`, which
 opens a pseudoterminal pair and drives the slave side. Three of the four restore paths are
-asserted automatically; only the signal path is still manual, since asserting it means killing the
-test process:
+asserted there — the signal path cannot be, since a library test asserting it would have to kill
+its own process. It is covered instead from `crates/cloo/tests/cli.rs`, which signals the real
+binary as a *child*: `a_terminating_signal_still_hands_the_terminal_back` spawns `cloo` on a
+pseudoterminal, waits for the first frame, sends `SIGTERM`, and asserts both that the wait status
+carries the signal (the handler re-raises rather than calling `exit`) and that the terminal came
+back cooked. **All four restore paths are now asserted automatically.** The library tests cover:
 
 - Entering raw mode actually clearing `ECHO`, `ICANON`, and `ISIG`, and drop restoring the exact
   original flag words — not merely "some cooked state".
@@ -165,6 +169,8 @@ stand-in for the user's screen:
 - A child's output reaching the screen *inside a renderer-built frame*, asserted on the frame
   preamble rather than on the raw text, which is what distinguishes rendering from forwarding.
 - Typed input on the master reaching the child, and the terminal left cooked after cloo exits.
+- `SIGTERM` mid-session restoring the terminal and re-raising, so the wait status still carries
+  the signal — the one restore path the `cloo-client` tests cannot reach on their own.
 - The child's exit code becoming cloo's exit code.
 
 These read until an expected string appears rather than sleeping, with a deadline so a wiring
@@ -177,9 +183,9 @@ The intended shape for the rest, in the order it becomes testable:
   pure and testable without a terminal.
 - **`cloo-server`** — socket-level integration tests join the PTY ones at M1. Slower; keep the
   count deliberate.
-- **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06. Incremental
-  diffing against previous frames arrives with damage coalescing at M1-04. Only the signal
-  restore path stays manual.
+- **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06, and the
+  signal restore path joined them from the binary's own tests once M0-07 gave it a child process
+  to signal. Incremental diffing against previous frames arrives with damage coalescing at M1-04.
 
 ### Agent-harness compatibility
 
@@ -218,7 +224,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, and a pipe refused |
 | `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |
-| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, and the one-pane smoke path driven over a pseudoterminal |
+| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, and signal-path terminal restore |
 
 ---
 

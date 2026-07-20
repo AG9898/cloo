@@ -58,26 +58,38 @@ runs one local pane by composing `cloo-server`'s PTY reactor with `cloo-client`'
 remaining contents land across M1–M2.
 
 Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
-manifest, so every member inherits the same path and version:
+manifest, so every member inherits the same path and version. The crates sit in four layers:
 
 ```
-cloo → { cloo-server, cloo-client } → cloo-core → { cloo-proto, cloo-term }
-                    └──────────────────────────────────────────┘
+       cloo            composition root — depends on anything below
+      ↙    ↘
+cloo-server  cloo-client    the two halves — never on each other
+      ↘    ↙
+     cloo-core             model and conversion — no I/O
+      ↙    ↘
+cloo-proto  cloo-term      leaves — no intra-workspace dependencies at all
 ```
 
-Never introduce a cycle or a back-edge. `cloo-proto` and `cloo-term` have no intra-workspace
-dependencies at all.
+**The rule is the layering, not a single chain.** A crate may depend on any crate in a lower
+layer, and the leaves may be named directly by anything above them. What is forbidden is a
+back-edge (a lower layer naming a higher one), a cycle, and an edge between `cloo-server` and
+`cloo-client`, which must stay independent halves.
 
-`cloo-server` also depends on `cloo-term` directly, as of M0-05: the PTY reactor owns a pane's
-`Emulator` and feeds it, and routing that through `cloo-core` would mean re-exporting the
-emulation surface from a crate that performs no I/O. This is a shortcut down the graph, not a
-back-edge — the direction is unchanged and no cycle is introduced. The `alacritty_terminal` rule
-is untouched: `cloo-server` names only `cloo-term`'s own types.
+An earlier draft of this section drew a strict chain — `cloo → {server, client} → core →
+{proto, term}` — which the implementation contradicted three times in M0 alone. The reasons were
+the same each time and are worth stating once rather than per-milestone: `cloo-proto` is the wire
+vocabulary, so every crate that speaks the wire names it, and routing it through `cloo-core`
+would reduce that crate to a re-export shim. The current edges are:
 
-`cloo-server` also depends on `cloo-proto` directly, as of M0-07: what it hands a client is wire
-contents, and it is the crate that will speak the protocol over the socket at M1-02. `cloo` takes
-the same dependency for the same reason — it is the composition root and names the geometry it
-passes between the two halves. Both are shortcuts down the graph, not back-edges.
+| Crate | Depends on | Why the direct edge |
+|---|---|---|
+| `cloo` | `cloo-server`, `cloo-client`, `cloo-proto` | Composition root; names the geometry it passes between the halves |
+| `cloo-server` | `cloo-core`, `cloo-proto`, `cloo-term` | Hands clients wire contents; the PTY reactor owns a pane's `Emulator` |
+| `cloo-client` | `cloo-core`, `cloo-proto` | The grid cache stores wire `Cell`s and applies wire `RowUpdate`s |
+| `cloo-core` | `cloo-proto`, `cloo-term` | Owns the conversion between the two cell vocabularies |
+
+The `alacritty_terminal` rule is untouched by any of this: `cloo-server` names only `cloo-term`'s
+own types, and the backend stays behind that wrapper.
 
 ### Emulation
 
