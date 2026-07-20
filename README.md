@@ -1,50 +1,102 @@
+<div align="center">
+
 # cloo
 
-A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
+### A terminal multiplexer for the way coding work looks now.
 
-> **Status: pre-alpha, planning only.** There is no code yet. The design is settled and written
-> up in [docs/](./docs/) — start with [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the system
-> shape, [PRD.md](./docs/PRD.md) for scope and milestones, and
-> [DECISIONS.md](./docs/DECISIONS.md) for what has been settled and what is still open.
+<sub>Persistent sessions. Intentional terminal chrome. A calm workspace for many coding agents.</sub>
 
-## What it is
+<br><br>
 
-cloo is a client-server terminal multiplexer: a background daemon owns your shells, and thin
-clients attach to it. Detach a session, close your terminal, reattach later and find everything
-running — the same core deal as tmux and zellij.
+<code>PRE-ALPHA</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>RUST</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>MACOS + LINUX</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>LOCAL-FIRST</code>
 
-## Why another one
+</div>
 
-Not because tmux is missing features. Because it looks like 2007.
+<br>
 
-cloo aims to be a functional peer of tmux and zellij while spending its effort somewhere they
-don't: pane borders and focus treatment, a status bar worth looking at, real theming that
-inherits your existing palette, and considered motion when panes split and close.
+<p align="center">
+  <img src="docs/assets/cloo-ui-single-pane.png" alt="cloo intended single-pane terminal interface" width="900">
+</p>
 
-Everything that isn't visible to you gets bought off the shelf. The terminal emulation layer is a
-dependency, not a rewrite, so the work goes into the part you actually look at all day.
+> **Not usable yet.** cloo is in the early implementation phase. The visual system, architecture,
+> and v1 workboard are complete; the current binary only prints help. This README shows the intended
+> product direction, not a shipped interface.
 
-## Planned features
+## The idea
 
-- Session detach / reattach, multiple clients on one session
-- Split panes on a binary tree layout, with resize
-- Tabs
-- tmux-style prefix keybindings, fully rebindable
-- Copy mode with scrollback search and system clipboard via OSC 52
-- Mouse: click to focus, drag to resize, scroll to scrollback
-- TOML config with live reload, and themes
+cloo is a client-server terminal multiplexer written in Rust. A daemon owns your PTYs, grids,
+scrollback, and layout; thin clients attach over a Unix socket. Close a terminal, reattach later,
+and the work is still there.
 
-## Install
+The difference is where cloo puts its attention: the interface you spend all day looking at. It is
+being designed as a workspace for several concurrent coding harnesses—especially Codex and Claude
+Code—not just as a better-looking shell container.
 
-Not yet installable. When it is, the plan is:
+## What it is intended to feel like
+
+| | |
+|---|---|
+| **Know what needs you** | Named panes, task labels, and a compact attention queue make it possible to find the one agent that needs input without reading every transcript. |
+| **Keep the terminal intact** | Sessions survive client death; split ratios survive resize; normal shell and TUI behavior stay first-class. |
+| **Move through dense work calmly** | Accent focus, dimmed neighbors, one-row chrome, pane zoom, and short interruptible motion give multi-pane work a clear visual hierarchy. |
+| **Degrade deliberately** | 16-color terminals remain legible. Richer terminal effects are capability-gated, and optional graphics never break a pane. |
+
+## Intended workspace
+
+<p align="center">
+  <img src="docs/assets/cloo-ui-agent-workspace.png" alt="cloo intended nested multi-pane agent workspace" width="900">
+</p>
+
+The intended v1 experience includes:
+
+- Durable sessions with detach/reattach and multi-client attach
+- Binary splits, tabs, directional focus, resize, and pane zoom
+- Explicit local launch profiles for a shell, Codex, and Claude Code
+- Attention states sourced from lifecycle events, bells, user actions, or opt-in local adapters—never brittle transcript scraping
+- An always-on minimal status bar, command palette, session switcher, and keyboard-first navigation
+- Bracketed paste, extended keys, focus, alternate screen, and mouse compatibility for modern terminal UIs
+- Copy mode, scrollback search, and policy-controlled OSC 52 clipboard support
+- TOML configuration, live reload, named themes, terminal palette inheritance, and reduce-motion support
+
+## Design principles
+
+<table>
+  <tr>
+    <td width="33%"><strong>State belongs to the server</strong><br><sub>Clients cache visible grids and render chrome; they never become the source of truth.</sub></td>
+    <td width="33%"><strong>Chrome belongs to the client</strong><br><sub>The server sends content and geometry. Themes and visual identity stay local to the renderer.</sub></td>
+    <td width="33%"><strong>Agent state is explicit</strong><br><sub>cloo stores a state and its source. It does not pretend an ANSI transcript is a reliable API.</sub></td>
+  </tr>
+</table>
+
+## Project status
+
+| Track | Current state |
+|---|---|
+| Product and UI direction | Settled—the Storm visual system, focus treatment, status bar, theming, and motion rules are documented. |
+| Agent-workspace contract | Settled—profiles, attention state, compatibility tiers, and safe terminal-effect handling are specified. |
+| Implementation | Beginning—42 bounded M0–M7 tasks are ready in the workboard. |
+| Runtime | Placeholder only—the command is not ready for real sessions. |
+
+## Follow the build
+
+- [Product requirements and roadmap](docs/PRD.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Terminal style guide](docs/STYLEGUIDE.md)
+- [Agent workflows and compatibility](docs/AGENT_WORKFLOWS.md)
+- [V1 implementation workboard](docs/workboard.json)
+- [UI handoff and source mock](references/design_handoff_cloo_ui/README.md)
+
+## Installation
+
+Not yet installable. The planned distribution is:
 
 ```sh
 npm install -g clooterminal   # prebuilt binaries
-cargo install cloo            # from source
+cargo install cloo            # build from source
 ```
 
-Either way the command is `cloo`. The npm package is `clooterminal` because npm's
-similarity filter rejects `cloo` as too close to existing package names.
+Both will install the `cloo` command. The npm package is named `clooterminal` because npm rejects
+`cloo` through its package-name similarity filter.
 
 ## Platforms
 
@@ -52,4 +104,4 @@ macOS and Linux. Windows is out of scope for v1.
 
 ## License
 
-MIT — see [LICENSE](./LICENSE).
+MIT — see [LICENSE](LICENSE).
