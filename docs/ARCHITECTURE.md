@@ -335,6 +335,13 @@ cursor updates, bracketed paste, extended keyboard input, focus events, SGR mous
 resize. A client that lacks a required capability must choose a documented fallback rather than
 pretend support.
 
+Failing to *resolve* `TERM` at all is the one case that is refused rather than degraded. A client
+attaching with an unset or `dumb` `TERM` is turned away with an actionable error, because there is
+no baseline to negotiate from and a silently degraded remote session is the harder failure to
+diagnose. The in-process local pane has no such negotiation and keeps running with every
+capability false. See [DECISIONS.md](DECISIONS.md) RESOLVED-12; the two rules compose as *refuse
+when there is nothing to negotiate from, degrade when there is*.
+
 Some child programs emit sequences intended for the *outer* terminal: notifications, titles,
 clipboard writes, hyperlinks, or graphics. These are not raw bytes to relay around the grid.
 cloo parses them into narrowly typed, versioned effects and each client applies only effects its

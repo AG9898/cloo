@@ -54,41 +54,9 @@ What existing code or docs does this affect?>
 
 ## Open Decisions
 
-The visual decisions once deferred to M2 were resolved by the project owner on 2026-07-20 and are
-recorded below. One question raised during M0 implementation is open.
-
-### OPEN-01 — Does an unresolvable `TERM` refuse the attach or fall back?
-
-**Question:** When a client cannot resolve `TERM` — unset, or `dumb` — does it refuse to attach,
-or does it attach claiming no capabilities?
-
-**Context:** [ENV_VARS.md](ENV_VARS.md) states the strict reading: "a client that cannot resolve
-`TERM` refuses to attach rather than guessing." M0-07 implemented the permissive one instead —
-`cloo-client`'s detection claims *no* capabilities and the pane still runs — on the grounds that
-refusing to launch a shell over an unset `TERM` is user-hostile, and that claiming nothing is
-conservative rather than a guess. There is no attach path yet, so nothing is currently
-inconsistent in behavior; the two readings only collide once M1-02 lands one.
-
-The wider contradiction is that M1-06's acceptance criterion reads "unsupported combinations
-choose documented fallbacks," which is the permissive reading, while the ENV_VARS contract is the
-strict one. Whoever implements M1-06 will have to pick, and should not have to pick silently.
-
-**Options under consideration:**
-1. **Refuse at attach, keep M0-07's local fallback** — the strict contract applies only where a
-   negotiation actually happens; a local pane with no socket keeps running. Tradeoff: two
-   behaviors for the same environment, which has to be explained wherever it surfaces.
-2. **Fall back everywhere, amend ENV_VARS** — one behavior: never refuse over `TERM`, degrade to
-   the documented minimum. Tradeoff: a harness attaching under a broken `TERM` gets a degraded
-   session rather than a clear, immediate error, which is harder to diagnose remotely.
-3. **Refuse everywhere, amend M0-07** — one behavior in the other direction. Tradeoff: reverses a
-   shipped, tested M0 behavior and makes `cloo` unusable in environments where `TERM` is simply
-   unset, such as some CI shells.
-
-**Blocking:** Nothing yet. M1-06 (negotiate baseline terminal capabilities) and M7-01 (harden
-terminal detection) both need this settled before their capability-failure paths are written.
-
-**See also:** [ENV_VARS.md](ENV_VARS.md) `TERM` row, `crates/cloo-client/src/outer.rs`,
-workboard tasks M1-06 and M7-01.
+There are no open architectural decisions. The visual decisions once deferred to M2 were resolved
+by the project owner on 2026-07-20 and are recorded below, as was OPEN-01, raised during M0
+implementation and resolved the same day as RESOLVED-12.
 
 ## Resolved Decisions
 
@@ -308,3 +276,35 @@ notifications and accessibility-friendly clipboard workflows.
 
 **Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md),
 `cloo-term`, `cloo-proto`, `cloo-server`, and `cloo-client`.
+
+### RESOLVED-12 — An unresolvable `TERM` refuses the attach but not a local pane
+
+**Resolved:** 2026-07-20
+
+**Decision:** The refusal applies where a negotiation actually happens. A client **attaching over
+the socket** with an unset or `dumb` `TERM` is refused with an actionable error and does not
+attach. A **local pane** — the in-process path with no socket, as shipped in M0-07 — keeps
+running with every capability claimed false.
+
+This is a rule about `TERM` being *unresolvable*, not about capabilities being *limited*. A client
+that resolves `TERM` but lacks a given capability still takes its documented fallback, exactly as
+[RESOLVED-11](#resolved-11--capability-gated-outer-terminal-effects) and M1-06 describe. The two
+rules compose: refuse when there is nothing to negotiate from, degrade when there is.
+
+**Why:** The strict contract in [ENV_VARS.md](ENV_VARS.md) was always written about attach, and it
+earns its keep there — an agent harness attaching under a broken `TERM` should get a loud, local
+error rather than a silently degraded session that has to be diagnosed remotely. But `TERM` is
+routinely unset in CI shells, `docker exec`, and cron, and refusing to launch a shell in those
+environments is user-hostile for no safety gain: a local pane has no second client whose
+capabilities could disagree, and claiming nothing is conservative rather than a guess.
+
+**Alternatives rejected:** Falling back everywhere would have made capability failures silent at
+exactly the point they are hardest to diagnose. Refusing everywhere would have reversed a shipped,
+tested M0 behavior and made `cloo` unusable wherever `TERM` is merely unset.
+
+**Cost accepted:** The same environment produces two different behaviors depending on whether a
+socket is involved. That has to be explained wherever it surfaces — the `TERM` row in
+[ENV_VARS.md](ENV_VARS.md) and the attach error message are the two places that must carry it.
+
+**Affects:** [`ENV_VARS.md`](ENV_VARS.md) `TERM` row, [`ARCHITECTURE.md`](ARCHITECTURE.md)
+capability negotiation, `crates/cloo-client/src/outer.rs`, and workboard tasks M1-06 and M7-01.
