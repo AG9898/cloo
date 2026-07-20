@@ -12,3 +12,4 @@ repository.workspace = true
 homepage.workspace = true
 
 [dependencies]
+alacritty_terminal.workspace = true

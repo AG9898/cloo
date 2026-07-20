@@ -274,8 +274,9 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 ```
 
 `cloo-proto` has wire round-trip, framing, and handshake coverage as of M0-02. `cloo-core` has
-table-driven layout tree coverage as of M0-03. Keymap resolution and config parsing are the next
-things that must get coverage as they land.
+table-driven layout tree coverage as of M0-03. `cloo-term` has grid coverage — SGR, alternate
+screen, cursor, resize, scrollback — as of M0-04. Keymap resolution and config parsing are the
+next things that must get coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -341,6 +342,20 @@ minimum-size check calls it rather than reimplementing the arithmetic, because i
 disagrees between the check and the layout pass you can accept a split and then resolve it below
 the minimum. Rejection happens at split time only — a layout pass over an area that shrank
 squeezes panes to a one-cell floor instead, since a resize must always produce a drawable answer.
+
+### 2026-07-20 — `cloo-term` duplicates the proto cell types on purpose
+`Cell`, `Color`, and `CellAttrs` exist in both `cloo-term` and `cloo-proto` with identical
+`CellAttrs` bit positions, because `cloo-term` has no intra-workspace dependencies and reusing
+the wire types would put `cloo-proto` under the emulation wrapper. `cloo-core` owns the
+conversion, and it is only a field copy as long as the bit layouts stay in sync — change one and
+you must change the other in the same commit.
+
+### 2026-07-20 — Grid line indices are absolute, not viewport-relative
+`alacritty_terminal`'s `Grid[Line(n)]` indexes the buffer, not the visible rows: viewport row `r`
+is `Line(r - display_offset)`, and the cursor's viewport row is `point.line.0 + display_offset`.
+Getting this backwards renders the wrong rows only once scrollback is non-empty, so it survives
+every test that does not scroll. Also, `\x1b[?1049h` saves the cursor rather than homing it — a
+fixture that writes immediately after entering the alternate screen lands at the old column.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

@@ -90,6 +90,14 @@ crates/
 - `cloo-term` exposes only: feed bytes, read cells, resize, scrollback access. If a caller
   needs an `alacritty_terminal` type, widen `cloo-term`'s own API instead of leaking the
   dependency.
+- `cloo-term` owns its own `Cell`, `Color`, and `CellAttrs` types rather than reusing the
+  `cloo-proto` ones — it has no intra-workspace dependencies, and that is what keeps the
+  emulation backend swappable without touching the wire. The two `CellAttrs` bit layouts are
+  identical on purpose, so the conversion `cloo-core` owns stays a field copy. **Changing a bit
+  position in one requires changing it in the other in the same commit.**
+- A grid dimension of zero never reaches the backend. `TermSize::new` is the single validation
+  point and returns `TermError::ZeroSize`, which is why `Emulator::new` and `Emulator::resize`
+  are infallible.
 - Raw mode and termios changes must be restored on **every** exit path, including panic and
   signal. A client that leaves the user's terminal in raw mode is a critical bug.
 - Escape sequences are emitted through the renderer, never printed ad hoc.

@@ -67,6 +67,27 @@ cloo → { cloo-server, cloo-client } → cloo-core → { cloo-proto, cloo-term 
 Never introduce a cycle or a back-edge. `cloo-proto` and `cloo-term` have no intra-workspace
 dependencies at all.
 
+### Emulation
+
+`cloo-term::Emulator` is one terminal emulator per pane, owned by the session task. It is
+synchronous and does no I/O: the PTY reactor reads bytes and calls `feed`, which is safe across
+read boundaries because parser state persists between calls — a sequence or a multi-byte
+character split across two reads still parses.
+
+The surface is exactly what the crate table promises. `feed` takes bytes; `row`, `rows`, and
+`row_text` read the visible grid; `resize` reflows it; `scrollback_len`, `scroll_offset`,
+`scroll`, and `scroll_to_bottom` cover history. `cursor` and `is_alt_screen` report the state a
+renderer needs but cannot derive from cells alone.
+
+`Emulator::resize` moves emulation state only. The child still has to be told through
+`TIOCSWINSZ` from the PTY layer, and the two together are the resize race described in
+`AGENTS.md`.
+
+The value types (`Cell`, `Color`, `CellAttrs`, `CursorState`) are `cloo-term`'s own. They mirror
+the `cloo-proto` shapes without depending on them, because `cloo-term` sits at the bottom of the
+dependency graph next to `cloo-proto` and depends on nothing in the workspace. `cloo-core` owns
+the conversion; the `CellAttrs` bit layouts match so it stays a field copy.
+
 ### Server
 
 Owns all PTYs, grids, scrollback, and layout state. Fans damage out to every attached client.
@@ -240,8 +261,9 @@ never meant, and the wire carries no generation counter to catch it.
 | `tokio` | Async runtime for the PTY reactor and socket | Required |
 | `serde` + `postcard` | Wire serialization and framing | Required |
 
-`serde` and `postcard` are wired up in `cloo-proto` as of M0-02. The rest land with their
-milestones.
+`serde` and `postcard` are wired up in `cloo-proto` as of M0-02. `alacritty_terminal` is pinned
+at `=0.26.0` in `[workspace.dependencies]` and reaches only `cloo-term`, as of M0-04. `tokio`
+lands with the PTY reactor.
 
 `wezterm-term` is the designated fallback emulation backend: more deliberately public API,
 heavier dep tree. Re-evaluate at M2 if the pin hurts. See [`DECISIONS.md`](DECISIONS.md) —

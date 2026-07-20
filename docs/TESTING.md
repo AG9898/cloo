@@ -42,9 +42,9 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**`cloo-proto` and `cloo-core`.** The other three libraries are still scaffolds and the binary
-is a placeholder, so the workspace run is 37 tests across two crates. This section grows as M0
-lands.
+**`cloo-proto`, `cloo-core`, and `cloo-term`.** The other two libraries are still scaffolds and
+the binary is a placeholder, so the workspace run is 60 unit tests across three crates plus one
+doctest. This section grows as M0 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -69,13 +69,30 @@ Covered today in `cloo-proto`, all as unit tests:
 - Handshake version match and mismatch, including that the mismatch error names both versions
   and tells the user to reattach — the acceptance criterion, asserted on the rendered string.
 
+Covered today in `cloo-term`, all as unit tests, all by feeding known byte sequences and
+asserting grid state. This is the seam where an `alacritty_terminal` upgrade will break things,
+so this coverage is what makes the pinned dependency safe to bump:
+
+- Every SGR rendition flag, and named, indexed, and RGB colour. A role name (default foreground
+  or background) staying `Color::Default` rather than collapsing to a palette index, since the
+  role resolves in the client's theme.
+- An escape sequence and a multi-byte UTF-8 character each split across two `feed` calls,
+  because the PTY reactor has no control over where a read boundary falls.
+- Entering and leaving the alternate screen, the primary grid surviving the round trip, and the
+  alternate screen accumulating no scrollback.
+- Resize reporting the new geometry and row width, shrink-then-grow preserving unwrapped
+  content, and a 1x1 grid being valid — the layout pass squeezes to a one-cell floor, so the
+  emulator has to survive the result.
+- Scrollback growing to its configured limit and no further, a zero-scrollback grid retaining
+  nothing, scrolling clamping at both ends, and the cursor reporting itself invisible once
+  scrolled out of the viewport.
+- Cursor position under output and absolute positioning, DECTCEM visibility, and DECSCUSR shape.
+- Zero grid dimensions rejected at `TermSize::new` with the offending dimensions named.
+
 The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
   pure and testable without a terminal.
-- **`cloo-term`** — feed known byte sequences, assert resulting grid state. This is the seam
-  where `alacritty_terminal` upgrades will break things, so coverage here is what makes the
-  pinned dependency safe to bump.
 - **`cloo-server`** — integration tests over a real socket with a real PTY running a scripted
   shell. Slower; keep the count deliberate.
 - **`cloo-client`** — renderer diffing against a fake grid. Raw-mode and terminal-restore
@@ -109,6 +126,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, and every rejection leaving the tree unchanged |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
+| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping |
 
 ---
 
