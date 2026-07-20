@@ -1,0 +1,14 @@
+[package]
+name = "cloo-term"
+description = "Terminal emulation wrapper for cloo — the only crate permitted to import alacritty_terminal."
+keywords = ["terminal", "multiplexer", "emulator", "vte", "grid"]
+categories = ["command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]

@@ -58,6 +58,9 @@ crates/
 
 - Dependencies flow one way: `cloo` → {`cloo-server`, `cloo-client`} → `cloo-core` →
   {`cloo-proto`, `cloo-term`}. Never introduce a cycle or a back-edge.
+- Intra-workspace dependencies are declared once in the root `[workspace.dependencies]` and
+  pulled into members with `cloo-core.workspace = true`. Never write a bare `path = "../…"`
+  dependency in a member crate — a published crate needs the version alongside the path.
 - `cloo-core` performs no I/O. If a change wants to read a file or a socket there, it belongs
   in `cloo-server` or `cloo-client` instead.
 - The binary crate stays thin. Logic that could be tested without a terminal belongs in a

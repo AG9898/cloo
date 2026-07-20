@@ -11,6 +11,13 @@ authors = ["AG9898"]
 repository = "https://github.com/AG9898/cloo"
 homepage = "https://github.com/AG9898/cloo"
 
+[workspace.dependencies]
+cloo-proto = { path = "crates/cloo-proto", version = "0.0.1" }
+cloo-term = { path = "crates/cloo-term", version = "0.0.1" }
+cloo-core = { path = "crates/cloo-core", version = "0.0.1" }
+cloo-server = { path = "crates/cloo-server", version = "0.0.1" }
+cloo-client = { path = "crates/cloo-client", version = "0.0.1" }
+
 [profile.release]
 lto = true
 codegen-units = 1

@@ -42,8 +42,10 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Nothing yet.** The workspace contains a single placeholder binary with no functionality and
-no tests. This section gets rewritten as M0 lands.
+**Nothing yet.** All six crates exist, but the five libraries are empty scaffolds and the
+binary is a placeholder, so `cargo test --workspace` runs zero tests across six targets. That
+zero-test pass is still worth running — it proves the workspace graph resolves. This section
+gets rewritten as M0 lands.
 
 The intended shape, in the order it becomes testable:
 

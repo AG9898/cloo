@@ -17,3 +17,5 @@ name = "cloo"
 path = "src/main.rs"
 
 [dependencies]
+cloo-server.workspace = true
+cloo-client.workspace = true

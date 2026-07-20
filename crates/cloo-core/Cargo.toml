@@ -1,0 +1,16 @@
+[package]
+name = "cloo-core"
+description = "Session, tab, pane, and layout model for the cloo terminal multiplexer."
+keywords = ["terminal", "multiplexer", "layout", "session"]
+categories = ["command-line-utilities"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+cloo-proto.workspace = true
+cloo-term.workspace = true

@@ -5,3 +5,37 @@ version = 4
 [[package]]
 name = "cloo"
 version = "0.0.1"
+dependencies = [
+ "cloo-client",
+ "cloo-server",
+]
+
+[[package]]
+name = "cloo-client"
+version = "0.0.1"
+dependencies = [
+ "cloo-core",
+]
+
+[[package]]
+name = "cloo-core"
+version = "0.0.1"
+dependencies = [
+ "cloo-proto",
+ "cloo-term",
+]
+
+[[package]]
+name = "cloo-proto"
+version = "0.0.1"
+
+[[package]]
+name = "cloo-server"
+version = "0.0.1"
+dependencies = [
+ "cloo-core",
+]
+
+[[package]]
+name = "cloo-term"
+version = "0.0.1"

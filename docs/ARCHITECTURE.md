@@ -53,7 +53,19 @@ boundary, which is what makes the emulation backend replaceable.
 | `cloo-client` | Attach, raw mode, renderer, theming, input encoding | Hold authoritative session state |
 | `cloo` | The binary; client-vs-server dispatch, CLI surface | Contain logic that belongs in a library crate |
 
-**Only `crates/cloo` exists today.** The other five are planned and land across M0–M2.
+All six crates exist in the workspace. `crates/cloo` carries the placeholder CLI; the five
+libraries are scaffolded with the dependency direction wired and their contents land across
+M0–M2.
+
+Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
+manifest, so every member inherits the same path and version:
+
+```
+cloo → { cloo-server, cloo-client } → cloo-core → { cloo-proto, cloo-term }
+```
+
+Never introduce a cycle or a back-edge. `cloo-proto` and `cloo-term` have no intra-workspace
+dependencies at all.
 
 ### Server
 

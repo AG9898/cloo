@@ -11,10 +11,12 @@ worth looking at. It is designed first as a workspace for many concurrent coding
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
 **The project is pre-alpha and mostly unwritten.** Planning is complete and the design is
-settled; the only code is a placeholder binary that prints help and exits. Agents here are
-implementing the M0–M7 roadmap in [`docs/PRD.md`](docs/PRD.md), starting from a bare workspace.
+settled; the only code is a placeholder binary that prints help and exits, plus five scaffolded
+library crates. Agents here are implementing the M0–M7 roadmap in
+[`docs/PRD.md`](docs/PRD.md), starting from a near-bare workspace.
 
-The canonical task queue is [`docs/workboard.json`](docs/workboard.json). It is currently empty.
+The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
+M0–M7 tasks.
 
 ---
 
@@ -59,7 +61,12 @@ Run the fast suite before marking any task done. Never skip a fast check.
 
 ```
 crates/
-  cloo/          The binary — currently the only crate that exists
+  cloo/          The binary — client-vs-server dispatch, CLI surface
+  cloo-proto/    Wire types, framing, handshake version
+  cloo-term/     Emulation wrapper — the ONLY crate importing alacritty_terminal
+  cloo-core/     Session/tab/pane model, layout tree, keymap, config
+  cloo-server/   Daemon: socket, PTY reactor, damage tracking
+  cloo-client/   Attach, raw mode, renderer, theming, input encoding
 docs/
   INDEX.md          Documentation navigation map
   PRD.md            Product scope, users, M0–M7 roadmap
@@ -78,8 +85,10 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-Five more crates are planned and land across M0–M2: `cloo-proto`, `cloo-term`, `cloo-core`,
-`cloo-server`, `cloo-client`. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+The five libraries are scaffolded with the dependency direction wired; their contents land
+across M0–M2. Dependencies flow one way — `cloo` → {`cloo-server`, `cloo-client`} →
+`cloo-core` → {`cloo-proto`, `cloo-term`} — and are declared in the root
+`[workspace.dependencies]`. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
 
@@ -187,8 +196,8 @@ Targeted edit rules:
 - Only update the status fields of the task currently being worked.
 - Roll back `in_progress → todo` if blocked mid-task and unresolved.
 
-**The board is currently empty.** Tasks are seeded by the project owner. Milestone structure
-lives in [`docs/PRD.md`](docs/PRD.md) — M0 through M7, each independently runnable.
+**The board is seeded with the M0–M7 tasks.** Milestone structure lives in
+[`docs/PRD.md`](docs/PRD.md) — M0 through M7, each independently runnable.
 
 ---
 
@@ -218,7 +227,7 @@ never edit the copies under `.claude/`, `.agents/`, or `.codex/` directly.
 ### Stopping Conditions
 
 Stop and report (do not continue) when:
-- No startable task exists (all are blocked or done) — currently true, the board is empty.
+- No startable task exists (all are blocked or done).
 - A verification command fails and the fix is not obvious.
 - An irreversible action (publishing to npm or crates.io, a `git push --force`) is required and
   the task does not explicitly authorize it.
@@ -312,6 +321,12 @@ Do not reorganize or rewrite existing entries — append only.
 with a 403 from npm's package-name similarity filter (too close to `clone`, `cli`, `clsx`,
 `clui`, and others). The name is now `clooterminal`, with `cloo` preserved as the command via
 the `bin` field. Registry availability is not proof a name is publishable.
+
+### 2026-07-20 — Intra-workspace deps carry both a path and a version
+The five library crates are declared once in the root `[workspace.dependencies]` with
+`{ path = "…", version = "0.0.1" }` and pulled in as `cloo-core.workspace = true`. A path-only
+dependency builds locally but makes the crate unpublishable to crates.io, so the version is not
+optional even though nothing is published yet.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into
