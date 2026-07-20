@@ -16,4 +16,4 @@
 
 pub mod pty;
 
-pub use pty::{Pty, PtyConfig, PtyError, PtyReactor, Pump};
+pub use pty::{PaneSnapshot, Pty, PtyConfig, PtyError, PtyReactor, Pump};

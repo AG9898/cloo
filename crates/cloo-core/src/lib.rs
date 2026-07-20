@@ -5,9 +5,11 @@
 //! belongs in `cloo-server` or `cloo-client` instead. Everything here is pure
 //! and unit-testable without a terminal.
 //!
-//! Three modules today:
+//! Four modules today:
 //!
 //! - [`layout`] — the ratio-based binary layout tree and its single layout pass.
+//! - [`grid`] — the emulator-cell to wire-cell conversion, the only place the
+//!   `cloo-term` and `cloo-proto` vocabularies meet.
 //! - [`id`] — monotonic allocators for the `cloo-proto` newtype IDs.
 //! - [`error`] — the crate-local [`LayoutError`].
 //!
@@ -18,9 +20,11 @@
 #![forbid(unsafe_code)]
 
 pub mod error;
+pub mod grid;
 pub mod id;
 pub mod layout;
 
 pub use error::LayoutError;
+pub use grid::{wire_attrs, wire_cell, wire_color, wire_cursor, wire_row, wire_size};
 pub use id::{PaneIdAllocator, SessionIdAllocator, TabIdAllocator};
 pub use layout::{Layout, MIN_PANE_SIZE, Node};

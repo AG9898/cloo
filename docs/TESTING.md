@@ -42,9 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**`cloo-proto`, `cloo-core`, `cloo-term`, the `cloo-server` PTY layer, and the `cloo-client`
-renderer and raw-mode guard.** The binary is still a placeholder, so the workspace run is 90 unit
-tests across five crates, 14 integration tests, and four doctests. This section grows as M0 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 108 unit tests
+across six crates, 21 integration tests, and six doctests. This section grows as M1 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -57,6 +56,10 @@ Covered today in `cloo-core`, all as unit tests:
 - A shrunken area squeezing panes to a one-cell floor rather than dropping them, and a zero-size
   area resolving without a panic.
 - ID allocators being monotonic, non-reusing, resumable, and saturating at `u64::MAX`.
+- The emulator-cell to wire-cell conversion in `grid.rs`: every colour form and rendition flag
+  crossing intact, an invisible cursor becoming "nothing to draw" rather than a hidden shape, and
+  `HollowBlock` degrading to a block. One assertion compares the two crates' attribute bit values
+  directly — it is the tripwire for the duplicated `CellAttrs` layouts drifting apart.
 
 Covered today in `cloo-proto`, all as unit tests:
 
@@ -141,10 +144,32 @@ test process:
   collision cannot overwrite the first guard's saved state.
 - A pipe refused as `NotATerminal`.
 
+Outer-terminal capability detection is a pure function of `TERM` and `COLORTERM`, unit tested in
+`src/outer.rs`: truecolor established only by an explicit signal, a `dumb` or absent `TERM`
+claiming nothing at all, capabilities that need a query-and-reply staying false, and a degenerate
+`winsize` falling back to 80x24 rather than rendering into a zero-sized grid.
+
 These tests share the process-global restore slot, so each takes a module-level `Mutex` first;
 Rust runs integration tests in parallel threads within one binary and two live guards would
 legitimately collide. The pure `termios` transformation is unit tested in `src/raw_mode.rs`
 instead, along with the restore slot's arm/disarm state machine driven on a local instance.
+
+Covered today in the `cloo` binary, as integration tests in `tests/cli.rs`. The command-line
+cases run the binary directly; the smoke-path cases run it with its stdio on a pseudoterminal
+slave, because cloo refuses to start without a terminal and the master side is the only honest
+stand-in for the user's screen:
+
+- `--version`, `--help`, and an unrecognized flag exiting 64 with the flag named — never executed
+  as a program name.
+- Piped stdin refused with "must be run from a terminal", before any child is spawned.
+- A child's output reaching the screen *inside a renderer-built frame*, asserted on the frame
+  preamble rather than on the raw text, which is what distinguishes rendering from forwarding.
+- Typed input on the master reaching the child, and the terminal left cooked after cloo exits.
+- The child's exit code becoming cloo's exit code.
+
+These read until an expected string appears rather than sleeping, with a deadline so a wiring
+regression fails instead of hanging. Command-line parsing and the `$SHELL` fallback are unit
+tested in `src/local.rs`.
 
 The intended shape for the rest, in the order it becomes testable:
 
@@ -184,9 +209,16 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, and every rejection leaving the tree unchanged |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
+| `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, and cursor crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
+| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
+| `crates/cloo-client/src/outer.rs` | Outer terminal | Capability detection from `TERM`/`COLORTERM` and the degenerate-`winsize` fallback |
+| `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
+| `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, and a pipe refused |
+| `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |
+| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, and the one-pane smoke path driven over a pseudoterminal |
 
 ---
 

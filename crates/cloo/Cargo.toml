@@ -19,3 +19,8 @@ path = "src/main.rs"
 [dependencies]
 cloo-server.workspace = true
 cloo-client.workspace = true
+cloo-proto.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+libc.workspace = true

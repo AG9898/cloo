@@ -53,9 +53,9 @@ boundary, which is what makes the emulation backend replaceable.
 | `cloo-client` | Attach, raw mode, renderer, theming, input encoding | Hold authoritative session state |
 | `cloo` | The binary; client-vs-server dispatch, CLI surface | Contain logic that belongs in a library crate |
 
-All six crates exist in the workspace. `crates/cloo` carries the placeholder CLI; the five
-libraries are scaffolded with the dependency direction wired and their contents land across
-M0–M2.
+All six crates exist in the workspace and are wired together end to end as of M0-07: `crates/cloo`
+runs one local pane by composing `cloo-server`'s PTY reactor with `cloo-client`'s renderer. The
+remaining contents land across M1–M2.
 
 Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
 manifest, so every member inherits the same path and version:
@@ -73,6 +73,11 @@ dependencies at all.
 emulation surface from a crate that performs no I/O. This is a shortcut down the graph, not a
 back-edge — the direction is unchanged and no cycle is introduced. The `alacritty_terminal` rule
 is untouched: `cloo-server` names only `cloo-term`'s own types.
+
+`cloo-server` also depends on `cloo-proto` directly, as of M0-07: what it hands a client is wire
+contents, and it is the crate that will speak the protocol over the socket at M1-02. `cloo` takes
+the same dependency for the same reason — it is the composition root and names the geometry it
+passes between the two halves. Both are shortcuts down the graph, not back-edges.
 
 ### Emulation
 
@@ -119,6 +124,13 @@ callers only see genuine errors. And `PtyReactor::resize` resizes the grid *befo
 `TIOCSWINSZ`, so output arriving immediately after the child's `SIGWINCH` lands on a grid that is
 already the right shape; if the `ioctl` then fails, the grid is ahead of the child, which is the
 recoverable direction to be inconsistent in.
+
+`PtyReactor::snapshot` is the other half of the boundary: it captures the whole visible grid as a
+`PaneSnapshot` of wire geometry, `RowUpdate`s, and an optional cursor. Nothing in it describes an
+appearance. The conversion from emulator cells to wire cells lives in `cloo-core::grid` — the one
+crate that sees both vocabularies — and a full capture per frame is the M0 shape, bounded by the
+caller's frame timer rather than by output volume. M1-04 replaces the capture with coalesced
+per-row damage; the type a client applies does not change.
 
 ### Client
 
@@ -182,6 +194,39 @@ async-signal-safe: no allocation, no locking, no `Mutex`. Only one guard may be 
 a second `enter` is refused with `AlreadyActive` rather than overwriting the saved state. Signal
 handlers restore the default disposition and re-raise rather than calling `exit`, so the wait
 status a parent shell sees is the one it expects from a signalled child.
+
+#### Outer terminal
+
+`cloo-client::outer` is what the client knows about the terminal it draws into: its geometry from
+`TIOCGWINSZ` and its capabilities from `TERM` and `COLORTERM`. Detection is a pure function of
+those two values so it is testable without touching the process environment, and it claims only
+what can be established without writing a query sequence and waiting for a reply — everything
+else stays false and takes its documented fallback. Both belong to the client, never to session
+state, which is what keeps a capability difference between two attached clients from becoming
+something the server has to model. A terminal that reports a zero-width or zero-height `winsize`
+gets a conventional 80x24 rather than an error.
+
+### The binary
+
+`crates/cloo` is the composition root and nothing else: it parses the command line and wires the
+two halves together. It holds no session state and emits no escape sequences of its own.
+
+As of M0-07 it runs the M0 smoke path in `local.rs` — one PTY, one grid, one renderer, all
+in-process, with no socket and no detach. The loop is already shaped like the real one: the server
+half owns the PTY and the authoritative grid, the client half owns raw mode and every escape
+sequence, and the binary only moves snapshots one way and input bytes the other. Two ordering
+rules matter. Raw mode is entered *before* the child is spawned, so a failure that is going to
+happen happens while the terminal is still untouched and there is nothing to clean up. And the
+render is driven by a ~60fps frame timer rather than by PTY readiness, so a fast producer
+coalesces into at most one frame per tick — the render-rate cap is architectural from the first
+line of the loop, not a later optimization.
+
+Stdin is read on a dedicated thread rather than through an async descriptor: making descriptor 0
+non-blocking would change a file description the user's shell shares, and a shell left
+non-blocking after cloo exits is a worse bug than a parked thread.
+
+M1-01 turns this loop into the daemon's session task with a real client on the other end of a
+socket, and `cloo attach` / `cloo new` join the CLI surface there.
 
 ### Agent pane metadata and attention
 
@@ -347,7 +392,9 @@ never meant, and the wire carries no generation counter to catch it.
 `serde` and `postcard` are wired up in `cloo-proto` as of M0-02. `alacritty_terminal` is pinned
 at `=0.26.0` in `[workspace.dependencies]` and reaches only `cloo-term`, as of M0-04. `tokio`
 (features `macros`, `net`, `rt`) and `libc` land in `cloo-server` with the PTY reactor as of
-M0-05; the `net` feature is what provides `AsyncFd`, not sockets.
+M0-05; the `net` feature is what provides `AsyncFd`, not sockets. M0-07 adds the `sync` and
+`time` features for the binary's run loop: `sync` carries stdin bytes from the reader thread, and
+`time` is the frame timer that caps the render rate.
 
 `wezterm-term` is the designated fallback emulation backend: more deliberately public API,
 heavier dep tree. Re-evaluate at M2 if the pin hurts. See [`DECISIONS.md`](DECISIONS.md) —

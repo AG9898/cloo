@@ -4,9 +4,9 @@
 >
 > | Track | State |
 > |---|---|
-> | Shipped | Nothing functional. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders — the binary prints help and exits 1. |
-> | In Progress | M0 — cargo workspace scaffold and a PTY rendering through `cloo-term`. See `docs/workboard.json`. |
-> | Planned | M1 — detach and reattach. This is the first real demo. |
+> | Shipped | Nothing published. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders. |
+> | In Progress | M0 — the local one-pane path works in the tree: `cloo` launches `$SHELL`, renders it, and forwards input, with no socket and no detach. See `docs/workboard.json`. |
+> | Planned | M1 — daemon, socket, detach and reattach. This is the first real demo. |
 
 ---
 
@@ -46,7 +46,11 @@ There is no admin role, no accounts, and no multi-tenancy. cloo is a single-user
 
 ### Phase 1 — M0–M1: prove the ownership model
 
-- Spawn a PTY, run a shell, feed output through `cloo-term`, dump the grid.
+- Spawn a PTY, run a shell, feed output through `cloo-term`, dump the grid. **Done.**
+- Wire the three crates together in-process: `cloo` runs `$SHELL` (or a named program) in one
+  full-screen pane, renders it at a capped frame rate, and forwards keystrokes. **Done at M0-07.**
+  No socket, no daemon, no detach — the child dies with the client, and that is the boundary M1
+  moves.
 - Daemonize; Unix socket; one full-screen pane.
 - Client raw mode, damage rendering, input forwarding, terminal restore on exit.
 - `SIGWINCH` → `Resize`.

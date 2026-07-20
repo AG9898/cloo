@@ -33,6 +33,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 
+use cloo_core::grid::{wire_cursor, wire_row, wire_size};
+use cloo_proto::{CursorShape, Point, RowUpdate, Size};
 use cloo_term::{Emulator, TermError, TermSize};
 use tokio::io::unix::AsyncFd;
 
@@ -171,6 +173,16 @@ impl PtyConfig {
     pub fn size(mut self, size: TermSize) -> Self {
         self.size = size;
         self
+    }
+
+    /// Sets the initial grid size from a wire geometry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtyError::Size`] if either dimension is zero. A client that
+    /// cannot describe its own geometry is not something to guess about.
+    pub fn wire_size(self, size: Size) -> Result<Self, PtyError> {
+        Ok(self.size(TermSize::new(size.cols, size.rows)?))
     }
 
     /// The configured grid size.
@@ -391,6 +403,22 @@ pub enum Pump {
     Eof,
 }
 
+/// Everything a client needs to draw one pane from scratch.
+///
+/// This is the server's side of "the server sends contents and geometry, the
+/// client decides what it looks like": nothing here describes an appearance.
+/// Row damage on the wire in M1-04 is the same [`RowUpdate`] type, so an
+/// incremental update and a full resync stay one code path on the client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneSnapshot {
+    /// The pane's geometry.
+    pub size: Size,
+    /// Every visible row, top first.
+    pub rows: Vec<RowUpdate>,
+    /// Where to draw the cursor, or `None` if it should not be drawn.
+    pub cursor: Option<(Point, CursorShape)>,
+}
+
 /// One pane's PTY plus its terminal grid.
 ///
 /// This is the actor body: one Tokio task owns one `PtyReactor` and loops on
@@ -495,6 +523,31 @@ impl PtyReactor {
             buf = &buf[written..];
         }
         Ok(())
+    }
+
+    /// Captures the whole visible grid as wire contents.
+    ///
+    /// A full capture per frame is the M0 shape. It is bounded by the frame
+    /// rate rather than by output volume — the caller renders on a timer, not
+    /// once per [`pump`](Self::pump) — which is the property that matters;
+    /// M1-04 replaces the capture itself with coalesced per-row damage.
+    #[must_use]
+    pub fn snapshot(&self) -> PaneSnapshot {
+        PaneSnapshot {
+            size: wire_size(self.emulator.size()),
+            rows: self
+                .emulator
+                .rows()
+                .iter()
+                .enumerate()
+                .map(|(index, cells)| {
+                    // A grid never has more rows than a `u16` can index: its
+                    // height came from one in the first place.
+                    wire_row(u16::try_from(index).unwrap_or(u16::MAX), cells)
+                })
+                .collect(),
+            cursor: wire_cursor(self.emulator.cursor()),
+        }
     }
 
     /// The pane's grid.

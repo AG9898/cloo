@@ -10,10 +10,10 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha and mostly unwritten.** Planning is complete and the design is
-settled; the only code is a placeholder binary that prints help and exits, plus five scaffolded
-library crates. Agents here are implementing the M0–M7 roadmap in
-[`docs/PRD.md`](docs/PRD.md), starting from a near-bare workspace.
+**The project is pre-alpha.** Planning is complete and the design is settled. M0 is done: `cloo`
+launches `$SHELL` in a single local pane, renders it, and forwards input — in-process, with no
+socket and no detach. Agents here are implementing the rest of the M0–M7 roadmap in
+[`docs/PRD.md`](docs/PRD.md), starting at the daemon.
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
 M0–M7 tasks.
@@ -85,13 +85,12 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-The five libraries are scaffolded with the dependency direction wired; their contents land
-across M0–M2. Dependencies flow one way — `cloo` → {`cloo-server`, `cloo-client`} →
-`cloo-core` → {`cloo-proto`, `cloo-term`} — and are declared in the root
-`[workspace.dependencies]`. `cloo-server` also reaches `cloo-term` directly for the PTY
-reactor's `Emulator`, and `cloo-client` reaches `cloo-proto` directly for the grid cache's wire
-`Cell`s; both skip a level down the graph but neither is a back-edge. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+All six crates are wired together end to end as of M0-07; the rest of their contents land across
+M1–M2. Dependencies flow one way — `cloo` → {`cloo-server`, `cloo-client`} → `cloo-core` →
+{`cloo-proto`, `cloo-term`} — and are declared in the root `[workspace.dependencies]`. Four edges
+skip a level down the graph: `cloo-server` → `cloo-term` for the PTY reactor's `Emulator`, and
+`cloo-server`, `cloo-client`, and `cloo` → `cloo-proto` for wire contents and geometry. None is a
+back-edge. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
 
@@ -277,12 +276,14 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 ```
 
 `cloo-proto` has wire round-trip, framing, and handshake coverage as of M0-02. `cloo-core` has
-table-driven layout tree coverage as of M0-03. `cloo-term` has grid coverage — SGR, alternate
-screen, cursor, resize, scrollback — as of M0-04. `cloo-server` has PTY integration coverage in
-`tests/pty.rs` against a scripted `sh -c` child as of M0-05. `cloo-client` has byte-exact
-renderer coverage and raw-mode restore coverage — normal, error, and panic paths, against a real
-pty in `tests/raw_mode.rs` — as of M0-06. Keymap resolution and config parsing are the next
-things that must get coverage as they land.
+table-driven layout tree coverage as of M0-03, plus the emulator-to-wire cell conversion as of
+M0-07. `cloo-term` has grid coverage — SGR, alternate screen, cursor, resize, scrollback — as of
+M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a scripted `sh -c`
+child as of M0-05. `cloo-client` has byte-exact renderer coverage and raw-mode restore coverage —
+normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as of M0-06. The
+binary has CLI and one-pane smoke coverage in `crates/cloo/tests/cli.rs`, run over a
+pseudoterminal, as of M0-07. Keymap resolution and config parsing are the next things that must
+get coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -390,6 +391,19 @@ only reason a fake grid is testable against an exact expected string. Two rules 
 every SGR sequence leads with a `0` reset (absolute, never a delta from the previous frame), and
 no sequence is emitted for a capability the client did not report — RGB downsamples to the
 256-palette rather than being sent and hoped for.
+
+### 2026-07-20 — Enter raw mode before spawning the child, and never before checking stdin
+`RawMode::stdin()` is what produces "cloo must be run from a terminal", so it has to run before
+anything else that can fail on a non-tty — an earlier `TIOCGWINSZ` on stdout reports "inappropriate
+ioctl" instead, which is a true but useless message. It also has to run before the PTY is spawned,
+so a refusal leaves no child to clean up. A `winsize` that cannot be read is *not* a reason to
+refuse: stdout is asked, then stdin, then a conventional 80x24.
+
+### 2026-07-20 — Draw a final frame after `Pump::Eof`, not only on the frame tick
+The render loop paints on a ~60fps timer, so a child that writes and exits within one tick has its
+last output sitting in the grid, never drawn — `printf hello; exit` shows nothing at all. The loop
+therefore renders once more after EOF if the grid is still dirty. Any future coalescing scheme
+needs the same flush, and `crates/cloo/tests/cli.rs` is what catches its absence.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

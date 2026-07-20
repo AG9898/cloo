@@ -13,6 +13,7 @@ homepage.workspace = true
 
 [dependencies]
 cloo-core.workspace = true
+cloo-proto.workspace = true
 cloo-term.workspace = true
 libc.workspace = true
 tokio.workspace = true

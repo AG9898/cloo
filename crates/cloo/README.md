@@ -2,10 +2,18 @@
 
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
 
-> **Pre-alpha placeholder.** The design is settled but no functionality is implemented yet.
-> Installing this crate gets you a binary that prints its own status and exits.
+> **Pre-alpha.** `cloo` runs one local pane today: it launches `$SHELL`, renders it, and forwards
+> your keystrokes. There are no sessions, no detach, and no splits yet — closing the pane closes
+> cloo. The published 0.0.1 release predates even that and only prints its status.
 >
 > Design doc and roadmap: **https://github.com/AG9898/cloo**
+
+## Usage
+
+```bash
+cloo                       # run $SHELL in a single pane
+cloo <program> [args...]   # run a program in a single pane
+```
 
 ## What it will be
 

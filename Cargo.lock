@@ -89,7 +89,10 @@ name = "cloo"
 version = "0.0.1"
 dependencies = [
  "cloo-client",
+ "cloo-proto",
  "cloo-server",
+ "libc",
+ "tokio",
 ]
 
 [[package]]
@@ -122,6 +125,7 @@ name = "cloo-server"
 version = "0.0.1"
 dependencies = [
  "cloo-core",
+ "cloo-proto",
  "cloo-term",
  "libc",
  "tokio",
