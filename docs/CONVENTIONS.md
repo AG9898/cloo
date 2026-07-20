@@ -90,6 +90,10 @@ crates/
 - Raw mode and termios changes must be restored on **every** exit path, including panic and
   signal. A client that leaves the user's terminal in raw mode is a critical bug.
 - Escape sequences are emitted through the renderer, never printed ad hoc.
+- Outer-terminal effects use typed, capability-gated renderer APIs. Do not forward arbitrary
+  OSC/DCS bytes from a pane to the user's terminal.
+- Pane attention changes come from explicit commands, lifecycle events, bells, or opt-in adapters.
+  Never infer agent state by matching text in a rendered grid or transcript.
 
 ### Configuration
 
@@ -121,6 +125,8 @@ Full testing guide: [`TESTING.md`](TESTING.md)
 - Never emit a render update per PTY read — coalesce and cap.
 - Never change a wire type without bumping the handshake version.
 - Never leave the terminal in raw mode on any exit path.
+- Never screen-scrape a harness TUI to infer its state.
+- Never bypass renderer capability checks by forwarding arbitrary OSC/DCS bytes.
 - Never add Windows-specific code. Out of scope for v1.
 - Never bulk-rewrite `docs/workboard.json` — targeted edits only.
 - Never commit secrets or credentials.

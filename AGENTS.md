@@ -7,8 +7,8 @@
 ## Overview
 
 cloo is a client-server terminal multiplexer in Rust — tmux's functionality with an interface
-worth looking at. A daemon owns the PTYs and all session state; thin clients attach over a Unix
-socket and render.
+worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
+A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
 **The project is pre-alpha and mostly unwritten.** Planning is complete and the design is
 settled; the only code is a placeholder binary that prints help and exits. Agents here are
@@ -65,9 +65,12 @@ docs/
   PRD.md            Product scope, users, M0–M7 roadmap
   ARCHITECTURE.md   Topology, crate boundaries, wire protocol, layout
   CONVENTIONS.md    Rust standards and hard never/always rules
-  DECISIONS.md      Decision log — 5 resolved, 4 open (all visual, deferred to M2)
+  DECISIONS.md      Decision log — resolved architecture and visual decisions
   ENV_VARS.md       Environment variable matrix
   TESTING.md        Test strategy and inventory
+  STYLEGUIDE.md     Terminal chrome visual language and fallbacks
+  AGENT_WORKFLOWS.md  Harness profiles, attention, and compatibility contract
+  V1_TASK_DRAFT.md  Proposed bounded implementation tasks for the v1 CLI
   workboard.json    Canonical task queue
   workboard.schema.json  JSON Schema for the queue
   workboard.md      Workboard field definitions and usage rules
@@ -100,6 +103,9 @@ The constraints that matter most day to day:
 - **Damage is coalesced and render rate capped (~60fps).** Architectural, not a later
   optimization. A large `cat` is the classic multiplexer killer.
 - **The wire handshake is versioned.** Bump it on every protocol change.
+- **Harness state is explicit.** Never infer Codex or Claude state by screen-scraping a grid.
+- **Outer-terminal effects are allowlisted.** Never blindly forward OSC/DCS bytes around the
+  renderer; client capability and local policy decide whether an effect is applied.
 
 Full topology, crate responsibilities, and protocol: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
 
@@ -152,6 +158,8 @@ the code change — never defer a doc update to a follow-up task.
 | New architectural question raised | [`docs/DECISIONS.md`](docs/DECISIONS.md) — add OPEN-XX |
 | Architectural decision resolved | [`docs/DECISIONS.md`](docs/DECISIONS.md) — move to Resolved |
 | Test file added, removed, or pattern changed | [`docs/TESTING.md`](docs/TESTING.md) |
+| Terminal chrome, visual state, or degradation behavior changed | [`docs/STYLEGUIDE.md`](docs/STYLEGUIDE.md) |
+| Harness profile, attention, or compatibility contract changed | [`docs/AGENT_WORKFLOWS.md`](docs/AGENT_WORKFLOWS.md) |
 | Product scope, milestones, or success criteria changed | [`docs/PRD.md`](docs/PRD.md) |
 | Any doc added, removed, renamed, or moved | [`docs/INDEX.md`](docs/INDEX.md) — always |
 | Constraint or gotcha discovered during a task | This file (`AGENTS.md`) — append to Discoveries |
@@ -215,9 +223,6 @@ Stop and report (do not continue) when:
 - A verification command fails and the fix is not obvious.
 - An irreversible action (publishing to npm or crates.io, a `git push --force`) is required and
   the task does not explicitly authorize it.
-- A task would resolve one of the four open visual decisions in
-  [`docs/DECISIONS.md`](docs/DECISIONS.md). Those are deferred to M2 by intent and are the
-  project owner's to make.
 - A task would require importing `alacritty_terminal` outside `cloo-term`, or otherwise
   violating a constraint in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Report the conflict
   rather than working around it.

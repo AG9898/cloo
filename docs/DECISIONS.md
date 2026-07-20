@@ -54,79 +54,8 @@ What existing code or docs does this affect?>
 
 ## Open Decisions
 
-All four open decisions are visual, and all four are **deliberately deferred to M2**, when
-there are actual borders on screen to judge. Resolving them earlier means guessing.
-
-### OPEN-01 — Focus signaling and border treatment
-
-**Question:** How does a focused pane distinguish itself — border weight/color, dimming of
-unfocused panes, or both?
-
-**Context:** This is the single most visible surface in cloo and the most direct expression of
-why the project exists. Dimming reads well in isolation but fights with applications that set
-their own backgrounds, which is common (editors, pagers, TUIs). Border-only is safer but less
-immediately legible at a glance across many panes.
-
-**Options under consideration:**
-1. **Border only** — weight and/or color change on the focused pane. Tradeoff: safe, composes
-   with any app, but weaker peripheral signal.
-2. **Dim unfocused panes** — reduce contrast on everything but the focus. Tradeoff: strongest
-   signal, but conflicts with app-set backgrounds and can look broken in some TUIs.
-3. **Both, with dimming configurable** — border always, dimming opt-in. Tradeoff: more config
-   surface and two code paths to keep correct.
-
-**Blocking:** Nothing currently blocked. Becomes blocking at M2 when splits land.
-
-**See also:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — chrome is rendered client-side, so this
-decision touches only `cloo-client`.
-
----
-
-### OPEN-02 — Status bar scope
-
-**Question:** How much chrome does the status bar carry, and is it always-on or contextual?
-
-**Context:** Always-on costs a permanent row of vertical space, which is real estate users
-notice. Contextual (appearing on tab switch, prefix press, or transient events) preserves space
-but risks feeling unpredictable. tmux is always-on by default; zellij ships a fairly heavy bar.
-
-**Options under consideration:**
-1. **Always-on, minimal** — one row, tabs plus session name. Tradeoff: predictable, costs a row.
-2. **Contextual** — appears on prefix or tab change, fades out. Tradeoff: reclaims the row, but
-   motion and timing must be right or it feels twitchy.
-3. **Configurable, always-on default** — Tradeoff: more surface to test at M4.
-
-**Blocking:** Nothing currently blocked. Becomes blocking at M3 when tabs land.
-
----
-
-### OPEN-03 — Theming and palette inheritance
-
-**Question:** Which built-in themes ship, and how does cloo inherit the user's existing
-terminal palette rather than clashing with it?
-
-**Context:** A multiplexer that imposes its own colors on top of a carefully configured terminal
-is exactly the kind of thing that makes people uninstall it. base16 and terminal-palette
-inheritance are the obvious mechanisms. The constraint that every choice must survive a plain
-16-color TTY interacts directly with this.
-
-**Blocking:** Nothing currently blocked. Becomes blocking at M4.
-
----
-
-### OPEN-04 — Motion vocabulary
-
-**Question:** Which transitions get animated (split, close, focus change, tab switch), and what
-is the frame budget for each?
-
-**Context:** Motion is the thing no existing multiplexer does, so it is a genuine
-differentiator — and it is the easiest possible place to make cloo feel slow. Animation must be
-frame-budgeted and interruptible, with a reduce-motion setting. See the Known Risks section of
-[`ARCHITECTURE.md`](ARCHITECTURE.md).
-
-**Blocking:** Nothing currently blocked. Becomes blocking at M2 (split/close) and M4 (polish).
-
----
+There are no open architectural decisions. The visual decisions once deferred to M2 were resolved
+by the project owner on 2026-07-20 and are recorded below.
 
 ## Resolved Decisions
 
@@ -235,3 +164,114 @@ superseded by this entry.
 
 **Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md) — Deployment Targets. `npm/package.json`.
 Root `README.md` install section.
+
+---
+
+### RESOLVED-06 — Focus uses an accent border and dimmed neighbors
+
+**Resolved:** 2026-07-20
+
+**Decision:** Render the focused pane with the active theme accent border and reduce contrast on
+unfocused panes. Dimming is configurable and must preserve text readability; focus is not an
+attention signal.
+
+**Why:** In a dense agent workspace, an accent border alone is too weak to locate the active pane
+quickly. The combination follows the approved visual handoff while a no-dim option protects
+accessibility and applications with strong backgrounds.
+
+**Alternatives rejected:** Border-only focus was safer but too subtle at high pane counts;
+mandatory dimming would make cloo hostile to some TUIs and users.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), `cloo-client` pane chrome and config.
+
+---
+
+### RESOLVED-07 — Always-on status bar with a minimal default
+
+**Resolved:** 2026-07-20
+
+**Decision:** cloo always renders a one-row status bar. The required default is a minimal flat
+layout; a segmented powerline presentation is a configurable enhancement with a glyph fallback.
+
+**Why:** Agent workflows need a persistent session, tab, prefix, and attention summary. One
+predictable row is a worthwhile density cost and avoids a contextual UI that appears too late.
+
+**Alternatives rejected:** A contextual bar hides the information most useful when coordinating
+many panes. A permanently heavy powerline bar wastes cells and depends too much on font glyphs.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), `cloo-client`, M3 status-bar scope.
+
+---
+
+### RESOLVED-08 — Storm reference theme with palette inheritance
+
+**Resolved:** 2026-07-20
+
+**Decision:** Ship `storm` as the reference theme and support `night`, `gruvbox`, and `nord` as
+named theme sets. Configuration may inherit the user terminal palette; all themes must map to a
+deliberate 16-color fallback.
+
+**Why:** The approved handoff supplies a coherent dark monospace visual language, while palette
+inheritance prevents cloo chrome from fighting an existing terminal setup.
+
+**Alternatives rejected:** A fixed palette would look polished only in isolation; deferring the
+palette would leave focus and attention styling without a canonical semantic mapping.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), M4 theme configuration and renderer tokens.
+
+---
+
+### RESOLVED-09 — Short, interruptible motion vocabulary
+
+**Resolved:** 2026-07-20
+
+**Decision:** Focus, split, close, and overlay transitions target 120ms, remain within the render
+frame budget, are interruptible, and obey a reduce-motion setting. Input and resize always win.
+
+**Why:** Motion should make layout changes legible without delaying an active harness or creating
+visible renderer backlog.
+
+**Alternatives rejected:** No motion loses a key part of cloo's visual identity; longer or
+uninterruptible animations make a terminal multiplexer feel slow.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), `cloo-client`, M2 and M4 implementation.
+
+---
+
+### RESOLVED-10 — Explicit, provenance-aware harness state
+
+**Resolved:** 2026-07-20
+
+**Decision:** Pane attention state is server-owned, explicitly set, and carries its source.
+Lifecycle events, bells, manual marks, and opt-in local adapters are valid sources; rendered
+terminal text is never a source.
+
+**Why:** Agent TUIs change quickly and may be localized, themed, or running in an alternate
+screen. Screen-scraping would be fragile and would incorrectly make a client-rendered view part
+of authoritative session state.
+
+**Alternatives rejected:** Process-name inference and transcript matching are convenient-looking
+but unreliable. Requiring every harness to implement an adapter would make generic panes worse.
+
+**Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md),
+`cloo-core`, `cloo-proto`, and `cloo-server`.
+
+---
+
+### RESOLVED-11 — Capability-gated outer-terminal effects
+
+**Resolved:** 2026-07-20
+
+**Decision:** Interpret notifications, titles, clipboard writes, hyperlinks, and graphics as
+typed, versioned outer-terminal effects. Each attached client applies only the allowlisted effects
+its capabilities and local policy permit; arbitrary OSC/DCS passthrough is forbidden.
+
+**Why:** A server-owned grid and multiple differently capable clients cannot safely relay raw
+escape sequences. Typed effects preserve deliberate degradation and terminal restoration.
+
+**Alternatives rejected:** Blind passthrough is incompatible with chrome ownership and can leak
+terminal state. Treating all outer-terminal features as unsupported would unnecessarily degrade
+notifications and accessibility-friendly clipboard workflows.
+
+**Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md),
+`cloo-term`, `cloo-proto`, `cloo-server`, and `cloo-client`.

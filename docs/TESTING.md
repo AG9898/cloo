@@ -59,9 +59,22 @@ The intended shape, in the order it becomes testable:
 - **`cloo-client`** — renderer diffing against a fake grid. Raw-mode and terminal-restore
   behavior is hard to assert automatically and is verified manually.
 
-**Not covered, by intent:** visual/aesthetic output, animation timing, and real-terminal
-compatibility across emulators. Those are verified by using cloo (see the dogfooding success
-criterion in [`PRD.md`](PRD.md)).
+### Agent-harness compatibility
+
+Compatibility is tested in two layers. Deterministic fixture programs emit alternate-screen,
+bracketed-paste, extended-key, focus, SGR mouse, OSC 52/8, notification/title, and resize
+sequences; they cover cloo's semantics without requiring a vendor login or a moving CLI release.
+Manual smoke runs of installed Codex and Claude Code cover one pane, splits, zoom, resize,
+detach/reattach, large paste, mouse, and attention notification. Record the harness and terminal
+versions in the test result when a manual behavior changes.
+
+The fixture suite must prove that unsupported outer-terminal effects degrade silently and that
+arbitrary OSC/DCS payloads cannot bypass renderer policy. Codex terminal graphics are an optional
+manual check only; their absence must not fail core compatibility.
+
+**Not covered, by intent:** aesthetic judgment and exact animation timing. The style guide is
+implemented with renderer-level assertions where practical and judged by dogfooding. Real-terminal
+compatibility beyond the deterministic fixture suite is verified through the manual matrix above.
 
 ---
 
@@ -90,6 +103,8 @@ criterion in [`PRD.md`](PRD.md)).
   the commit.
 - Tests must not leave stray daemons or sockets behind. Integration tests clean up
   `$XDG_RUNTIME_DIR/cloo/` entries they create.
+- Compatibility fixtures must never depend on a live Codex or Claude account. Vendor CLIs are
+  manual smoke-test targets, not deterministic test dependencies.
 
 ### Patterns
 
