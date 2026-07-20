@@ -42,11 +42,23 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**`cloo-proto` only.** The other four libraries are still scaffolds and the binary is a
-placeholder, so the workspace run is 13 tests in one crate across six targets. This section
-grows as M0 lands.
+**`cloo-proto` and `cloo-core`.** The other three libraries are still scaffolds and the binary
+is a placeholder, so the workspace run is 37 tests across two crates. This section grows as M0
+lands.
 
-Covered today, all as unit tests in `cloo-proto`:
+Covered today in `cloo-core`, all as unit tests:
+
+- Every layout operation, table-driven: split on both axes, nested and mixed-axis splits, close
+  and parent collapse at every depth, ratio-based resize, and the flattened layout pass.
+- Rectangles tiling their area exactly, asserted on an odd-sized area so rounding is exercised.
+- Every rejection path leaving the layout unchanged, compared structurally against a clone taken
+  before the call: minimum-size violations, zero-size areas, extreme ratios, non-finite ratios,
+  unknown panes, duplicate panes, and closing the last pane.
+- A shrunken area squeezing panes to a one-cell floor rather than dropping them, and a zero-size
+  area resolving without a panic.
+- ID allocators being monotonic, non-reusing, resumable, and saturating at `u64::MAX`.
+
+Covered today in `cloo-proto`, all as unit tests:
 
 - Round-trip encode/decode for every `ClientMessage` and `ServerMessage` variant, and for the
   value types they carry, asserting the decode consumes exactly the frame it was given.
@@ -59,8 +71,8 @@ Covered today, all as unit tests in `cloo-proto`:
 
 The intended shape for the rest, in the order it becomes testable:
 
-- **`cloo-core`** — the bulk of unit coverage. Layout tree operations, keymap resolution, and
-  config parsing are all pure and testable without a terminal.
+- **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
+  pure and testable without a terminal.
 - **`cloo-term`** — feed known byte sequences, assert resulting grid state. This is the seam
   where `alacritty_terminal` upgrades will break things, so coverage here is what makes the
   pinned dependency safe to bump.
@@ -94,6 +106,9 @@ compatibility beyond the deterministic fixture suite is verified through the man
 |---|---|---|
 | `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
+| `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, and every rejection leaving the tree unchanged |
+| `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
+| `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
 
 ---
 

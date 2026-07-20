@@ -191,24 +191,44 @@ inside tmux and Zellij according to the upstream documentation.
 
 ## Layout
 
-Binary tree of containers and leaves:
+Binary tree of containers and leaves, implemented in `cloo-core::layout` as of M0-03:
 
 ```rust
 enum Node {
     Leaf(PaneId),
-    Split { dir: Direction, ratio: f32, left: Box<Node>, right: Box<Node> },
+    Split { dir: Direction, ratio: f32, first: Box<Node>, second: Box<Node> },
 }
 ```
 
-Splitting replaces a leaf with a `Split` holding the old leaf plus a new one. Closing a pane
-collapses its parent. Resize walks the tree adjusting `ratio`, then a single layout pass assigns
-each leaf a concrete `Rect` and issues `TIOCSWINSZ` to that pane's PTY.
+`ratio` is the fraction of the parent's extent given to `first` — the left child for
+`Horizontal`, the top child for `Vertical` — and is always inside the open interval `(0.0, 1.0)`.
+
+`Layout::split` replaces a leaf with a `Split` holding the old leaf as `first` and the new pane
+as `second`. `Layout::close` collapses the parent split, promoting the sibling *subtree* into
+the parent's slot. `Layout::set_ratio` is the whole of resize: it walks to the pane's nearest
+ancestor split on the requested axis and rewrites one `f32`. Nothing stores cell counts, so
+nothing else needs updating.
+
+`Layout::resolve` is the single layout pass. It flattens the tree into one `PaneRect` per leaf,
+tiling the area exactly — no gaps, no overlap, no borders, since chrome is drawn client-side.
+The server issues `TIOCSWINSZ` from those rects and puts them on the wire as a `LayoutSnapshot`.
 
 Two rules that are easy to get wrong:
 
 - **Store ratios, not cell counts.** This is what makes layout survive a terminal resize sanely.
 - **Enforce a minimum pane size** and reject splits that would violate it, or you will create
-  zero-width PTYs and correspondingly confusing shell behavior.
+  zero-width PTYs and correspondingly confusing shell behavior. `MIN_PANE_SIZE` is 20x3 cells.
+  Every rejection — unknown pane, duplicate pane, out-of-range ratio, too small, last pane —
+  returns a `LayoutError` and leaves the tree byte-for-byte unchanged.
+
+The minimum is enforced at *split* time only. A layout pass over an area that shrank below the
+minimum squeezes panes toward a floor of one cell per axis rather than dropping them: a resize
+must always produce a drawable answer, and the ratios are still there when the terminal grows
+back.
+
+IDs are handed out by the monotonic allocators in `cloo-core::id` and are **never reused within
+a session**. A recycled `PaneId` would let a stale client message land on a pane the sender
+never meant, and the wire carries no generation counter to catch it.
 
 ---
 
