@@ -68,4 +68,6 @@ Each `tasks[]` item:
 - If blocked mid-task and unresolved, revert `in_progress -> todo` and set `blocked_by`.
 - Never bulk-rewrite the board; use targeted edits scoped to the active task.
 - Keep `last_updated` current whenever `docs/workboard.json` changes.
-
+- **V1 context budget:** every task must be narrow enough that a fresh agent can finish with at
+  least 25% of its context remaining. If investigation expands a task beyond one primary crate or
+  surface, split it before implementation rather than carrying the extra scope forward.
