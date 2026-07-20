@@ -60,7 +60,8 @@ crates/
   {`cloo-proto`, `cloo-term`}. Never introduce a cycle or a back-edge. Skipping a level *down*
   the graph is allowed when it avoids re-exporting a surface through a crate that has no use for
   it — `cloo-server` depends on `cloo-term` directly so the PTY reactor can own an `Emulator`
-  without `cloo-core` re-exporting one.
+  without `cloo-core` re-exporting one, and `cloo-client` depends on `cloo-proto` directly so the
+  grid cache can store wire `Cell`s without `cloo-core` re-exporting the message surface.
 - Intra-workspace dependencies are declared once in the root `[workspace.dependencies]` and
   pulled into members with `cloo-core.workspace = true`. Never write a bare `path = "../…"`
   dependency in a member crate — a published crate needs the version alongside the path.
@@ -112,8 +113,17 @@ crates/
 - A resize is two operations — grid then `TIOCSWINSZ` — and must be issued in that order behind
   one function. Never expose a path that does only one of them.
 - Raw mode and termios changes must be restored on **every** exit path, including panic and
-  signal. A client that leaves the user's terminal in raw mode is a critical bug.
-- Escape sequences are emitted through the renderer, never printed ad hoc.
+  signal. A client that leaves the user's terminal in raw mode is a critical bug. Restoration is
+  by ownership — an RAII guard whose `Drop` restores — plus a panic hook and signal handlers
+  reading a process-global slot the guard arms. A signal handler may call only async-signal-safe
+  functions: no allocation, no locking, and never a `Mutex`.
+- Escape sequences are emitted through the renderer, never printed ad hoc. Rendering produces an
+  owned byte buffer rather than writing to a descriptor, which is what makes a frame assertable
+  against an exact expected string.
+- An SGR sequence always leads with a `0` reset so it describes the target rendition absolutely.
+  Never emit a rendition as a delta from whatever the previous frame left behind.
+- Never emit a sequence for a capability the client did not report. Pick the documented fallback
+  instead — a `Color::Rgb` without `truecolor` downsamples to the 256-colour palette.
 - Outer-terminal effects use typed, capability-gated renderer APIs. Do not forward arbitrary
   OSC/DCS bytes from a pane to the user's terminal.
 - Pane attention changes come from explicit commands, lifecycle events, bells, or opt-in adapters.

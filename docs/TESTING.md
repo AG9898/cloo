@@ -42,9 +42,9 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**`cloo-proto`, `cloo-core`, `cloo-term`, and the `cloo-server` PTY layer.** `cloo-client` is
-still a scaffold and the binary is a placeholder, so the workspace run is 64 unit tests across
-four crates, 8 PTY integration tests, and two doctests. This section grows as M0 lands.
+**`cloo-proto`, `cloo-core`, `cloo-term`, the `cloo-server` PTY layer, and the `cloo-client`
+renderer and raw-mode guard.** The binary is still a placeholder, so the workspace run is 90 unit
+tests across five crates, 14 integration tests, and four doctests. This section grows as M0 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -107,14 +107,54 @@ only tests in the workspace that fork a process:
 The `cloo-server` unit tests in `src/pty.rs` are pure by rule: config defaults, the `winsize`
 conversion, and error conversion. Nothing that spawns.
 
+Covered today in `cloo-client`. The renderer is a pure function into a byte buffer, so every
+frame is asserted against an exact expected string rather than eyeballed — all unit tests:
+
+- A blank frame, a styled run, and a mid-row style change, byte for byte. The mid-row case is the
+  one that proves an SGR sequence leads with a reset instead of inheriting the previous cell's
+  rendition.
+- Rendering the same grid twice producing identical bytes, which is what catches a buffer that
+  was not cleared between frames.
+- Every rendition flag having a code and emitting in a fixed order, both colour selectors, and
+  every cursor shape mapping to a distinct DECSCUSR sequence.
+- Truecolor emitted only when the client reported it, and downsampled to the palette otherwise —
+  asserted on the specific palette entries, including that true black and white take the exact
+  cube entries rather than the greyscale ramp.
+- The cursor hidden for the whole paint and placed, shaped, and shown only after the reset; and
+  no cursor message leaving it hidden.
+- Row updates rejected out of range and at the wrong width, each compared against a clone taken
+  before the call to prove the grid is unchanged.
+- Resize keeping the overlapping cells and blanking the rest, a zero-sized grid rendering without
+  a panic, and multi-byte characters surviving the render intact.
+
+Raw-mode behaviour needs a real tty, so it lives in `crates/cloo-client/tests/raw_mode.rs`, which
+opens a pseudoterminal pair and drives the slave side. Three of the four restore paths are
+asserted automatically; only the signal path is still manual, since asserting it means killing the
+test process:
+
+- Entering raw mode actually clearing `ECHO`, `ICANON`, and `ISIG`, and drop restoring the exact
+  original flag words — not merely "some cooked state".
+- An explicit `restore` reporting success and releasing the global slot, and the following `Drop`
+  being a no-op.
+- An error unwinding past a live guard, and a panic inside one, both leaving the terminal cooked.
+- A second guard refused with `AlreadyActive` while leaving its own terminal untouched, so a
+  collision cannot overwrite the first guard's saved state.
+- A pipe refused as `NotATerminal`.
+
+These tests share the process-global restore slot, so each takes a module-level `Mutex` first;
+Rust runs integration tests in parallel threads within one binary and two live guards would
+legitimately collide. The pure `termios` transformation is unit tested in `src/raw_mode.rs`
+instead, along with the restore slot's arm/disarm state machine driven on a local instance.
+
 The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
   pure and testable without a terminal.
 - **`cloo-server`** — socket-level integration tests join the PTY ones at M1. Slower; keep the
   count deliberate.
-- **`cloo-client`** — renderer diffing against a fake grid. Raw-mode and terminal-restore
-  behavior is hard to assert automatically and is verified manually.
+- **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06. Incremental
+  diffing against previous frames arrives with damage coalescing at M1-04. Only the signal
+  restore path stays manual.
 
 ### Agent-harness compatibility
 

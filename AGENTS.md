@@ -89,7 +89,8 @@ The five libraries are scaffolded with the dependency direction wired; their con
 across M0–M2. Dependencies flow one way — `cloo` → {`cloo-server`, `cloo-client`} →
 `cloo-core` → {`cloo-proto`, `cloo-term`} — and are declared in the root
 `[workspace.dependencies]`. `cloo-server` also reaches `cloo-term` directly for the PTY
-reactor's `Emulator`, which skips a level down the graph but is not a back-edge. See
+reactor's `Emulator`, and `cloo-client` reaches `cloo-proto` directly for the grid cache's wire
+`Cell`s; both skip a level down the graph but neither is a back-edge. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
@@ -278,8 +279,10 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 `cloo-proto` has wire round-trip, framing, and handshake coverage as of M0-02. `cloo-core` has
 table-driven layout tree coverage as of M0-03. `cloo-term` has grid coverage — SGR, alternate
 screen, cursor, resize, scrollback — as of M0-04. `cloo-server` has PTY integration coverage in
-`tests/pty.rs` against a scripted `sh -c` child as of M0-05. Keymap resolution and config
-parsing are the next things that must get coverage as they land.
+`tests/pty.rs` against a scripted `sh -c` child as of M0-05. `cloo-client` has byte-exact
+renderer coverage and raw-mode restore coverage — normal, error, and panic paths, against a real
+pty in `tests/raw_mode.rs` — as of M0-06. Keymap resolution and config parsing are the next
+things that must get coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -373,6 +376,20 @@ leaves a zombie on drop by default. The master is also set close-on-exec: a chil
 writable master keeps the descriptor alive after the parent closes its copy, and reads on the
 parent side then never see EOF. `tests/pty.rs` asserts the reap with `kill(pid, 0)`, which still
 succeeds for a zombie and so actually catches the bug.
+
+### 2026-07-20 — A signal handler cannot borrow the raw-mode guard
+Restoring the terminal on `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` means the saved `termios` has to
+live in a process-global slot, not only in the RAII guard, and the handler may call only
+async-signal-safe functions — `tcsetattr` qualifies, allocating or locking does not. The slot is a
+three-state atomic so a handler firing mid-arm reads nothing, and only one guard may be armed per
+process, which is why `cloo-client`'s pty-backed tests take a module `Mutex` before entering.
+
+### 2026-07-20 — Render frames are asserted byte for byte, so keep them deterministic
+`Renderer::render_full` returns an owned buffer instead of writing to a descriptor, which is the
+only reason a fake grid is testable against an exact expected string. Two rules keep it that way:
+every SGR sequence leads with a `0` reset (absolute, never a delta from the previous frame), and
+no sequence is emitted for a capability the client did not report — RGB downsamples to the
+256-palette rather than being sent and hoped for.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

@@ -128,6 +128,61 @@ and layout geometry; the client decides how borders, status bar, and focus treat
 
 That boundary is why theming never touches session state.
 
+`cloo-client` also depends on `cloo-proto` directly, as of M0-06: the client's grid cache stores
+wire `Cell`s and applies wire `RowUpdate`s, and routing those through `cloo-core` would mean
+re-exporting the whole message surface from a crate that has no rendering concern. Like
+`cloo-server` → `cloo-term`, this is a shortcut down the graph, not a back-edge.
+
+#### Renderer
+
+`cloo-client::renderer` is two types. `Grid` is the client's cache of one pane's visible cells:
+row-major, always exactly `rows * cols` cells, and mutated only by replacing a whole row —
+matching the damage unit on the wire, so applying an update is a `copy_from_slice`. A row update
+whose row or width disagrees with the cache is rejected as a `RenderError` rather than partly
+applied, because that disagreement means a resize crossed a damage message in flight and the
+client should resync instead of drawing a guess. A zero-width or zero-height grid is legal: the
+layout pass can produce one mid-resize, and a renderer that panicked on it would be the worse
+failure.
+
+`Renderer` turns a grid into bytes. It is a pure function of grid, cursor, and `TermCaps` into an
+owned buffer — it never writes to a descriptor, which is what lets a fake grid be rendered in a
+unit test against an exact expected byte string. The caller writes the buffer wherever it likes.
+
+Three rendering invariants:
+
+- **Frame order is hide, clear, paint, reset, place, show.** Nothing is ever seen half-drawn.
+- **Every SGR sequence leads with a `0` reset**, so it describes the target rendition absolutely
+  rather than as a delta. A dropped or reordered frame cannot leave a cell wearing a stale
+  attribute. Runs of identical style still emit one sequence, not one per cell.
+- **A capability the client does not have is never emitted.** A `Color::Rgb` on a terminal
+  without `truecolor` is downsampled to the nearest 256-palette entry — the greyscale ramp for
+  near-greys, the 6x6x6 cube otherwise — rather than sent and hoped for.
+
+Escape sequences are emitted only from this module. A pane's bytes reach the outer terminal
+re-rendered from parsed cells, never forwarded, so no pane can drive the user's terminal through
+the renderer.
+
+#### Raw mode
+
+`cloo-client::raw_mode::RawMode` is an RAII guard over one terminal descriptor. Restoration is by
+ownership, matching the PTY layer, and covers four paths with the same restore:
+
+| Path | Mechanism |
+|---|---|
+| Normal | `RawMode::restore`, or `Drop` if the caller never calls it |
+| Error | `Drop` while an error unwinds out of the client |
+| Panic | a panic hook installed on first entry, chained to the previous hook |
+| Signal | `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT` handlers that restore, then re-raise |
+
+The panic hook and the signal handlers cannot borrow the guard, so the saved `termios` also lives
+in a process-global restore slot that the guard arms on entry and disarms on restore. The slot is
+a three-state atomic (`IDLE`/`ARMING`/`ARMED`) plus the payload, so a handler firing mid-arm sees
+`ARMING` and reads nothing. A handler's only libc call is `tcsetattr`, which POSIX lists as
+async-signal-safe: no allocation, no locking, no `Mutex`. Only one guard may be armed per process;
+a second `enter` is refused with `AlreadyActive` rather than overwriting the saved state. Signal
+handlers restore the default disposition and re-raise rather than calling `exit`, so the wait
+status a parent shell sees is the one it expects from a signalled child.
+
 ### Agent pane metadata and attention
 
 The server owns a pane's explicit metadata: user-visible name, optional task label, working

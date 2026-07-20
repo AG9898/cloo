@@ -13,3 +13,5 @@ homepage.workspace = true
 
 [dependencies]
 cloo-core.workspace = true
+cloo-proto.workspace = true
+libc.workspace = true
