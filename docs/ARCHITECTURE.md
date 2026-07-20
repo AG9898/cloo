@@ -110,20 +110,56 @@ session state. Expect bugs in PTY/resize *ordering*, not in lock discipline.
 
 ## Wire Protocol
 
-Length-framed postcard over the Unix socket.
+Length-framed postcard over the Unix socket. Implemented in `cloo-proto`.
 
 ```
-Client → Server:  Attach { size, term_caps }  Detach  Input(Vec<u8>)
-                  Mouse(MouseEvent)  Resize(Size)  Command(Action)
+Client → Server:  Attach { protocol_version, size, term_caps, session }
+                  Detach  Input(Vec<u8>)  Mouse(MouseEvent)
+                  Resize(Size)  Command(Action)
 
-Server → Client:  Hello { session, tabs }  Damage { pane, rows: Vec<RowUpdate> }
+Server → Client:  Hello { protocol_version, session, tabs, size }
+                  Refused { reason }
+                  Damage { pane, rows: Vec<RowUpdate> }
                   CursorMoved { pane, pos, shape, visible }
-                  Layout(LayoutSnapshot)  Bell(pane)  Detached  Exit(code)
+                  Layout(LayoutSnapshot)  Bell(pane)  Tabs(Vec<TabSummary>)
+                  Detached  Exit(code)
 ```
+
+### Framing
+
+Each frame is a big-endian `u32` payload length followed by that many bytes of postcard.
+Postcard is not self-delimiting over a stream, so the prefix is what tells a reader it holds a
+whole message. `cloo_proto::encode` produces a complete frame; `decode` takes one off the front
+of a buffer and reports how many bytes it consumed, so a reader drains and calls again.
+
+Two guards matter on the socket path. A partial buffer returns `ProtoError::Incomplete` — read
+more and retry, never an error to report. A length prefix above `MAX_FRAME_LEN` (16 MiB) is
+rejected *before* anything is allocated for it; a frame that large is a desync or a hostile
+peer, not a real message.
+
+### Handshake
 
 **The handshake is versioned from day one.** A stale client will attach to a newer server the
 first time anyone rebuilds mid-session. A clean "version mismatch, reattach" beats a protocol
 desync that presents as a rendering bug.
+
+`PROTOCOL_VERSION` lives in `cloo-proto` and **must be bumped on every change to a wire type.**
+`Attach` carries the client's version and `Hello` echoes the server's, so either side can catch
+a mismatch before interpreting a single message. `check_version` returns
+`ProtoError::VersionMismatch`, whose `Display` output is the user-facing reattach message; the
+server relays it in `Refused { reason }` and closes the connection.
+
+### Types on the wire
+
+IDs are newtypes (`SessionId`, `TabId`, `PaneId`, `ClientId`), serialized transparently as
+`u64`. Damage is carried a whole row at a time (`RowUpdate`) rather than per cell — a row is the
+smallest unit worth the framing overhead and keeps the client's apply step a copy. `CellAttrs`
+is a packed bitfield rather than a struct of `bool`s, because postcard spends a byte per `bool`
+and this rides the render path.
+
+`LayoutSnapshot` is the *flattened* result of a layout pass: each pane's resolved `PaneRect` in
+cells. The authoritative tree of ratios stays in `cloo-core`. Ratios never cross the wire —
+a client has nothing to do with them but draw the answer.
 
 ### Multi-client sizing
 
@@ -184,7 +220,8 @@ Two rules that are easy to get wrong:
 | `tokio` | Async runtime for the PTY reactor and socket | Required |
 | `serde` + `postcard` | Wire serialization and framing | Required |
 
-None are wired up yet — the workspace currently has no dependencies.
+`serde` and `postcard` are wired up in `cloo-proto` as of M0-02. The rest land with their
+milestones.
 
 `wezterm-term` is the designated fallback emulation backend: more deliberately public API,
 heavier dep tree. Re-evaluate at M2 if the pin hurts. See [`DECISIONS.md`](DECISIONS.md) —

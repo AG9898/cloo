@@ -42,17 +42,25 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Nothing yet.** All six crates exist, but the five libraries are empty scaffolds and the
-binary is a placeholder, so `cargo test --workspace` runs zero tests across six targets. That
-zero-test pass is still worth running — it proves the workspace graph resolves. This section
-gets rewritten as M0 lands.
+**`cloo-proto` only.** The other four libraries are still scaffolds and the binary is a
+placeholder, so the workspace run is 13 tests in one crate across six targets. This section
+grows as M0 lands.
 
-The intended shape, in the order it becomes testable:
+Covered today, all as unit tests in `cloo-proto`:
+
+- Round-trip encode/decode for every `ClientMessage` and `ServerMessage` variant, and for the
+  value types they carry, asserting the decode consumes exactly the frame it was given.
+- Back-to-back frames decoding out of a single buffer, which is how a socket reader sees them.
+- Partial buffers reading as `Incomplete` at *every* split point rather than as an error.
+- An oversized length prefix rejected before allocation, and a corrupt payload surfacing as an
+  error rather than a panic.
+- Handshake version match and mismatch, including that the mismatch error names both versions
+  and tells the user to reattach — the acceptance criterion, asserted on the rendered string.
+
+The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — the bulk of unit coverage. Layout tree operations, keymap resolution, and
   config parsing are all pure and testable without a terminal.
-- **`cloo-proto`** — round-trip encode/decode for every wire message, plus handshake version
-  mismatch handling.
 - **`cloo-term`** — feed known byte sequences, assert resulting grid state. This is the seam
   where `alacritty_terminal` upgrades will break things, so coverage here is what makes the
   pinned dependency safe to bump.
@@ -82,11 +90,10 @@ compatibility beyond the deterministic fixture suite is verified through the man
 
 ## Test File Inventory
 
-*(No test files yet — add a row here when adding one.)*
-
 | File | Domain | What It Covers |
 |---|---|---|
-| — | — | — |
+| `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
+| `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
 
 ---
 

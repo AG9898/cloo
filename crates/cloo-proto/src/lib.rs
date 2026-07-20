@@ -4,4 +4,34 @@
 //! PTYs, terminal emulation, or rendering. Every type here crosses the Unix
 //! socket between `cloo-server` and `cloo-client`.
 //!
-//! Contents land in M0-02. See `docs/ARCHITECTURE.md` for the protocol shape.
+//! Four modules:
+//!
+//! - [`ids`] — newtype identifiers that cross the wire.
+//! - [`message`] — the [`ClientMessage`] and [`ServerMessage`] enums.
+//! - [`frame`] — length-prefixed postcard framing and the
+//!   [`PROTOCOL_VERSION`] handshake check.
+//! - [`error`] — the crate-local [`ProtoError`].
+//!
+//! Bump [`PROTOCOL_VERSION`] on **every** change to a wire type. A stale client
+//! attached to a rebuilt server must fail with a clear reattach error rather
+//! than desync and present as a rendering bug.
+//!
+//! See `docs/ARCHITECTURE.md` for the protocol shape.
+
+#![forbid(unsafe_code)]
+
+pub mod error;
+pub mod frame;
+pub mod ids;
+pub mod message;
+
+pub use error::ProtoError;
+pub use frame::{
+    LENGTH_PREFIX_LEN, MAX_FRAME_LEN, PROTOCOL_VERSION, check_version, decode, decode_frame, encode,
+};
+pub use ids::{ClientId, PaneId, SessionId, TabId};
+pub use message::{
+    Action, Cell, CellAttrs, ClientMessage, Color, CursorShape, Direction, LayoutSnapshot,
+    MouseButton, MouseEvent, MouseKind, PaneRect, Point, RowUpdate, ServerMessage, Size,
+    TabSummary, TermCaps,
+};

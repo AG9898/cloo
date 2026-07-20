@@ -273,8 +273,8 @@ Before marking any task done:
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
-There are no tests yet. Layout tree operations and wire round-trips are the first things that
-must get coverage as they land.
+`cloo-proto` has wire round-trip, framing, and handshake coverage as of M0-02. Layout tree
+operations are the next thing that must get coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -327,6 +327,12 @@ The five library crates are declared once in the root `[workspace.dependencies]`
 `{ path = "…", version = "0.0.1" }` and pulled in as `cloo-core.workspace = true`. A path-only
 dependency builds locally but makes the crate unpublishable to crates.io, so the version is not
 optional even though nothing is published yet.
+
+### 2026-07-20 — Postcard needs an explicit length prefix on a stream
+Postcard is not self-delimiting, so a socket reader cannot know where one message ends. Framing
+is a big-endian `u32` prefix, and `decode` returns bytes-consumed so a caller can drain and
+re-read. A partial buffer must surface as `ProtoError::Incomplete` (read more, retry), which is
+distinct from a malformed payload — conflating the two turns a normal short read into an error.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into
