@@ -167,8 +167,8 @@ The canonical task queue is `docs/workboard.json`.
 Schema and usage contract: [`docs/workboard.md`](docs/workboard.md).
 Machine validation schema: [`docs/workboard.schema.json`](docs/workboard.schema.json).
 
-Use the `/query-workboard` skill to inspect it. Use the `/start-task` skill to execute
-a task end-to-end. Never dump the full board into context — use targeted `jq` queries.
+Inspect it with the **query-workboard** skill; execute a task end-to-end with **start-task**.
+Never dump the full board into context — use targeted `jq` queries.
 
 A task is startable when:
 - `status == "todo"`
@@ -190,12 +190,23 @@ lives in [`docs/PRD.md`](docs/PRD.md) — M0 through M7, each independently runn
 Standard task cycle for this project:
 
 1. Read this file (`AGENTS.md` / `CLAUDE.md`) at the start of every session.
-2. Run `/query-workboard` to find the next startable task.
-3. Run `/start-task` to execute it (reads docs, implements, verifies, updates board).
+2. Invoke **query-workboard** to find the next startable task.
+3. Invoke **start-task** to execute it (reads docs, implements, verifies, updates board).
 4. Update this file if you discovered a constraint, pattern, or pitfall worth encoding.
 5. Commit changes. Summarize: what was done, what was skipped, what is next.
 
-For multi-task runs: `/ralphloop start-task iterations:N`.
+For multi-task runs, invoke **ralphloop** wrapping start-task with an iteration count.
+
+### Invoking Skills
+
+Skills live in a per-harness directory and are invoked by name with your harness's own
+command prefix — `/` in Claude Code, `$` in Codex. This file deliberately names skills
+without a prefix, because `AGENTS.md` and `CLAUDE.md` are the same file and cannot carry
+both. Use whichever your harness expects.
+
+Available here: **query-workboard**, **start-task**, **edit-workboard**, **project-plan**,
+**ralphloop**. Sources live in the `ag.dev` repo and are rendered in by its sync script —
+never edit the copies under `.claude/`, `.agents/`, or `.codex/` directly.
 
 ### Stopping Conditions
 
