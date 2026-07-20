@@ -62,10 +62,17 @@ manifest, so every member inherits the same path and version:
 
 ```
 cloo → { cloo-server, cloo-client } → cloo-core → { cloo-proto, cloo-term }
+                    └──────────────────────────────────────────┘
 ```
 
 Never introduce a cycle or a back-edge. `cloo-proto` and `cloo-term` have no intra-workspace
 dependencies at all.
+
+`cloo-server` also depends on `cloo-term` directly, as of M0-05: the PTY reactor owns a pane's
+`Emulator` and feeds it, and routing that through `cloo-core` would mean re-exporting the
+emulation surface from a crate that performs no I/O. This is a shortcut down the graph, not a
+back-edge — the direction is unchanged and no cycle is introduced. The `alacritty_terminal` rule
+is untouched: `cloo-server` names only `cloo-term`'s own types.
 
 ### Emulation
 
@@ -92,6 +99,26 @@ the conversion; the `CellAttrs` bit layouts match so it stays a field copy.
 
 Owns all PTYs, grids, scrollback, and layout state. Fans damage out to every attached client.
 A client crash can never lose state, because the client holds only a cache of the visible grid.
+
+#### PTY reactor
+
+`cloo-server::pty` is two layers. `Pty` is the raw resource: an `openpty` pair, a child spawned
+onto the slave side as a session leader with `TIOCSCTTY`, and the `libc` calls that read, write,
+and `TIOCSWINSZ` it. The master descriptor is an `OwnedFd`, set non-blocking and close-on-exec,
+and `Pty`'s `Drop` kills and reaps the child — restoration is by ownership, not by a shutdown
+call a caller has to remember.
+
+`PtyReactor` is the actor body above it: one Tokio task owns one reactor, which owns that pane's
+`Emulator` and loops on `pump`. Readiness comes from `AsyncFd`; `pump` reads once and feeds the
+result to the emulator, and it never renders or emits an update — damage coalescing belongs to
+the session task above.
+
+Two behaviors are worth knowing. A read on a Linux PTY master whose slave has closed fails with
+`EIO` rather than returning zero, so that is translated into an ordinary EOF at the boundary and
+callers only see genuine errors. And `PtyReactor::resize` resizes the grid *before* issuing
+`TIOCSWINSZ`, so output arriving immediately after the child's `SIGWINCH` lands on a grid that is
+already the right shape; if the `ioctl` then fails, the grid is ahead of the child, which is the
+recoverable direction to be inconsistent in.
 
 ### Client
 
@@ -259,11 +286,13 @@ never meant, and the wire carries no generation counter to catch it.
 |---|---|---|
 | `alacritty_terminal` | Terminal emulation — parser, grid, scrollback, alt screen, SGR | Required, **exact-version pinned** |
 | `tokio` | Async runtime for the PTY reactor and socket | Required |
+| `libc` | `openpty`, `TIOCSCTTY`, `TIOCSWINSZ`, `fcntl`, and termios | Required |
 | `serde` + `postcard` | Wire serialization and framing | Required |
 
 `serde` and `postcard` are wired up in `cloo-proto` as of M0-02. `alacritty_terminal` is pinned
 at `=0.26.0` in `[workspace.dependencies]` and reaches only `cloo-term`, as of M0-04. `tokio`
-lands with the PTY reactor.
+(features `macros`, `net`, `rt`) and `libc` land in `cloo-server` with the PTY reactor as of
+M0-05; the `net` feature is what provides `AsyncFd`, not sockets.
 
 `wezterm-term` is the designated fallback emulation backend: more deliberately public API,
 heavier dep tree. Re-evaluate at M2 if the pin hurts. See [`DECISIONS.md`](DECISIONS.md) —

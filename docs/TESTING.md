@@ -42,9 +42,9 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**`cloo-proto`, `cloo-core`, and `cloo-term`.** The other two libraries are still scaffolds and
-the binary is a placeholder, so the workspace run is 60 unit tests across three crates plus one
-doctest. This section grows as M0 lands.
+**`cloo-proto`, `cloo-core`, `cloo-term`, and the `cloo-server` PTY layer.** `cloo-client` is
+still a scaffold and the binary is a placeholder, so the workspace run is 64 unit tests across
+four crates, 8 PTY integration tests, and two doctests. This section grows as M0 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -89,12 +89,30 @@ so this coverage is what makes the pinned dependency safe to bump:
 - Cursor position under output and absolute positioning, DECTCEM visibility, and DECSCUSR shape.
 - Zero grid dimensions rejected at `TermSize::new` with the offending dimensions named.
 
+Covered today in `cloo-server`, as integration tests in `tests/pty.rs` driving a real
+pseudoterminal with a scripted `sh -c` child. The count is deliberately small — these are the
+only tests in the workspace that fork a process:
+
+- A scripted shell's output reaching the grid, with the child's exit status reaped.
+- An escape sequence split across three child writes still parsing, since the reactor has no
+  control over where a read boundary falls.
+- `stty size` reporting the configured geometry, which proves both that `openpty` carried the
+  `winsize` through and that the child acquired a controlling terminal.
+- Input written to the master reaching the child, and the pty's own echo landing on the grid.
+- A resize being visible to the child on its next `stty`, and the grid reporting the new size.
+- EOF reported once and staying reported, with the child's exit code preserved.
+- A nonexistent program failing to spawn with the program named in the error.
+- A dropped `Pty` leaving no process behind — not even a zombie.
+
+The `cloo-server` unit tests in `src/pty.rs` are pure by rule: config defaults, the `winsize`
+conversion, and error conversion. Nothing that spawns.
+
 The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
   pure and testable without a terminal.
-- **`cloo-server`** — integration tests over a real socket with a real PTY running a scripted
-  shell. Slower; keep the count deliberate.
+- **`cloo-server`** — socket-level integration tests join the PTY ones at M1. Slower; keep the
+  count deliberate.
 - **`cloo-client`** — renderer diffing against a fake grid. Raw-mode and terminal-restore
   behavior is hard to assert automatically and is verified manually.
 
@@ -127,6 +145,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping |
+| `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
+| `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 
 ---
 

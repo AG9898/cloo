@@ -88,7 +88,9 @@ Cargo.toml       Workspace root — shared version/edition/license metadata
 The five libraries are scaffolded with the dependency direction wired; their contents land
 across M0–M2. Dependencies flow one way — `cloo` → {`cloo-server`, `cloo-client`} →
 `cloo-core` → {`cloo-proto`, `cloo-term`} — and are declared in the root
-`[workspace.dependencies]`. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+`[workspace.dependencies]`. `cloo-server` also reaches `cloo-term` directly for the PTY
+reactor's `Emulator`, which skips a level down the graph but is not a back-edge. See
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
 
@@ -275,8 +277,9 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 
 `cloo-proto` has wire round-trip, framing, and handshake coverage as of M0-02. `cloo-core` has
 table-driven layout tree coverage as of M0-03. `cloo-term` has grid coverage — SGR, alternate
-screen, cursor, resize, scrollback — as of M0-04. Keymap resolution and config parsing are the
-next things that must get coverage as they land.
+screen, cursor, resize, scrollback — as of M0-04. `cloo-server` has PTY integration coverage in
+`tests/pty.rs` against a scripted `sh -c` child as of M0-05. Keymap resolution and config
+parsing are the next things that must get coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -356,6 +359,20 @@ is `Line(r - display_offset)`, and the cursor's viewport row is `point.line.0 + 
 Getting this backwards renders the wrong rows only once scrollback is non-empty, so it survives
 every test that does not scroll. Also, `\x1b[?1049h` saves the cursor rather than homing it — a
 fixture that writes immediately after entering the alternate screen lands at the old column.
+
+### 2026-07-20 — A PTY master reports EOF as `EIO`, not as a zero-length read
+On Linux, reading a PTY master after the last slave descriptor closes fails with `EIO` rather
+than returning `0`. `cloo-server::pty` translates that into an ordinary EOF at the boundary, so
+nothing above the PTY layer has to know. If you ever see a pane "erroring" the instant its shell
+exits, this is the translation being missed. The parent must also drop its own copy of the slave
+right after spawning, or that EOF never arrives at all.
+
+### 2026-07-20 — PTY restoration is by ownership, not by a shutdown call
+The master is an `OwnedFd` and `Pty::drop` kills and reaps the child, because `std::process::Child`
+leaves a zombie on drop by default. The master is also set close-on-exec: a child inheriting a
+writable master keeps the descriptor alive after the parent closes its copy, and reads on the
+parent side then never see EOF. `tests/pty.rs` asserts the reap with `kill(pid, 0)`, which still
+succeeds for a zombie and so actually catches the bug.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

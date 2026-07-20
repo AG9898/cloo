@@ -57,7 +57,10 @@ crates/
 ```
 
 - Dependencies flow one way: `cloo` → {`cloo-server`, `cloo-client`} → `cloo-core` →
-  {`cloo-proto`, `cloo-term`}. Never introduce a cycle or a back-edge.
+  {`cloo-proto`, `cloo-term`}. Never introduce a cycle or a back-edge. Skipping a level *down*
+  the graph is allowed when it avoids re-exporting a surface through a crate that has no use for
+  it — `cloo-server` depends on `cloo-term` directly so the PTY reactor can own an `Emulator`
+  without `cloo-core` re-exporting one.
 - Intra-workspace dependencies are declared once in the root `[workspace.dependencies]` and
   pulled into members with `cloo-core.workspace = true`. Never write a bare `path = "../…"`
   dependency in a member crate — a published crate needs the version alongside the path.
@@ -98,6 +101,16 @@ crates/
 - A grid dimension of zero never reaches the backend. `TermSize::new` is the single validation
   point and returns `TermError::ZeroSize`, which is why `Emulator::new` and `Emulator::resize`
   are infallible.
+- PTY resources are restored by ownership, not by a shutdown call. A descriptor is an `OwnedFd`
+  the moment the `libc` call returns it, and the type that owns a child process reaps it in
+  `Drop`. Never rely on a caller remembering to close or wait — a closed pane must not be able
+  to leak a descriptor or leave a zombie.
+- The PTY master is non-blocking and close-on-exec. A child inheriting a writable master would
+  keep the descriptor alive after the parent closes its copy, and reads would never see EOF.
+- A read on a PTY master whose slave has closed fails with `EIO` on Linux rather than returning
+  zero. Translate that to an ordinary EOF at the PTY boundary; do not make every caller know it.
+- A resize is two operations — grid then `TIOCSWINSZ` — and must be issued in that order behind
+  one function. Never expose a path that does only one of them.
 - Raw mode and termios changes must be restored on **every** exit path, including panic and
   signal. A client that leaves the user's terminal in raw mode is a critical bug.
 - Escape sequences are emitted through the renderer, never printed ad hoc.
