@@ -1,5 +1,5 @@
 {
-  "name": "cloo",
+  "name": "clooterminal",
   "version": "0.0.1",
   "description": "A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.",
   "keywords": [

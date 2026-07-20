@@ -3,7 +3,9 @@
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
 
 > **Status: pre-alpha, planning only.** There is no code yet. The design is settled and written
-> up in [DESIGN.md](./DESIGN.md).
+> up in [docs/](./docs/) — start with [ARCHITECTURE.md](./docs/ARCHITECTURE.md) for the system
+> shape, [PRD.md](./docs/PRD.md) for scope and milestones, and
+> [DECISIONS.md](./docs/DECISIONS.md) for what has been settled and what is still open.
 
 ## What it is
 
@@ -37,9 +39,12 @@ dependency, not a rewrite, so the work goes into the part you actually look at a
 Not yet installable. When it is, the plan is:
 
 ```sh
-npm install -g cloo     # prebuilt binaries
-cargo install cloo      # from source
+npm install -g clooterminal   # prebuilt binaries
+cargo install cloo            # from source
 ```
+
+Either way the command is `cloo`. The npm package is `clooterminal` because npm's
+similarity filter rejects `cloo` as too close to existing package names.
 
 ## Platforms
 

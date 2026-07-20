@@ -7,6 +7,10 @@ A terminal multiplexer in Rust — tmux's functionality, a better-looking termin
 >
 > Follow development at **https://github.com/AG9898/cloo**
 
+**On the name:** the project is `cloo` and the command will be `cloo`. This package is published
+as `clooterminal` because npm's package-name similarity filter rejects `cloo`. Once binaries
+ship, `npm i -g clooterminal` will put a `cloo` command on your PATH.
+
 ## What it will be
 
 cloo is a client-server terminal multiplexer: a background daemon owns your shells, and thin
