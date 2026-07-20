@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
 .DS_Store
+*:Zone.Identifier
 
 # Cargo.lock is intentionally committed — cloo ships a binary, so builds
 # should be reproducible.

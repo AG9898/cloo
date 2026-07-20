@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body { background: #0b0b10; -webkit-font-smoothing: antialiased; }
+  a { color: #bb9af7; }
+  a:hover { color: #cdb4fb; }
+  @keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+  @keyframes toastin { from { opacity: 0; transform: translateX(14px); } to { opacity: 1; transform: none; } }
+</style>
+</helmet>
+
+<div id="1a" style="position:relative;padding:56px 56px 72px;font-family:'Inter',sans-serif;display:flex;flex-direction:column;gap:44px;min-width:1060px">
+
+  <!-- ============ HEADER ============ -->
+  <header style="display:flex;flex-direction:column;gap:22px;max-width:1000px">
+    <div style="position:absolute;top:56px;right:56px;font:600 12px/1 'JetBrains Mono',monospace;color:#565f89;border:1px solid #2a2e42;border-radius:999px;padding:7px 13px">1a</div>
+    <div style="display:flex;align-items:baseline;gap:16px">
+      <div style="font:700 46px/1 'JetBrains Mono',monospace;color:#c0caf5;letter-spacing:-1px">cloo<span style="display:inline-block;width:12px;height:38px;background:#bb9af7;margin-left:4px;transform:translateY(4px);animation:blink 1.15s steps(1) infinite"></span></div>
+      <span style="font:600 13px/1 'JetBrains Mono',monospace;color:#16161e;background:#bb9af7;border-radius:6px;padding:5px 9px">v0.0.1 · mock</span>
+    </div>
+    <p style="margin:0;font-size:17px;line-height:1.5;color:#787f9c;max-width:760px">A terminal multiplexer that doesn't look like 2007. tmux-shaped keybindings, a client-server core, and all the effort spent on the part you stare at all day — pane borders, focus treatment, a status bar worth looking at, and considered motion.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:2px">
+      <span style="font:600 11px/1 'JetBrains Mono',monospace;color:#565f89;margin-right:6px;text-transform:uppercase;letter-spacing:1px">Storm palette</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#bb9af7"></span>bb9af7</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#7aa2f7"></span>7aa2f7</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#7dcfff"></span>7dcfff</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#9ece6a"></span>9ece6a</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#e0af68"></span>e0af68</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#f7768e"></span>f7768e</span>
+      <span style="display:flex;align-items:center;gap:6px;font:500 11px/1 'JetBrains Mono',monospace;color:#787f9c;background:#15161f;border:1px solid #22263a;border-radius:6px;padding:6px 9px"><span style="width:11px;height:11px;border-radius:3px;background:#565f89"></span>565f89</span>
+    </div>
+  </header>
+
+  <!-- ============ BOARD ============ -->
+  <div style="display:flex;flex-wrap:wrap;gap:40px">
+
+    <!-- ---------- 01 SINGLE PANE ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">01</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Single full-screen pane</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">One shell, one tab. Minimal always-on status bar. Rounded pane, soft border, accent focus glow.</p>
+      </figcaption>
+      <div style="background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:600px">
+        <!-- tab bar -->
+        <div style="display:flex;align-items:center;gap:6px;height:40px;padding:0 12px;background:#1a1b26;border-bottom:1px solid #22263a;flex-shrink:0">
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 12px;border-radius:7px;background:#24283b;color:#c0caf5;font:600 12px/1 'JetBrains Mono',monospace"><span style="color:#bb9af7">◈</span>main</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;background:#211f2e;color:#c0caf5;font:500 12px/1 'JetBrains Mono',monospace;box-shadow:inset 0 -2px 0 #bb9af7"><span style="color:#565f89;font-size:10px">1</span>shell</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;color:#565f89;font:500 12px/1 'JetBrains Mono',monospace"><span style="font-size:10px">2</span>cargo</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;color:#565f89;font:500 12px/1 'JetBrains Mono',monospace"><span style="font-size:10px">3</span>notes</span>
+          <span style="margin-left:auto;font:500 11px/1 'JetBrains Mono',monospace;color:#414868">1 pane · 60fps</span>
+        </div>
+        <!-- pane area -->
+        <div style="flex:1;display:flex;padding:8px;background:#0f0f16;min-height:0">
+          <div style="flex:1;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #bb9af7;border-radius:8px;overflow:hidden">
+            <div style="display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 11px;background:#1e1c2b;border-bottom:1px solid #262336;flex-shrink:0;font:500 11px/1 'JetBrains Mono',monospace">
+              <span style="display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#bb9af7;color:#16161e;font-weight:700;font-size:10px">1</span><span style="color:#c0caf5">zsh</span></span>
+              <span style="color:#565f89">~/dev/cloo · 48231</span>
+            </div>
+            <pre style="margin:0;flex:1;padding:14px 16px;font:13px/1.6 'JetBrains Mono',monospace;color:#a9b1d6;white-space:pre;overflow:hidden"><span style="color:#9ece6a">$</span> cloo attach main
+  <span style="color:#9ece6a">●</span> reattached to <span style="color:#7dcfff">main</span> — 1 tab · 1 pane · scrollback intact
+
+<span style="color:#9ece6a">$</span> git log --oneline -4
+  <span style="color:#e0af68">4453c89</span> docs: settle npm name → clooterminal
+  <span style="color:#e0af68">a1b3c9d</span> server: coalesce damage to frame budget
+  <span style="color:#e0af68">7f2e5b1</span> core: binary split tree + ratio resize
+  <span style="color:#e0af68">0b68c53</span> chore: MIT license, workspace scaffold
+
+<span style="color:#9ece6a">$</span> cargo test -p cloo-core
+   <span style="color:#565f89">Compiling</span> cloo-core v0.0.1
+    <span style="color:#9ece6a">Finished</span> test <span style="color:#565f89">[unoptimized]</span> in 2.8s
+  test layout::split_replaces_leaf ... <span style="color:#9ece6a">ok</span>
+  test layout::close_collapses_parent ... <span style="color:#9ece6a">ok</span>
+  test result: <span style="color:#9ece6a">ok</span>. 12 passed; 0 failed
+
+<span style="color:#9ece6a">$</span> <span style="display:inline-block;width:8px;height:15px;background:#bb9af7;vertical-align:text-bottom;animation:blink 1.1s steps(1) infinite"></span></pre>
+          </div>
+        </div>
+        <!-- status bar (minimal) -->
+        <div style="display:flex;align-items:stretch;height:28px;background:#1a1b26;border-top:1px solid #22263a;font:600 11px/1 'JetBrains Mono',monospace;flex-shrink:0">
+          <span style="display:flex;align-items:center;gap:6px;padding:0 12px;background:#bb9af7;color:#16161e">◈ main</span>
+          <span style="display:flex;align-items:center;gap:8px;padding:0 13px;color:#787f9c"><span style="color:#7dcfff">1</span> shell</span>
+          <span style="display:flex;align-items:center;gap:6px;padding:0 13px;color:#414868;font-weight:500">2 cargo · 3 notes</span>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:6px;padding:0 13px;color:#787f9c;font-weight:500"><span style="color:#9ece6a">⎇</span> main</span>
+          <span style="display:flex;align-items:center;gap:6px;padding:0 13px;color:#565f89;font-weight:500">C-b</span>
+          <span style="display:flex;align-items:center;padding:0 13px;color:#c0caf5;border-left:1px solid #22263a">14:32</span>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 02 VERTICAL SPLIT + FOCUS ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">02</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Vertical split · focus treatment</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">Left pane focused: accent border + glow, full contrast. Right pane dimmed back. Powerline status bar variant.</p>
+      </figcaption>
+      <div style="background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:600px">
+        <div style="display:flex;align-items:center;gap:6px;height:40px;padding:0 12px;background:#1a1b26;border-bottom:1px solid #22263a;flex-shrink:0">
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 12px;border-radius:7px;background:#24283b;color:#c0caf5;font:600 12px/1 'JetBrains Mono',monospace"><span style="color:#bb9af7">◈</span>main</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;background:#211f2e;color:#c0caf5;font:500 12px/1 'JetBrains Mono',monospace;box-shadow:inset 0 -2px 0 #bb9af7"><span style="color:#565f89;font-size:10px">1</span>build</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;color:#565f89;font:500 12px/1 'JetBrains Mono',monospace"><span style="font-size:10px">2</span>editor</span>
+          <span style="margin-left:auto;font:500 11px/1 'JetBrains Mono',monospace;color:#414868">2 panes · ↔ split</span>
+        </div>
+        <div style="flex:1;display:flex;gap:8px;padding:8px;background:#0f0f16;min-height:0">
+          <!-- focused pane -->
+          <div style="flex:1;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #bb9af7;border-radius:8px;overflow:hidden">
+            <div style="display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 11px;background:#1e1c2b;border-bottom:1px solid #262336;flex-shrink:0;font:500 11px/1 'JetBrains Mono',monospace">
+              <span style="display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#bb9af7;color:#16161e;font-weight:700;font-size:10px">1</span><span style="color:#c0caf5">cargo</span><span style="color:#565f89">watch -x test</span></span>
+              <span style="color:#565f89">~/dev/cloo</span>
+            </div>
+            <pre style="margin:0;flex:1;padding:14px 16px;font:13px/1.6 'JetBrains Mono',monospace;color:#a9b1d6;white-space:pre;overflow:hidden"><span style="color:#565f89">[Running 'test -p cloo-core']</span>
+   <span style="color:#565f89">Compiling</span> cloo-core v0.0.1
+    <span style="color:#9ece6a">Finished</span> test in 2.41s
+  running 12 tests
+  test keymap::prefix_rebind ...... <span style="color:#9ece6a">ok</span>
+  test layout::resize_walks_tree .. <span style="color:#9ece6a">ok</span>
+  test layout::min_size_rejected .. <span style="color:#9ece6a">ok</span>
+  test proto::roundtrip_damage .... <span style="color:#9ece6a">ok</span>
+  test result: <span style="color:#9ece6a">ok</span>. 12 passed; 0 failed
+
+<span style="color:#565f89">[Finished running. Exit </span><span style="color:#9ece6a">0</span><span style="color:#565f89">]</span>
+watching for changes <span style="display:inline-block;width:8px;height:15px;background:#bb9af7;vertical-align:text-bottom;animation:blink 1.1s steps(1) infinite"></span></pre>
+          </div>
+          <!-- dimmed pane -->
+          <div style="flex:1;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #23263a;border-radius:8px;overflow:hidden;opacity:.48">
+            <div style="display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 11px;background:#1c1d29;border-bottom:1px solid #22263a;flex-shrink:0;font:500 11px/1 'JetBrains Mono',monospace">
+              <span style="display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#2a2e42;color:#a9b1d6;font-weight:700;font-size:10px">2</span><span style="color:#a9b1d6">zsh</span></span>
+              <span style="color:#565f89">~/dev/cloo</span>
+            </div>
+            <pre style="margin:0;flex:1;padding:14px 16px;font:13px/1.6 'JetBrains Mono',monospace;color:#8087a3;white-space:pre;overflow:hidden"><span style="color:#9ece6a">$</span> tokei crates/
+ Rust    14 files  1.24k  code
+ TOML     3 files    40   code
+ Total   17 files  1.28k  code
+
+<span style="color:#9ece6a">$</span> git status -s
+ <span style="color:#e0af68">M</span> docs/PRD.md
+ <span style="color:#e0af68">M</span> crates/cloo/src/main.rs
+ <span style="color:#9ece6a">?</span> crates/cloo-core/
+
+<span style="color:#9ece6a">$</span> </pre>
+          </div>
+        </div>
+        <!-- status bar (powerline) -->
+        <div style="display:flex;align-items:center;height:30px;background:#141520;border-top:1px solid #22263a;font:600 11px/1 'JetBrains Mono',monospace;flex-shrink:0;padding-right:12px">
+          <span style="display:flex;align-items:center;padding:0 16px 0 13px;height:22px;background:#bb9af7;color:#16161e">NORMAL</span>
+          <span style="display:flex;align-items:center;gap:6px;padding:0 18px 0 16px;height:22px;background:#2a2e42;color:#c0caf5">◈ main</span>
+          <span style="display:flex;align-items:center;gap:6px;padding:0 18px 0 16px;height:22px;background:#1e2030;color:#9ece6a">⎇ main <span style="color:#565f89">+2</span></span>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:6px;color:#787f9c">2 clients · min 132×38</span>
+          <span style="display:flex;align-items:center;padding:0 0 0 16px;margin-left:16px;color:#c0caf5">14:32</span>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 03 DEV NESTED LAYOUT + TOASTS ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">03</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Nested dev layout · pane titles · toasts</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:900px">Editor focused (big, left), server logs top-right, shell bottom-right. Full pane title bars. Live notifications stacked top-right: bell, detach, resize.</p>
+      </figcaption>
+      <div style="position:relative;background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:680px">
+        <div style="display:flex;align-items:center;gap:6px;height:40px;padding:0 12px;background:#1a1b26;border-bottom:1px solid #22263a;flex-shrink:0">
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 12px;border-radius:7px;background:#24283b;color:#c0caf5;font:600 12px/1 'JetBrains Mono',monospace"><span style="color:#bb9af7">◈</span>main</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;background:#211f2e;color:#c0caf5;font:500 12px/1 'JetBrains Mono',monospace;box-shadow:inset 0 -2px 0 #bb9af7"><span style="color:#565f89;font-size:10px">1</span>dev</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;color:#565f89;font:500 12px/1 'JetBrains Mono',monospace"><span style="font-size:10px">2</span>server</span>
+          <span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 11px;border-radius:7px;color:#565f89;font:500 12px/1 'JetBrains Mono',monospace"><span style="font-size:10px">3</span>scratch</span>
+          <span style="display:flex;align-items:center;gap:6px;height:26px;padding:0 11px;border-radius:7px;color:#f7768e;font:500 12px/1 'JetBrains Mono',monospace">2 <span style="width:6px;height:6px;border-radius:50%;background:#f7768e"></span></span>
+          <span style="margin-left:auto;font:500 11px/1 'JetBrains Mono',monospace;color:#414868">3 panes · nested</span>
+        </div>
+        <div style="flex:1;display:flex;gap:8px;padding:8px;background:#0f0f16;min-height:0">
+          <!-- editor focused -->
+          <div style="flex:1.55;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #bb9af7;border-radius:8px;overflow:hidden">
+            <div style="display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 11px;background:#1e1c2b;border-bottom:1px solid #262336;flex-shrink:0;font:500 11px/1 'JetBrains Mono',monospace">
+              <span style="display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#bb9af7;color:#16161e;font-weight:700;font-size:10px">1</span><span style="color:#c0caf5">nvim</span><span style="color:#565f89">layout.rs</span></span>
+              <span style="color:#565f89">crates/cloo-core/src</span>
+            </div>
+            <pre style="margin:0;flex:1;padding:14px 16px;font:13px/1.62 'JetBrains Mono',monospace;color:#a9b1d6;white-space:pre;overflow:hidden"><span style="color:#3b4261">  1</span>  <span style="color:#bb9af7">pub enum</span> <span style="color:#7dcfff">Node</span> {
+<span style="color:#3b4261">  2</span>      <span style="color:#7dcfff">Leaf</span>(<span style="color:#7dcfff">PaneId</span>),
+<span style="color:#3b4261">  3</span>      <span style="color:#7dcfff">Split</span> {
+<span style="color:#3b4261">  4</span>          dir: <span style="color:#7dcfff">Direction</span>,
+<span style="color:#3b4261">  5</span>          ratio: <span style="color:#7dcfff">f32</span>,          <span style="color:#565f89">// ratios, not cells</span>
+<span style="color:#3b4261">  6</span>          left: <span style="color:#7dcfff">Box</span>&lt;<span style="color:#7dcfff">Node</span>&gt;,
+<span style="color:#3b4261">  7</span>          right: <span style="color:#7dcfff">Box</span>&lt;<span style="color:#7dcfff">Node</span>&gt;,
+<span style="color:#3b4261">  8</span>      },
+<span style="color:#3b4261">  9</span>  }
+<span style="color:#3b4261"> 10</span>
+<span style="color:#3b4261"> 11</span>  <span style="color:#bb9af7">impl</span> <span style="color:#7dcfff">Node</span> {
+<span style="color:#3b4261"> 12</span>      <span style="color:#bb9af7">pub fn</span> <span style="color:#7aa2f7">split</span>(&amp;<span style="color:#bb9af7">mut</span> <span style="color:#f7768e">self</span>, id: <span style="color:#7dcfff">PaneId</span>, dir: <span style="color:#7dcfff">Direction</span>) {
+<span style="color:#3b4261"> 13</span>          <span style="color:#bb9af7">let</span> old = <span style="color:#7dcfff">Node</span>::<span style="color:#7dcfff">Leaf</span>(<span style="color:#f7768e">self</span>.id());
+<span style="color:#3b4261"> 14</span>          <span style="color:#f7768e">*self</span> = <span style="color:#7dcfff">Node</span>::<span style="color:#7dcfff">Split</span> { dir, ratio: <span style="color:#ff9e64">0.5</span>, .. };
+<span style="color:#3b4261"> 15</span>      }
+<span style="color:#3b4261"> 16</span>  }</pre>
+            <div style="display:flex;align-items:center;height:22px;background:#181924;border-top:1px solid #262336;flex-shrink:0;font:600 10px/1 'JetBrains Mono',monospace">
+              <span style="display:flex;align-items:center;padding:0 10px;height:100%;background:#bb9af7;color:#16161e">NORMAL</span>
+              <span style="padding:0 10px;color:#787f9c">layout.rs</span>
+              <span style="margin-left:auto;padding:0 10px;color:#565f89">rust · utf-8 · 14:38</span>
+            </div>
+          </div>
+          <!-- right stack -->
+          <div style="flex:1;display:flex;flex-direction:column;gap:8px;min-width:0">
+            <!-- logs -->
+            <div style="flex:1;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #23263a;border-radius:8px;overflow:hidden;opacity:.55">
+              <div style="display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 11px;background:#1c1d29;border-bottom:1px solid #22263a;flex-shrink:0;font:500 11px/1 'JetBrains Mono',monospace">
+                <span style="display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#2a2e42;color:#a9b1d6;font-weight:700;font-size:10px">2</span><span style="color:#a9b1d6">cargo run</span><span style="color:#565f89">-p cloo-server</span></span>
+                <span style="color:#565f89">48242</span>
+              </div>
+              <pre style="margin:0;flex:1;padding:12px 14px;font:12px/1.6 'JetBrains Mono',monospace;color:#8087a3;white-space:pre;overflow:hidden"><span style="color:#7dcfff">INFO </span> listening on .../main.sock
+<span style="color:#7dcfff">INFO </span> client A attached (132×38)
+<span style="color:#7dcfff">INFO </span> client B attached (120×32)
+<span style="color:#e0af68">WARN </span> client B lagged — resync sent
+<span style="color:#7dcfff">INFO </span> damage 42 rows/frame (cap 60)
+<span style="color:#f7768e">BELL </span> pane 2 requested attention</pre>
+            </div>
+            <!-- shell -->
+            <div style="flex:1;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #23263a;border-radius:8px;overflow:hidden;opacity:.55">
+              <div style="display:flex;align-items:center;justify-content:space-between;height:28px;padding:0 11px;background:#1c1d29;border-bottom:1px solid #22263a;flex-shrink:0;font:500 11px/1 'JetBrains Mono',monospace">
+                <span style="display:flex;align-items:center;gap:8px"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#2a2e42;color:#a9b1d6;font-weight:700;font-size:10px">3</span><span style="color:#a9b1d6">zsh</span></span>
+                <span style="color:#565f89">~/dev/cloo</span>
+              </div>
+              <pre style="margin:0;flex:1;padding:12px 14px;font:12px/1.6 'JetBrains Mono',monospace;color:#8087a3;white-space:pre;overflow:hidden"><span style="color:#9ece6a">$</span> cloo ls
+  <span style="color:#7dcfff">main</span>     2 tabs  attached ×2
+  <span style="color:#7dcfff">server</span>   1 tab   detached
+  <span style="color:#7dcfff">scratch</span>  1 tab   detached
+<span style="color:#9ece6a">$</span> </pre>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;align-items:stretch;height:28px;background:#1a1b26;border-top:1px solid #22263a;font:600 11px/1 'JetBrains Mono',monospace;flex-shrink:0">
+          <span style="display:flex;align-items:center;gap:6px;padding:0 12px;background:#bb9af7;color:#16161e">◈ main</span>
+          <span style="display:flex;align-items:center;gap:8px;padding:0 13px;color:#787f9c"><span style="color:#7dcfff">1</span> dev</span>
+          <span style="display:flex;align-items:center;gap:6px;padding:0 13px;color:#414868;font-weight:500">2 server · 3 scratch</span>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:6px;padding:0 13px;color:#787f9c;font-weight:500"><span style="color:#9ece6a">⎇</span> main</span>
+          <span style="display:flex;align-items:center;padding:0 13px;color:#c0caf5;border-left:1px solid #22263a">14:38</span>
+        </div>
+        <!-- TOASTS -->
+        <div style="position:absolute;top:52px;right:18px;display:flex;flex-direction:column;gap:10px;width:290px">
+          <div style="display:flex;gap:11px;align-items:flex-start;background:#1c1d2a;border:1px solid #2f2436;border-left:3px solid #f7768e;border-radius:9px;padding:11px 13px;animation:toastin .35s ease both">
+            <span style="font:700 11px/1.6 'JetBrains Mono',monospace;color:#f7768e">BELL</span>
+            <div style="flex:1"><div style="font:600 12px/1.4 'JetBrains Mono',monospace;color:#c0caf5">Pane 2 rang</div><div style="font:400 11px/1.4 'JetBrains Mono',monospace;color:#6b7290;margin-top:2px">tab “server” · just now</div></div>
+          </div>
+          <div style="display:flex;gap:11px;align-items:flex-start;background:#1c1d2a;border:1px solid #24314a;border-left:3px solid #7aa2f7;border-radius:9px;padding:11px 13px;animation:toastin .35s .07s ease both">
+            <span style="font:700 11px/1.6 'JetBrains Mono',monospace;color:#7aa2f7">⧉ DET</span>
+            <div style="flex:1"><div style="font:600 12px/1.4 'JetBrains Mono',monospace;color:#c0caf5">Client B detached</div><div style="font:400 11px/1.4 'JetBrains Mono',monospace;color:#6b7290;margin-top:2px">session alive · 1 client left</div></div>
+          </div>
+          <div style="display:flex;gap:11px;align-items:flex-start;background:#1c1d2a;border:1px solid #2d3142;border-left:3px solid #565f89;border-radius:9px;padding:11px 13px;animation:toastin .35s .14s ease both">
+            <span style="font:700 11px/1.6 'JetBrains Mono',monospace;color:#787f9c">⤢ RSZ</span>
+            <div style="flex:1"><div style="font:600 12px/1.4 'JetBrains Mono',monospace;color:#c0caf5">Resized to 132×38</div><div style="font:400 11px/1.4 'JetBrains Mono',monospace;color:#6b7290;margin-top:2px">min of 2 attached clients</div></div>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 04 COMMAND PALETTE ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">04</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Prefix palette · keybinding hints</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">Hit the prefix (C-b), keep typing to filter. Every action shows its rebindable chord. Layout dims behind.</p>
+      </figcaption>
+      <div style="position:relative;background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:600px">
+        <div style="opacity:.32;display:flex;flex-direction:column;height:100%">
+          <div style="height:40px;background:#1a1b26;border-bottom:1px solid #22263a;flex-shrink:0"></div>
+          <div style="flex:1;display:flex;gap:8px;padding:8px;background:#0f0f16"><div style="flex:1;background:#1a1b26;border:1px solid #23263a;border-radius:8px"></div><div style="flex:1;background:#1a1b26;border:1px solid #23263a;border-radius:8px"></div></div>
+          <div style="height:28px;background:#1a1b26;border-top:1px solid #22263a;flex-shrink:0"></div>
+        </div>
+        <div style="position:absolute;inset:0;background:rgba(9,9,14,.72)"></div>
+        <!-- palette -->
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:560px;background:#191a24;border:1px solid #33374d;border-radius:12px;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);overflow:hidden">
+          <div style="display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid #262a3d">
+            <span style="font:700 12px/1 'JetBrains Mono',monospace;color:#16161e;background:#bb9af7;border-radius:5px;padding:5px 7px">C-b</span>
+            <span style="font:500 14px/1 'JetBrains Mono',monospace;color:#c0caf5">split</span><span style="display:inline-block;width:8px;height:16px;background:#bb9af7;animation:blink 1.1s steps(1) infinite"></span>
+            <span style="margin-left:auto;font:500 11px/1 'JetBrains Mono',monospace;color:#565f89">4 of 24</span>
+          </div>
+          <div style="padding:6px 0">
+            <div style="display:flex;align-items:center;gap:12px;padding:9px 16px;background:#221f31;border-left:2px solid #bb9af7;font:500 13px/1 'JetBrains Mono',monospace"><span style="color:#bb9af7">▸</span><span style="color:#c0caf5;flex:1">Split pane right</span><span style="color:#565f89;font-size:11px;padding:3px 7px;border:1px solid #33374d;border-radius:5px">C-b |</span></div>
+            <div style="display:flex;align-items:center;gap:12px;padding:9px 16px;border-left:2px solid transparent;font:500 13px/1 'JetBrains Mono',monospace"><span style="color:transparent">▸</span><span style="color:#a9b1d6;flex:1">Split pane down</span><span style="color:#565f89;font-size:11px;padding:3px 7px;border:1px solid #2a2e42;border-radius:5px">C-b -</span></div>
+            <div style="display:flex;align-items:center;gap:12px;padding:9px 16px;border-left:2px solid transparent;font:500 13px/1 'JetBrains Mono',monospace"><span style="color:transparent">▸</span><span style="color:#a9b1d6;flex:1">Even out split ratios</span><span style="color:#565f89;font-size:11px;padding:3px 7px;border:1px solid #2a2e42;border-radius:5px">C-b =</span></div>
+            <div style="display:flex;align-items:center;gap:12px;padding:9px 16px;border-left:2px solid transparent;font:500 13px/1 'JetBrains Mono',monospace"><span style="color:transparent">▸</span><span style="color:#a9b1d6;flex:1">Swap with adjacent pane</span><span style="color:#565f89;font-size:11px;padding:3px 7px;border:1px solid #2a2e42;border-radius:5px">C-b s</span></div>
+          </div>
+          <div style="display:flex;align-items:center;gap:16px;padding:10px 16px;border-top:1px solid #262a3d;background:#15161f;font:500 10px/1 'JetBrains Mono',monospace;color:#565f89"><span>↑↓ move</span><span>⏎ run</span><span>⇥ next group</span><span style="margin-left:auto">esc dismiss</span></div>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 05 SESSION SWITCHER ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">05</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Session switcher</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">Every session the daemon owns — attached or detached — with age and pane counts. Attach, detach, or kill inline.</p>
+      </figcaption>
+      <div style="position:relative;background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:600px">
+        <div style="opacity:.32;display:flex;flex-direction:column;height:100%">
+          <div style="height:40px;background:#1a1b26;border-bottom:1px solid #22263a"></div>
+          <div style="flex:1;background:#0f0f16"></div>
+          <div style="height:28px;background:#1a1b26;border-top:1px solid #22263a"></div>
+        </div>
+        <div style="position:absolute;inset:0;background:rgba(9,9,14,.72)"></div>
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;background:#191a24;border:1px solid #33374d;border-radius:12px;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);overflow:hidden">
+          <div style="display:flex;align-items:center;padding:14px 18px;border-bottom:1px solid #262a3d"><span style="font:600 13px/1 'JetBrains Mono',monospace;color:#c0caf5">Sessions</span><span style="margin-left:auto;font:500 11px/1 'JetBrains Mono',monospace;color:#565f89">3 alive</span></div>
+          <div style="padding:8px">
+            <div style="display:flex;align-items:center;gap:14px;padding:13px 14px;background:#221f31;border:1px solid #3a2f52;border-radius:8px;margin-bottom:6px;font-family:'JetBrains Mono',monospace">
+              <span style="color:#bb9af7;font-size:13px">▸</span>
+              <span style="font-weight:600;font-size:14px;color:#c0caf5;width:96px">main</span>
+              <span style="font-size:12px;color:#787f9c">2 tabs · 4 panes</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:#9ece6a;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:#9ece6a"></span>attached ×2</span>
+              <span style="font-size:11px;color:#565f89;width:56px;text-align:right">4h 12m</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;padding:13px 14px;border:1px solid transparent;border-radius:8px;margin-bottom:6px;font-family:'JetBrains Mono',monospace">
+              <span style="color:transparent;font-size:13px">▸</span>
+              <span style="font-weight:600;font-size:14px;color:#a9b1d6;width:96px">server</span>
+              <span style="font-size:12px;color:#787f9c">1 tab · 1 pane</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:#565f89;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:#414868"></span>detached</span>
+              <span style="font-size:11px;color:#565f89;width:56px;text-align:right">2d</span>
+            </div>
+            <div style="display:flex;align-items:center;gap:14px;padding:13px 14px;border:1px solid transparent;border-radius:8px;font-family:'JetBrains Mono',monospace">
+              <span style="color:transparent;font-size:13px">▸</span>
+              <span style="font-weight:600;font-size:14px;color:#a9b1d6;width:96px">scratch</span>
+              <span style="font-size:12px;color:#787f9c">1 tab · 2 panes</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:6px;font-size:11px;color:#565f89;font-weight:600"><span style="width:6px;height:6px;border-radius:50%;background:#414868"></span>detached</span>
+              <span style="font-size:11px;color:#565f89;width:56px;text-align:right">18m</span>
+            </div>
+          </div>
+          <div style="display:flex;align-items:center;gap:18px;padding:11px 18px;border-top:1px solid #262a3d;background:#15161f;font:500 10px/1 'JetBrains Mono',monospace;color:#565f89"><span><span style="color:#9ece6a">⏎</span> attach</span><span><span style="color:#7aa2f7">d</span> detach</span><span><span style="color:#f7768e">⌫</span> kill</span><span><span style="color:#e0af68">n</span> new</span><span style="margin-left:auto">esc close</span></div>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 06 CONFIG & THEMES ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">06</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Config &amp; theming</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">TOML at ~/.config/cloo, live-reloaded on SIGHUP. Themes inherit your palette; every one degrades to 16-color.</p>
+      </figcaption>
+      <div style="background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:600px">
+        <!-- toml -->
+        <div style="flex:1.15;display:flex;flex-direction:column;background:#16161e;border-right:1px solid #22263a;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;height:36px;padding:0 14px;border-bottom:1px solid #22263a;font:500 11px/1 'JetBrains Mono',monospace;color:#565f89;flex-shrink:0"><span style="color:#7dcfff">~/.config/cloo/</span>config.toml</div>
+          <pre style="margin:0;flex:1;padding:16px;font:12.5px/1.75 'JetBrains Mono',monospace;color:#a9b1d6;white-space:pre;overflow:hidden"><span style="color:#565f89"># the part you stare at all day</span>
+<span style="color:#7dcfff">[theme]</span>
+<span style="color:#bb9af7">name</span>    = <span style="color:#9ece6a">"storm"</span>
+<span style="color:#bb9af7">accent</span>  = <span style="color:#9ece6a">"#bb9af7"</span>
+<span style="color:#bb9af7">inherit_terminal</span> = <span style="color:#ff9e64">true</span>
+
+<span style="color:#7dcfff">[focus]</span>
+<span style="color:#bb9af7">border</span>        = <span style="color:#ff9e64">true</span>
+<span style="color:#bb9af7">dim_unfocused</span> = <span style="color:#ff9e64">0.48</span>
+
+<span style="color:#7dcfff">[status]</span>
+<span style="color:#bb9af7">mode</span>     = <span style="color:#9ece6a">"always"</span>
+<span style="color:#bb9af7">segments</span> = [<span style="color:#9ece6a">"session"</span>, <span style="color:#9ece6a">"git"</span>, <span style="color:#9ece6a">"clock"</span>]
+
+<span style="color:#7dcfff">[motion]</span>
+<span style="color:#bb9af7">enabled</span>     = <span style="color:#ff9e64">true</span>
+<span style="color:#bb9af7">duration_ms</span> = <span style="color:#ff9e64">120</span>
+<span style="color:#bb9af7">reduce</span>      = <span style="color:#ff9e64">false</span>
+
+<span style="color:#7dcfff">[keys]</span>
+<span style="color:#bb9af7">prefix</span> = <span style="color:#9ece6a">"C-b"</span></pre>
+        </div>
+        <!-- theme preview -->
+        <div style="flex:1;display:flex;flex-direction:column;background:#14151d;min-width:0">
+          <div style="display:flex;align-items:center;height:36px;padding:0 14px;border-bottom:1px solid #22263a;font:600 11px/1 'JetBrains Mono',monospace;color:#787f9c;flex-shrink:0">THEMES</div>
+          <div style="padding:12px;display:flex;flex-direction:column;gap:8px">
+            <div style="display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:8px;background:#201d2e;border:1px solid #3a2f52"><span style="font:600 12px/1 'JetBrains Mono',monospace;color:#c0caf5;width:74px">storm</span><span style="display:flex;gap:4px"><span style="width:13px;height:13px;border-radius:3px;background:#bb9af7"></span><span style="width:13px;height:13px;border-radius:3px;background:#7aa2f7"></span><span style="width:13px;height:13px;border-radius:3px;background:#7dcfff"></span><span style="width:13px;height:13px;border-radius:3px;background:#9ece6a"></span><span style="width:13px;height:13px;border-radius:3px;background:#f7768e"></span></span><span style="margin-left:auto;font:600 10px/1 'JetBrains Mono',monospace;color:#bb9af7">● active</span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:8px;border:1px solid #22263a"><span style="font:600 12px/1 'JetBrains Mono',monospace;color:#a9b1d6;width:74px">night</span><span style="display:flex;gap:4px"><span style="width:13px;height:13px;border-radius:3px;background:#9d7cd8"></span><span style="width:13px;height:13px;border-radius:3px;background:#7aa2f7"></span><span style="width:13px;height:13px;border-radius:3px;background:#73daca"></span><span style="width:13px;height:13px;border-radius:3px;background:#9ece6a"></span><span style="width:13px;height:13px;border-radius:3px;background:#f7768e"></span></span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:8px;border:1px solid #22263a"><span style="font:600 12px/1 'JetBrains Mono',monospace;color:#a9b1d6;width:74px">gruvbox</span><span style="display:flex;gap:4px"><span style="width:13px;height:13px;border-radius:3px;background:#d3869b"></span><span style="width:13px;height:13px;border-radius:3px;background:#83a598"></span><span style="width:13px;height:13px;border-radius:3px;background:#8ec07c"></span><span style="width:13px;height:13px;border-radius:3px;background:#fabd2f"></span><span style="width:13px;height:13px;border-radius:3px;background:#fb4934"></span></span></div>
+            <div style="display:flex;align-items:center;gap:11px;padding:10px 12px;border-radius:8px;border:1px solid #22263a"><span style="font:600 12px/1 'JetBrains Mono',monospace;color:#a9b1d6;width:74px">nord</span><span style="display:flex;gap:4px"><span style="width:13px;height:13px;border-radius:3px;background:#b48ead"></span><span style="width:13px;height:13px;border-radius:3px;background:#81a1c1"></span><span style="width:13px;height:13px;border-radius:3px;background:#88c0d0"></span><span style="width:13px;height:13px;border-radius:3px;background:#a3be8c"></span><span style="width:13px;height:13px;border-radius:3px;background:#bf616a"></span></span></div>
+          </div>
+          <div style="padding:0 12px 8px;font:600 10px/1 'JetBrains Mono',monospace;color:#565f89">LIVE PREVIEW</div>
+          <div style="flex:1;margin:0 12px 14px;display:flex;gap:6px;padding:6px;background:#0f0f16;border-radius:8px;min-height:0">
+            <div style="flex:1;background:#1a1b26;border:1px solid #bb9af7;border-radius:6px;padding:9px;font:11px/1.5 'JetBrains Mono',monospace;color:#a9b1d6"><span style="color:#9ece6a">$</span> focused<span style="display:inline-block;width:6px;height:12px;background:#bb9af7;vertical-align:middle;margin-left:2px;animation:blink 1.1s steps(1) infinite"></span></div>
+            <div style="flex:1;background:#1a1b26;border:1px solid #23263a;border-radius:6px;opacity:.48;padding:9px;font:11px/1.5 'JetBrains Mono',monospace;color:#8087a3"><span style="color:#9ece6a">$</span> dimmed</div>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 07 STATUS BAR VARIATIONS ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">07</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Status bar · two variants</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">Minimal always-on (one flat row) vs a segmented powerline treatment. Both survive a 16-color TTY.</p>
+      </figcaption>
+      <div style="display:flex;flex-direction:column;gap:16px">
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <span style="font:600 11px/1 'JetBrains Mono',monospace;color:#565f89;text-transform:uppercase;letter-spacing:1px">Minimal</span>
+          <div style="border:1px solid #2a2e42;border-radius:9px;overflow:hidden">
+            <div style="display:flex;align-items:stretch;height:30px;background:#1a1b26;font:600 12px/1 'JetBrains Mono',monospace">
+              <span style="display:flex;align-items:center;gap:6px;padding:0 14px;background:#bb9af7;color:#16161e">◈ main</span>
+              <span style="display:flex;align-items:center;gap:8px;padding:0 14px;color:#c0caf5;background:#211f2e"><span style="color:#7dcfff">1</span> dev</span>
+              <span style="display:flex;align-items:center;gap:8px;padding:0 14px;color:#565f89">2 server</span>
+              <span style="display:flex;align-items:center;gap:8px;padding:0 14px;color:#565f89">3 scratch</span>
+              <span style="margin-left:auto;display:flex;align-items:center;gap:7px;padding:0 14px;color:#787f9c"><span style="color:#9ece6a">⎇</span> main +2</span>
+              <span style="display:flex;align-items:center;padding:0 14px;color:#565f89;border-left:1px solid #262a3d">C-b</span>
+              <span style="display:flex;align-items:center;padding:0 14px;color:#c0caf5;border-left:1px solid #262a3d">14:38</span>
+            </div>
+          </div>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:7px">
+          <span style="font:600 11px/1 'JetBrains Mono',monospace;color:#565f89;text-transform:uppercase;letter-spacing:1px">Powerline</span>
+          <div style="border:1px solid #2a2e42;border-radius:9px;overflow:hidden">
+            <div style="display:flex;align-items:center;height:32px;background:#141520;font:600 12px/1 'JetBrains Mono',monospace;padding-right:14px">
+              <span style="display:flex;align-items:center;padding:0 18px 0 15px;height:24px;background:#bb9af7;color:#16161e">NORMAL</span>
+              <span style="display:flex;align-items:center;gap:6px;padding:0 20px 0 18px;height:24px;background:#2a2e42;color:#c0caf5">◈ main</span>
+              <span style="display:flex;align-items:center;gap:6px;padding:0 20px 0 18px;height:24px;background:#232537;color:#7dcfff">1 dev</span>
+              <span style="display:flex;align-items:center;gap:6px;padding:0 20px 0 18px;height:24px;background:#1e2030;color:#9ece6a">⎇ main <span style="color:#565f89">+2</span></span>
+              <span style="margin-left:auto;display:flex;align-items:center;padding:0 18px 0 18px;height:24px;background:#1e2030;color:#787f9c">2 clients</span>
+              <span style="display:flex;align-items:center;padding:0 16px 0 18px;height:24px;background:#bb9af7;color:#16161e">14:38</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+    <!-- ---------- 08 RESIZE / DRAG ---------- -->
+    <figure style="margin:0;display:flex;flex-direction:column;gap:14px;width:980px">
+      <figcaption style="display:flex;flex-direction:column;gap:5px">
+        <div style="display:flex;align-items:baseline;gap:12px"><span style="font:700 13px/1 'JetBrains Mono',monospace;color:#bb9af7">08</span><span style="font-size:16px;font-weight:600;color:#c0caf5">Pane resize · drag gutter</span></div>
+        <p style="margin:0;font-size:13px;color:#6b7290;max-width:760px">Grab the gutter (mouse or C-b arrows). The active divider lights up; ratios update, never cell counts.</p>
+      </figcaption>
+      <div style="background:#16161e;border:1px solid #2a2e42;border-radius:11px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 8px 24px -16px rgba(0,0,0,.5);height:520px">
+        <div style="height:40px;background:#1a1b26;border-bottom:1px solid #22263a;display:flex;align-items:center;padding:0 12px;gap:6px;flex-shrink:0"><span style="display:flex;align-items:center;gap:7px;height:26px;padding:0 12px;border-radius:7px;background:#24283b;color:#c0caf5;font:600 12px/1 'JetBrains Mono',monospace"><span style="color:#bb9af7">◈</span>main</span><span style="margin-left:auto;font:500 11px/1 'JetBrains Mono',monospace;color:#414868">resize · ratio 0.62</span></div>
+        <div style="flex:1;display:flex;padding:8px;background:#0f0f16;align-items:stretch;min-height:0">
+          <div style="flex:0.62;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #bb9af7;border-radius:8px;overflow:hidden">
+            <div style="height:28px;background:#1e1c2b;border-bottom:1px solid #262336;display:flex;align-items:center;gap:8px;padding:0 11px;font:500 11px/1 'JetBrains Mono',monospace"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#bb9af7;color:#16161e;font-weight:700;font-size:10px">1</span><span style="color:#c0caf5">zsh</span></div>
+            <pre style="margin:0;flex:1;padding:14px 16px;font:13px/1.6 'JetBrains Mono',monospace;color:#a9b1d6;white-space:pre;overflow:hidden"><span style="color:#9ece6a">$</span> ← wider · 62%
+<span style="color:#9ece6a">$</span> <span style="display:inline-block;width:8px;height:15px;background:#bb9af7;vertical-align:text-bottom;animation:blink 1.1s steps(1) infinite"></span></pre>
+          </div>
+          <!-- gutter -->
+          <div style="width:8px;display:flex;align-items:center;justify-content:center;cursor:col-resize"><div style="width:3px;height:56px;border-radius:2px;background:#bb9af7"></div></div>
+          <div style="flex:0.38;display:flex;flex-direction:column;background:#1a1b26;border:1px solid #23263a;border-radius:8px;overflow:hidden;opacity:.48">
+            <div style="height:28px;background:#1c1d29;border-bottom:1px solid #22263a;display:flex;align-items:center;gap:8px;padding:0 11px;font:500 11px/1 'JetBrains Mono',monospace"><span style="display:inline-flex;align-items:center;justify-content:center;min-width:16px;height:16px;padding:0 4px;border-radius:4px;background:#2a2e42;color:#a9b1d6;font-weight:700;font-size:10px">2</span><span style="color:#a9b1d6">htop</span></div>
+            <pre style="margin:0;flex:1;padding:14px 16px;font:12px/1.6 'JetBrains Mono',monospace;color:#8087a3;white-space:pre;overflow:hidden">cpu <span style="color:#9ece6a">▏▎▍▌▋</span> 38%
+mem <span style="color:#e0af68">▏▎▍▌▋▊▉</span> 61%
+→ narrower · 38%</pre>
+          </div>
+        </div>
+      </div>
+    </figure>
+
+  </div>
+</div>
+</x-dc>
+</body>
+</html>
