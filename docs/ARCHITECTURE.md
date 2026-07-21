@@ -47,7 +47,7 @@ boundary, which is what makes the emulation backend replaceable.
 
 | Crate | Owns | Explicitly does not |
 |---|---|---|
-| `cloo-proto` | Wire types, framing (serde + postcard), handshake version | Know anything about PTYs or rendering |
+| `cloo-proto` | Wire types, framing (serde + postcard), the framed async transport, handshake version | Know anything about PTYs or rendering |
 | `cloo-term` | Thin wrapper over `alacritty_terminal` — feed bytes, read cells, resize, scrollback | Leak `alacritty_terminal` types across its public API |
 | `cloo-core` | Session/tab/pane model, layout tree, keymap, profiles, pane metadata, config | Perform I/O |
 | `cloo-server` | Daemon: socket, PTY reactor, damage tracking | Decide what anything looks like |
@@ -74,7 +74,9 @@ cloo-proto  cloo-term      leaves — no intra-workspace dependencies at all
 **The rule is the layering, not a single chain.** A crate may depend on any crate in a lower
 layer, and the leaves may be named directly by anything above them. What is forbidden is a
 back-edge (a lower layer naming a higher one), a cycle, and an edge between `cloo-server` and
-`cloo-client`, which must stay independent halves.
+`cloo-client`, which must stay independent halves. The forbidden edges hold for
+dev-dependencies too: a test that needs both halves belongs in `crates/cloo`, which already
+depends on both.
 
 An earlier draft of this section drew a strict chain — `cloo → {server, client} → core →
 {proto, term}` — which the implementation contradicted three times in M0 alone. The reasons were
@@ -86,7 +88,7 @@ would reduce that crate to a re-export shim. The current edges are:
 |---|---|---|
 | `cloo` | `cloo-server`, `cloo-client`, `cloo-proto` | Composition root; names the geometry it passes between the halves |
 | `cloo-server` | `cloo-core`, `cloo-proto`, `cloo-term` | Hands clients wire contents; the PTY reactor owns a pane's `Emulator` |
-| `cloo-client` | `cloo-core`, `cloo-proto` | The grid cache stores wire `Cell`s and applies wire `RowUpdate`s |
+| `cloo-client` | `cloo-core`, `cloo-proto` | The grid cache stores wire `Cell`s and applies wire `RowUpdate`s; attach speaks the wire directly |
 | `cloo-core` | `cloo-proto`, `cloo-term` | Owns the conversion between the two cell vocabularies |
 
 The `alacritty_terminal` rule is untouched by any of this: `cloo-server` names only `cloo-term`'s
@@ -182,8 +184,44 @@ same path. The directory is created and narrowed to `0700` on every bind — `cr
 applies the umask, and a session socket is a channel into the user's shell.
 
 The listener is bound non-blocking as `std::os::unix::net::UnixListener`, which keeps `bind` free
-of a runtime requirement; M1-02 hands `try_clone_std` to `tokio::net::UnixListener::from_std` so
-the guard and its unlink stay alive alongside the async half.
+of a runtime requirement; `Daemon::new` hands `try_clone_std` to
+`tokio::net::UnixListener::from_std` so the guard and its unlink stay alive alongside the async
+half.
+
+#### Attach, hello, and detach
+
+`cloo-server::conn` is the handshake and nothing else. `accept_attach` reads the first frame on a
+connection and refuses anything that is not an `Attach` at a matching `PROTOCOL_VERSION`. Every
+refusal is *sent* as `Refused { reason }` before the connection is dropped: a client told why it
+was turned away can print something the user can act on, and a client that only sees a closed
+socket cannot. A peer that closes before saying anything is not a refusal — there is nobody left
+to report to.
+
+`conn::session_snapshot` is what an attach delivers. A client caches the visible grid and nothing
+else, so it needs the whole picture the moment it connects, and it arrives as the same message
+types an incremental update uses — `Layout`, then `Damage`, then `CursorMoved` — so a resync and a
+damage frame stay one code path on the client. Geometry comes first so rows never arrive with
+nowhere to land.
+
+`cloo-server::daemon` is the serving loop that owns the pane and outlives every client attached to
+it. The property it exists to guarantee is that the child belongs to the daemon, not to whoever is
+watching: a client that detaches, disconnects, or dies takes nothing with it, and the PTY keeps
+being pumped *between* connections so a reattaching client finds the session where it left it
+rather than where it last drew it. `Detach` is acknowledged with `Detached` and the connection
+closed; the child never learns it happened.
+
+Two things in the daemon are deliberate placeholders. It serves one client at a time and sends a
+full grid capture per frame tick — fan-out and coalesced row damage are M1-04, and the
+`mpsc<Command>` session task that serializes input and resize is M1-03. What is already true is
+the property those tasks must not break: the update rate is capped by a frame timer rather than
+driven by PTY readiness.
+
+`cloo-client::attach` is the other end. It connects, sends `Attach`, and interprets nothing until
+the reply is a `Hello` whose version matches — both directions check, because `Attach` catches a
+stale client and `Hello` catches a rebuilt server, and the second is the case that actually
+happens the first time someone rebuilds mid-session. `Attached::detach` sends `Detach`, waits for
+the acknowledgement, discards any damage still in flight, and drops the connection. A socket with
+nothing behind it reports "no cloo daemon is listening", not a bare `ENOENT`.
 
 ### Client
 
@@ -196,7 +234,8 @@ That boundary is why theming never touches session state.
 `cloo-client` also depends on `cloo-proto` directly, as of M0-06: the client's grid cache stores
 wire `Cell`s and applies wire `RowUpdate`s, and routing those through `cloo-core` would mean
 re-exporting the whole message surface from a crate that has no rendering concern. Like
-`cloo-server` → `cloo-term`, this is a shortcut down the graph, not a back-edge.
+`cloo-server` → `cloo-term`, this is a shortcut down the graph, not a back-edge. As of M1-02 it
+also speaks the wire outright: `cloo-client::attach` owns the client half of the handshake.
 
 #### Renderer
 
@@ -278,9 +317,12 @@ Stdin is read on a dedicated thread rather than through an async descriptor: mak
 non-blocking would change a file description the user's shell shares, and a shell left
 non-blocking after cloo exits is a worse bug than a parked thread.
 
-M1-01 added the socket lifecycle beneath this loop but did not change it: the binary still runs
-one pane in-process. M1-02 puts a real client on the other end of that socket and M1-03 turns the
-loop into the daemon's session task; `cloo attach` / `cloo new` join the CLI surface with them.
+M1-01 added the socket lifecycle beneath this loop and M1-02 added a daemon and an attach client
+over it, but neither changed the binary: `cloo` with no arguments still runs one pane in-process,
+because `cloo attach` and `cloo new` are a CLI surface that only makes sense once the session task
+in M1-03 can back it. `crates/cloo/tests/attach.rs` drives the daemon and the client against each
+other in the meantime — that end-to-end coverage has to live in the binary crate, since
+`cloo-server` may never name `cloo-client`, not even as a dev-dependency.
 
 ### Agent pane metadata and attention
 
@@ -338,6 +380,15 @@ Two guards matter on the socket path. A partial buffer returns `ProtoError::Inco
 more and retry, never an error to report. A length prefix above `MAX_FRAME_LEN` (16 MiB) is
 rejected *before* anything is allocated for it; a frame that large is a desync or a hostile
 peer, not a real message.
+
+`cloo_proto::stream::FrameStream` pairs that arithmetic with a transport, so the drain-and-retry
+loop exists once rather than once per side of the connection. It lives in `cloo-proto` because
+both halves need it and neither may depend on the other, and it is generic over the transport —
+`UnixStream` in production, a duplex pipe in a test. It draws one distinction the callers rely
+on: a clean end of stream *between* frames is `Ok(None)`, because a peer that closed its side is
+ordinary, while bytes that stop *inside* a frame are `StreamError::Truncated`, which is a real
+error. This is the one place `cloo-proto` names an external runtime (`tokio`); it still knows
+nothing about PTYs or rendering.
 
 ### Handshake
 

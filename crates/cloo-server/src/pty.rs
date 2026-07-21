@@ -569,6 +569,13 @@ impl PtyReactor {
     pub fn wait(&mut self) -> Result<ExitStatus, PtyError> {
         self.pty.get_mut().wait()
     }
+
+    /// The child's process id, useful for diagnostics and for a test that has
+    /// to prove a detach did not kill it.
+    #[must_use]
+    pub fn child_id(&self) -> u32 {
+        self.pty.get_ref().child_id()
+    }
 }
 
 /// Allocates a master/slave pair sized to `size`.

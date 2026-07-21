@@ -4,12 +4,14 @@
 //! PTYs, terminal emulation, or rendering. Every type here crosses the Unix
 //! socket between `cloo-server` and `cloo-client`.
 //!
-//! Four modules:
+//! Five modules:
 //!
 //! - [`ids`] — newtype identifiers that cross the wire.
 //! - [`message`] — the [`ClientMessage`] and [`ServerMessage`] enums.
 //! - [`frame`] — length-prefixed postcard framing and the
 //!   [`PROTOCOL_VERSION`] handshake check.
+//! - [`stream`] — that framing paired with an async transport, so the
+//!   drain-and-retry loop exists once instead of once per side.
 //! - [`error`] — the crate-local [`ProtoError`].
 //!
 //! Bump [`PROTOCOL_VERSION`] on **every** change to a wire type. A stale client
@@ -24,6 +26,7 @@ pub mod error;
 pub mod frame;
 pub mod ids;
 pub mod message;
+pub mod stream;
 
 pub use error::ProtoError;
 pub use frame::{
@@ -35,3 +38,4 @@ pub use message::{
     MouseButton, MouseEvent, MouseKind, PaneRect, Point, RowUpdate, ServerMessage, Size,
     TabSummary, TermCaps,
 };
+pub use stream::{FrameStream, StreamError};

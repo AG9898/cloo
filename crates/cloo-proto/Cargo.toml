@@ -14,3 +14,4 @@ homepage.workspace = true
 [dependencies]
 serde.workspace = true
 postcard.workspace = true
+tokio.workspace = true

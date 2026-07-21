@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 108 unit tests
-across six crates, 21 integration tests, and six doctests. This section grows as M1 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 135 unit tests
+across six crates, 36 integration tests, and seven doctests. This section grows as M1 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -130,6 +130,33 @@ binds inside its own uniquely named directory under `$TMPDIR`, so nothing depend
 - A departing daemon leaving a successor's socket at the same path alone, which is what the
   `(device, inode)` check in `Drop` exists for.
 - A path with no parent directory refused rather than bound relative to the cwd.
+
+Attach and detach are covered from both directions. The framed transport is unit tested in
+`cloo-proto`'s `src/stream.rs` over a `tokio::io::duplex` pipe, which is what makes a frame split
+across reads and a peer that dies mid-frame testable without a socket at all: reassembly across
+reads, queued frames coming back in order, a clean close between frames reading as `Ok(None)`, a
+close *inside* a frame reading as `Truncated`, and an implausible length prefix refused before
+anything is read for it. The handshake itself is unit tested the same way in
+`cloo-server::conn` and `cloo-client::attach` — a matching attach accepted, a version mismatch
+refused with a reason that names both versions and says "reattach", a first frame that is not an
+attach refused, a silent peer treated as a close rather than a refusal, and the snapshot batch
+ordered geometry-first.
+
+The end-to-end coverage lives in `crates/cloo/tests/attach.rs`, in the **binary** crate rather
+than in `cloo-server`. That is not a convenience: it needs both halves of the wire, and
+`cloo-server` may never name `cloo-client`, dev-dependency or otherwise. Each test binds its own
+socket under `$TMPDIR` and synchronizes by reading the wire until the expected frame arrives,
+bounded by a timeout — never by sleeping:
+
+- An attach delivering a `Hello` and a session snapshot that contains what the child had already
+  written.
+- A detach leaving the child alive — asserted with `kill(pid, 0)` — and a second client
+  reattaching to find the same grid, then driving the child to exit.
+- A client connection dropped without a detach costing the session nothing.
+- A client announcing a different protocol version refused with an actionable reason, and the
+  session still attachable afterwards.
+- Attaching where nothing is listening, and where a `SIGKILL`ed daemon left a socket file behind,
+  both reporting "no cloo daemon is listening".
 
 Covered today in `cloo-client`. The renderer is a pure function into a byte buffer, so every
 frame is asserted against an exact expected string rather than eyeballed — all unit tests:
@@ -233,6 +260,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 |---|---|---|
 | `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
+| `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, and every rejection leaving the tree unchanged |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
@@ -242,12 +270,16 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
+| `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, and the snapshot batch ordered geometry-first |
+| `crates/cloo-server/src/daemon.rs` | Daemon | Pure only: the frame-rate cap and the session's fixed IDs |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | Capability detection from `TERM`/`COLORTERM` and the degenerate-`winsize` fallback |
+| `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, and a pipe refused |
 | `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |
 | `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, and signal-path terminal restore |
+| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and a real client over a real socket: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, and no daemon listening |
 
 ---
 

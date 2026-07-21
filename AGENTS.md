@@ -90,7 +90,8 @@ M1–M2. Dependencies are declared in the root `[workspace.dependencies]` and ar
 **layering**, not a single chain: `cloo` over {`cloo-server`, `cloo-client`} over `cloo-core` over
 the leaves {`cloo-proto`, `cloo-term`}. Any crate may name any crate in a lower layer — in
 particular every crate that speaks the wire names `cloo-proto` directly. Forbidden: a back-edge, a
-cycle, and any edge between `cloo-server` and `cloo-client`. See
+cycle, and any edge between `cloo-server` and `cloo-client` — **including a dev-dependency**, so a
+test needing both halves belongs in `crates/cloo`. See
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current edge table.
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
@@ -281,11 +282,16 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 table-driven layout tree coverage as of M0-03, plus the emulator-to-wire cell conversion as of
 M0-07. `cloo-term` has grid coverage — SGR, alternate screen, cursor, resize, scrollback — as of
 M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a scripted `sh -c`
-child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01. `cloo-client` has byte-exact renderer coverage and raw-mode restore coverage —
-normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as of M0-06. The
-binary has CLI and one-pane smoke coverage in `crates/cloo/tests/cli.rs`, run over a
-pseudoterminal, as of M0-07. Keymap resolution and config parsing are the next things that must
-get coverage as they land.
+child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01 and handshake
+coverage in `src/conn.rs` as of M1-02. `cloo-client` has byte-exact renderer coverage and raw-mode
+restore coverage — normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as
+of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02. `cloo-proto` gained
+framed-transport coverage in `src/stream.rs` over a duplex pipe in the same task. The binary has
+CLI and one-pane smoke coverage in `crates/cloo/tests/cli.rs`, run over a pseudoterminal, as of
+M0-07, and end-to-end attach/detach coverage in `crates/cloo/tests/attach.rs` as of M1-02 — that
+one lives in the binary crate because it needs both halves of the wire and `cloo-server` may never
+name `cloo-client`. Keymap resolution and config parsing are the next things that must get
+coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -433,6 +439,24 @@ socket` uses `symlink_metadata` and refuses anything that is not itself a socket
 compares the `(device, inode)` recorded at bind, so a departing daemon cannot unlink a successor
 that already claimed the path. Both cases have tests, and both pass vacuously if you use the
 wrong stat call.
+
+### 2026-07-21 — The server/client edge ban covers dev-dependencies
+An end-to-end attach test naturally wants `cloo-client` in `cloo-server`'s `[dev-dependencies]`,
+and that is the forbidden sideways edge just as much as a real dependency is — Cargo builds it,
+and the graph now has the cycle the layering exists to prevent. `crates/cloo/tests/attach.rs` is
+where a test that needs both halves goes, because the composition root already depends on both.
+
+### 2026-07-21 — A clean close and a truncated frame are different answers
+`FrameStream::recv` returns `Ok(None)` when the peer closes *between* frames and
+`StreamError::Truncated` when it closes *inside* one. Collapsing the two either turns an ordinary
+detach into an error the client reports, or turns a half-written frame into a silent hang-up that
+looks like a normal disconnect. The read buffer's emptiness at EOF is the whole test.
+
+### 2026-07-21 — A daemon must pump the PTY while nobody is attached
+The property "detach leaves the child running" is not only about not killing the child: a daemon
+that reads the PTY only while a client is connected loses every byte written in between, and a
+reattaching client finds a stale grid. `Daemon::wait_for_client` therefore selects over `accept`
+*and* `pump`, and the reattach test asserts on text the child wrote before anyone connected.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into
