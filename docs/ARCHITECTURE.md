@@ -230,7 +230,7 @@ than driven by PTY readiness.
 #### The session task
 
 `cloo-server::session` is the one thing that mutates a session. Everything that changes it — a
-keystroke, a resize, a future split — arrives as a `Command` on a single `mpsc` and is applied in
+keystroke, a resize, a split — arrives as a `Command` on a single `mpsc` and is applied in
 arrival order by one task, as of M1-03. `Input` carries already-encoded keys; `Paste`, `Focus`,
 and `Mouse` carry events the task encodes itself from the pane's negotiated modes, as of M1-07,
 and `SessionSnapshot` carries those modes back out so a client can route the next event. There is
@@ -253,8 +253,37 @@ so a session producing bytes faster than anyone reads them coalesces into a sing
 notification rather than one per PTY read, and the reader asks for a snapshot when it is ready to
 draw. `Exited` is sent once the PTY reaches end of file; the task stays alive and still answers
 snapshot commands after it, which is what lets a child's last words be drawn before its death is
-reported. The task pumps its PTY for its whole life, attached or not, so nothing written between
-connections is lost.
+reported. The task pumps every pane's PTY for its whole life, attached or not, so nothing written
+between connections is lost. A pane whose child exits stops being pumped and keeps its grid;
+`Exited` is sent once *every* pane's child is gone, because a session with one dead pane and three
+live ones is not over.
+
+##### Split and close
+
+As of M2-01 a session owns one PTY per pane, and the layout tree is the only record of which panes
+exist. `Command::Split` and `Command::Close` are what keep the two in step, and the ordering is the
+whole of the atomicity:
+
+1. **The layout is asked first**, because it is the half that can refuse. A split below
+   `MIN_PANE_SIZE`, a close of an unknown pane, and a close of the session's last pane all fail
+   here — before a process is spawned or a child is killed.
+2. **Then the PTY.** A split spawns its child at the rectangle that same layout pass produced, so
+   the child's first `TIOCGWINSZ` is already right; a close drops the pane's `PtyReactor`, and
+   dropping it is what kills and reaps the child. There is no separate teardown to forget.
+3. **A spawn that fails rolls the layout back** by closing the pane it just added, which restores
+   the tree exactly — ratios included, since collapsing a fresh split promotes the pane that was
+   split back into its own place.
+
+No `await` sits between those steps, so no other command can observe a pane that exists in the
+layout and not in the PTY set, or the reverse. Both commands then run the same geometry pass a
+resize does, so a split shrinks its neighbour's child and a close regrows the survivor's.
+
+Focus follows a split. Closing the focused pane moves focus to the first surviving pane in
+traversal order; directional focus and zoom are M2-02.
+
+Reading N PTYs is a hand-rolled `select_all` over the unended panes rather than a dependency:
+`PtyReactor::pump` is cancel-safe, so the futures that lose are dropped and cost a wakeup, never a
+byte. The polling order rotates, so a pane producing output continuously cannot starve a quiet one.
 
 `cloo-client::attach` is the other end. It connects, sends `Attach`, and interprets nothing until
 the reply is a `Hello` whose version matches — both directions check, because `Attach` catches a
@@ -490,10 +519,11 @@ Tokio, actor-shaped rather than shared mutable state:
 Everything reaches the session task through a single `mpsc<Command>`. There is no `Mutex` on
 session state. Expect bugs in PTY/resize *ordering*, not in lock discipline.
 
-The session task is real as of M1-03 — see [The session task](#the-session-task). Today it owns
-its pane's PTY directly rather than talking to a separate per-PTY task; splitting the two is a
-detail of M2-01, and it changes nothing about the rule, since a second PTY task would still reach
-session state only through the same channel.
+The session task is real as of M1-03 — see [The session task](#the-session-task). It owns every
+pane's PTY directly rather than talking to a separate per-PTY task, and as of M2-01 it owns
+several of them, pumping the set with a rotating `select_all`. Giving each PTY its own task is
+still open; it would change nothing about the rule, since a PTY task would reach session state
+only through the same channel.
 
 ---
 

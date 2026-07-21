@@ -409,6 +409,10 @@ pub enum Pump {
 /// client decides what it looks like": nothing here describes an appearance.
 /// Row damage on the wire in M1-04 is the same [`RowUpdate`] type, so an
 /// incremental update and a full resync stay one code path on the client.
+///
+/// The [`Default`] is a pane with nothing in it. It exists so a snapshot path
+/// can answer an impossible question — a focused pane that is somehow not
+/// held — without an `unwrap` in front of a renderer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneSnapshot {
     /// The pane's geometry.
@@ -417,6 +421,16 @@ pub struct PaneSnapshot {
     pub rows: Vec<RowUpdate>,
     /// Where to draw the cursor, or `None` if it should not be drawn.
     pub cursor: Option<(Point, CursorShape)>,
+}
+
+impl Default for PaneSnapshot {
+    fn default() -> Self {
+        Self {
+            size: Size::new(0, 0),
+            rows: Vec::new(),
+            cursor: None,
+        }
+    }
 }
 
 /// One pane's PTY plus its terminal grid.

@@ -689,6 +689,44 @@ mod tests {
         }
     }
 
+    /// The property a caller relies on to undo a split it cannot complete.
+    ///
+    /// `cloo-server`'s session splits the layout first and spawns the pane's
+    /// child second, because the layout is the half that can refuse and a
+    /// refusal must not cost a process. When the spawn then fails, closing the
+    /// new pane is the rollback — so it has to restore the tree *exactly*,
+    /// ratios included, and not merely leave the same panes in it.
+    #[test]
+    fn closing_a_freshly_split_pane_restores_the_tree_exactly() {
+        let starts = [
+            &[][..],
+            &[(0, Direction::Horizontal, 1)][..],
+            &[(0, Direction::Horizontal, 1), (1, Direction::Vertical, 2)][..],
+        ];
+
+        for splits in starts {
+            for dir in [Direction::Horizontal, Direction::Vertical] {
+                for ratio in [0.4, 0.5, 0.6] {
+                    let mut layout = build(splits);
+                    let before = layout.clone();
+                    layout
+                        .split(pane(0), dir, ratio, pane(7), AREA)
+                        .expect("the fixture areas all have room");
+                    assert_ne!(layout, before, "the split must have changed something");
+
+                    layout
+                        .close(pane(7))
+                        .expect("the new pane must be closable");
+                    assert_eq!(
+                        layout, before,
+                        "rolling back a split at {ratio} on {dir:?} must restore the \
+                         tree exactly, not merely the same set of panes"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn closing_the_last_pane_is_refused() {
         let mut layout = Layout::new(pane(0));

@@ -339,8 +339,13 @@ impl Daemon {
                     let _ = conn.shutdown().await;
                     return Ok(Served::Gone);
                 }
-                // Splits and tabs are M2. Ignoring them keeps an old client from
-                // taking the session down.
+                // The session can split and close as of M2-01, but a client
+                // cannot yet draw more than the focused pane — per-pane
+                // contents reach the wire with M2-03, and the keybindings that
+                // would ask for a split with M2-10. Serving a split before then
+                // would hand a client a pane it has nowhere to put, so these
+                // stay ignored, which also keeps an old client from taking the
+                // session down.
                 Step::From(Ok(Some(ClientMessage::Command(_)))) => {}
                 // A second attach on an attached connection is a desync.
                 Step::From(Ok(Some(ClientMessage::Attach { .. }))) => {

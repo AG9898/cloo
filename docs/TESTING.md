@@ -107,6 +107,31 @@ only tests in the workspace that fork a process:
 - A nonexistent program failing to spawn with the program named in the error.
 - A dropped `Pty` leaving no process behind — not even a zombie.
 
+Split and close are the second set that forks, in `tests/session.rs`, driving the session actor
+rather than a bare reactor. Every child there reports its own `stty size` **on demand** — once per
+line written to it — rather than on a loop, which is what keeps the assertions non-vacuous: a
+looping reporter leaves its old answer on the grid and passes whether or not anything still works,
+while an on-demand one can only show a report produced after the split or close under test. Each
+assertion is on the *last* non-blank line for the same reason.
+
+- A split putting both panes in the layout, moving focus to the new one, and its child starting at
+  the rectangle the layout pass produced rather than at the session's whole area.
+- A close collapsing the parent split, moving focus to a pane that still exists, and the survivor's
+  child being told it grew back.
+- A split with no room refused as `TooSmall`, with the layout, the focus, and the refused pane's
+  own PTY all exactly as they were.
+- Closing the last pane and closing an unknown pane refused, with the child still running and
+  still resizable afterwards.
+- A resize divided between both panes, each child driven from the same layout pass the client's
+  rectangles came from.
+
+Both geometry halves were confirmed non-vacuous the way `AGENTS.md` prescribes: breaking the
+post-split layout pass fails three of these tests, and the survivor's regrowth has no second path
+to pass by. The rollback a failed spawn depends on cannot be reached from here — the session's
+program is fixed at spawn — so it is covered where it actually lives, as an exactness property of
+`cloo-core::layout`: closing a freshly split pane restores the previous tree ratio for ratio, not
+merely the same set of panes.
+
 The `cloo-server` unit tests in `src/pty.rs` are pure by rule: config defaults, the `winsize`
 conversion, and error conversion. Nothing that spawns. The same rule applies to `src/socket.rs`,
 whose unit tests cover only path resolution and name validation — `resolve_socket_path` takes the
@@ -279,7 +304,8 @@ The intended shape for the rest, in the order it becomes testable:
 - **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
   pure and testable without a terminal.
 - **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01, handshake and attach
-  coverage at M1-02, and the session task at M1-03. Slower; keep the count deliberate.
+  coverage at M1-02, the session task at M1-03, and split and close at M2-01. Slower; keep the
+  count deliberate.
 - **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06, and the
   signal restore path joined them from the binary's own tests once M0-07 gave it a child process
   to signal. `SIGWINCH` went the same way at M1-03, for the same reason: a library test that
@@ -312,13 +338,14 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
-| `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, and every rejection leaving the tree unchanged |
+| `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, and closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, and one fixture per negotiated input mode — set, read back, and cleared |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
+| `crates/cloo-server/tests/session.rs` | Session task | Split and close against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, and a resize divided between every pane |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |

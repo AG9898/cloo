@@ -287,8 +287,8 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 table-driven layout tree coverage as of M0-03, plus the emulator-to-wire cell conversion as of
 M0-07. `cloo-term` has grid coverage — SGR, alternate screen, cursor, resize, scrollback — as of
 M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a scripted `sh -c`
-child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01 and handshake
-coverage in `src/conn.rs` as of M1-02. `cloo-client` has byte-exact renderer coverage and raw-mode
+child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01, handshake
+coverage in `src/conn.rs` as of M1-02, and split/close coverage in `tests/session.rs` as of M2-01. `cloo-client` has byte-exact renderer coverage and raw-mode
 restore coverage — normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as
 of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02 and `SIGWINCH` watch
 coverage in `src/resize.rs` as of M1-03, and capability negotiation and fallback coverage in
@@ -500,6 +500,27 @@ so inferring the refusal there would turn a legitimate attach away. `TERM` is th
 so `cloo-client::capabilities::attach_caps` refuses before the socket is touched, and
 `caps_from_env` is the same detection with the refusal replaced by an all-false default for the
 local pane — one function, two policies, which is what keeps the two paths from drifting.
+
+### 2026-07-21 — Ask the layout first, then the PTY, and roll back with `close`
+Split and close are atomic because of their order, not because of a transaction: the layout is the
+half that can refuse, so it goes first and a refusal never costs a process, and only then is the
+child spawned or its reactor dropped. A spawn that fails is undone by closing the pane just added,
+which works only because collapsing a fresh split restores the previous tree *exactly* — that
+exactness is now a test in `cloo-core::layout`, since the server cannot reach the failure path.
+
+### 2026-07-21 — A child that reports on a loop makes a resize assertion vacuous
+`while :; do stty size; done` leaves its old answer on the grid, so an assertion on it passes
+whether or not the resize under test happened; `while read _; do stty size; done` reports only when
+the test asks, and checking the *last* non-blank line is what pins it to the most recent answer.
+This is the opposite of the M1-03 lesson about ordering — use a loop when a signal races input, an
+on-demand reporter when a stale identical answer would pass.
+
+### 2026-07-21 — Selecting over N PTYs needs no dependency
+The session pumps a runtime-sized set of panes with a hand-rolled `select_all`: box each
+`PtyReactor::pump`, poll them in a `poll_fn`, and rotate the starting index so a loud pane cannot
+starve a quiet one. It is safe only because `pump` is cancel-safe — every future that loses is
+dropped on each call. Box the futures as `dyn Future + Send`, or the whole session task stops being
+`Send` and `tokio::spawn` rejects it with an error that points at the wrong line.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into
