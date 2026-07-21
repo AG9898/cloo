@@ -4,7 +4,7 @@
 //! session state. **All chrome is rendered here**, which is why theming never
 //! touches the server.
 //!
-//! Six modules today:
+//! Seven modules today:
 //!
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
@@ -17,15 +17,19 @@
 //!   nothing at all.
 //! - [`resize`] — `SIGWINCH`, turned into an awaitable report of the outer
 //!   terminal's new geometry.
+//! - [`input`] — the reporting modes cloo asks the outer terminal for, the
+//!   decoder that splits its byte stream back into typed events, and the rule
+//!   that decides whether a mouse event is chrome's or the application's.
 //! - [`attach`] — connecting to a daemon, the versioned handshake, and
 //!   detaching without taking the session with it.
 //!
 //! Rendering is a pure function into a byte buffer rather than a write to a
 //! descriptor, which is what makes a fake grid renderable in a unit test with an
-//! exact expected string. Input encoding and theming land later in M1.
+//! exact expected string. Theming lands later in M1.
 
 pub mod attach;
 pub mod capabilities;
+pub mod input;
 pub mod outer;
 pub mod raw_mode;
 pub mod renderer;
@@ -36,6 +40,7 @@ pub use capabilities::{
     Capability, CapsError, Degradation, Fallback, attach_caps, caps_from_env, degradations,
     detect_attach_caps, detect_caps,
 };
+pub use input::{InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, mouse_owner};
 pub use outer::{current_size, window_size};
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, Grid, RenderError, Renderer};

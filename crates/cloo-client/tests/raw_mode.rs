@@ -174,6 +174,93 @@ fn a_second_guard_is_refused_rather_than_overwriting_the_saved_state() {
     );
 }
 
+/// Everything the terminal has been sent since the pair was opened.
+fn drain(pair: &TtyPair) -> Vec<u8> {
+    use std::os::fd::AsRawFd;
+    let fd = pair._master.as_raw_fd();
+    // SAFETY: `fd` is a live descriptor; `F_SETFL` only changes its flags.
+    unsafe { libc::fcntl(fd, libc::F_SETFL, libc::O_NONBLOCK) };
+    let mut buf = [0_u8; 256];
+    // SAFETY: `buf` is live local storage of exactly the length passed.
+    let read = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if read <= 0 {
+        return Vec::new();
+    }
+    #[allow(clippy::cast_sign_loss)]
+    buf[..read as usize].to_vec()
+}
+
+#[test]
+fn a_registered_reset_is_written_on_the_normal_restore_path() {
+    let _lock = exclusive();
+    let tty = open_tty();
+    let reset = b"\x1b[?1006l\x1b[?1000l";
+
+    let guard = RawMode::enter(tty.slave.as_fd()).expect("a pty slave is a terminal");
+    guard.on_restore(reset).expect("the sequence fits");
+    guard.restore().expect("restoring a live pty cannot fail");
+
+    assert_eq!(
+        drain(&tty),
+        reset,
+        "a reporting mode left on outlives cloo and confuses the user's shell"
+    );
+}
+
+#[test]
+fn a_registered_reset_is_written_on_the_panic_path_too() {
+    let _lock = exclusive();
+    let tty = open_tty();
+    let reset = b"\x1b[?2004l";
+
+    let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let guard = RawMode::enter(tty.slave.as_fd()).expect("a pty slave is a terminal");
+        guard.on_restore(reset).expect("the sequence fits");
+        panic!("the client panicked with bracketed paste on");
+    }));
+
+    assert!(panicked.is_err(), "the panic propagated");
+    assert_eq!(drain(&tty), reset, "the panic hook wrote the reset");
+    assert!(!is_raw(&attributes(&tty.slave)), "and still restored");
+}
+
+#[test]
+fn a_restored_guard_leaves_no_reset_behind_for_the_next_one() {
+    let _lock = exclusive();
+    let tty = open_tty();
+
+    let first = RawMode::enter(tty.slave.as_fd()).expect("a pty slave is a terminal");
+    first.on_restore(b"\x1b[?1004l").expect("the sequence fits");
+    first.restore().expect("restoring a live pty cannot fail");
+    let _ = drain(&tty);
+
+    let second = RawMode::enter(tty.slave.as_fd()).expect("the slot was released");
+    second.restore().expect("restoring a live pty cannot fail");
+    assert!(
+        drain(&tty).is_empty(),
+        "a guard that registered nothing must write nothing"
+    );
+}
+
+#[test]
+fn a_reset_that_does_not_fit_is_refused_rather_than_truncated() {
+    let _lock = exclusive();
+    let tty = open_tty();
+    let guard = RawMode::enter(tty.slave.as_fd()).expect("a pty slave is a terminal");
+
+    let oversized = vec![b'x'; cloo_client::raw_mode::MAX_RESET_LEN + 1];
+    assert!(matches!(
+        guard.on_restore(&oversized),
+        Err(RawModeError::ResetTooLong { .. })
+    ));
+
+    guard.restore().expect("restoring a live pty cannot fail");
+    assert!(
+        drain(&tty).is_empty(),
+        "half a sequence would be printed on the user's screen"
+    );
+}
+
 #[test]
 fn a_pipe_is_refused_as_not_a_terminal() {
     let _lock = exclusive();

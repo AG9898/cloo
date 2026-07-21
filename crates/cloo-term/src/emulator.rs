@@ -15,6 +15,7 @@ use alacritty_terminal::vte::ansi::{
 };
 
 use crate::cell::{Cell, CellAttrs, Color, CursorShape, CursorState, TermSize};
+use crate::modes::{MouseTracking, PaneModes};
 
 /// Default scrollback depth, in lines, for a newly created pane.
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
@@ -69,6 +70,11 @@ impl Emulator {
     pub fn new(size: TermSize, scrollback: usize) -> Self {
         let config = Config {
             scrolling_history: scrollback,
+            // Off by default in the backend, and an agent harness is exactly the
+            // kind of application that pushes a Kitty flag set. Left off, the
+            // push is silently discarded and [`modes`](Self::modes) would report
+            // legacy keys forever — a wrong answer rather than a missing one.
+            kitty_keyboard: true,
             ..Config::default()
         };
         Self {
@@ -178,6 +184,37 @@ impl Emulator {
     #[must_use]
     pub fn is_alt_screen(&self) -> bool {
         self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// The input modes the child application has asked for.
+    ///
+    /// This is what decides how an input event is *encoded* — whether a paste is
+    /// bracketed, whether a click is reported at all — and therefore whether a
+    /// mouse event belongs to the application or to cloo's chrome. Reading it
+    /// from the emulator rather than tracking the sequences separately is the
+    /// point: the private mode sets are already parsed here, and a second parser
+    /// would be a second answer that could disagree.
+    #[must_use]
+    pub fn modes(&self) -> PaneModes {
+        let mode = self.term.mode();
+        let mouse = if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseTracking::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseTracking::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseTracking::Click
+        } else {
+            MouseTracking::Off
+        };
+        PaneModes {
+            mouse,
+            sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
+            bracketed_paste: mode.contains(TermMode::BRACKETED_PASTE),
+            focus_events: mode.contains(TermMode::FOCUS_IN_OUT),
+            // Any Kitty flag being live means the application is reading keys in
+            // the extended encoding; which flags in particular is its business.
+            extended_keys: mode.intersects(TermMode::KITTY_KEYBOARD_PROTOCOL),
+        }
     }
 
     /// How many lines of history sit above the viewport.
@@ -610,5 +647,96 @@ mod tests {
 
         term.scroll_to_bottom();
         assert!(term.cursor().visible);
+    }
+
+    // -- negotiated input modes ---------------------------------------------
+
+    #[test]
+    fn an_application_that_negotiates_nothing_has_every_mode_off() {
+        let term = emulator(20, 3);
+        assert_eq!(term.modes(), PaneModes::default());
+    }
+
+    /// One fixture per negotiated mode: the sequence that turns it on, the
+    /// predicate that must then hold, and the sequence that turns it off again.
+    /// A mode that is set but never cleared is the bug this table catches.
+    #[test]
+    fn every_negotiated_mode_is_read_back_and_cleared() {
+        /// A named fixture: enable it, check it, disable it.
+        type ModeCase = (
+            &'static str,
+            &'static [u8],
+            fn(PaneModes) -> bool,
+            &'static [u8],
+        );
+        let cases: [ModeCase; 4] = [
+            (
+                "bracketed paste",
+                b"\x1b[?2004h",
+                |m| m.bracketed_paste,
+                b"\x1b[?2004l",
+            ),
+            (
+                "focus events",
+                b"\x1b[?1004h",
+                |m| m.focus_events,
+                b"\x1b[?1004l",
+            ),
+            ("SGR mouse", b"\x1b[?1006h", |m| m.sgr_mouse, b"\x1b[?1006l"),
+            (
+                "mouse click tracking",
+                b"\x1b[?1000h",
+                |m| m.mouse == MouseTracking::Click,
+                b"\x1b[?1000l",
+            ),
+        ];
+
+        for (name, enable, holds, disable) in cases {
+            let mut term = emulator(20, 3);
+            term.feed(enable);
+            assert!(holds(term.modes()), "{name} was not seen as enabled");
+            term.feed(disable);
+            assert_eq!(
+                term.modes(),
+                PaneModes::default(),
+                "{name} was not seen as disabled again"
+            );
+        }
+    }
+
+    #[test]
+    fn mouse_tracking_reports_the_highest_level_the_application_asked_for() {
+        let mut term = emulator(20, 3);
+        term.feed(b"\x1b[?1000h");
+        assert_eq!(term.modes().mouse, MouseTracking::Click);
+        term.feed(b"\x1b[?1002h");
+        assert_eq!(term.modes().mouse, MouseTracking::Drag);
+        term.feed(b"\x1b[?1003h");
+        assert_eq!(term.modes().mouse, MouseTracking::Motion);
+    }
+
+    #[test]
+    fn a_kitty_keyboard_push_is_extended_keys() {
+        let mut term = emulator(20, 3);
+        assert!(!term.modes().extended_keys);
+        term.feed(b"\x1b[>1u");
+        assert!(
+            term.modes().extended_keys,
+            "a pushed Kitty flag set means the application reads extended keys"
+        );
+        term.feed(b"\x1b[<u");
+        assert!(!term.modes().extended_keys, "popping must restore legacy");
+    }
+
+    #[test]
+    fn the_modes_an_application_sets_are_independent() {
+        let mut term = emulator(20, 3);
+        term.feed(b"\x1b[?2004h");
+        let modes = term.modes();
+        assert!(modes.bracketed_paste);
+        assert!(
+            !modes.focus_events && !modes.sgr_mouse && modes.mouse == MouseTracking::Off,
+            "one mode must not imply another, got {modes:?}"
+        );
     }
 }

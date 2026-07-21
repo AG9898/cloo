@@ -111,6 +111,10 @@ The constraints that matter most day to day:
   `Mutex` on session state, ever.
 - **Chrome is rendered client-side.** The server sends contents and geometry; the client decides
   what it looks like. This is why theming never touches session state.
+- **The client decodes input; the server encodes it.** A paste, a focus change, and a mouse event
+  cross the wire as what happened, never as bytes for a child — how they are encoded depends on
+  modes the *child* set, which only the emulator sees. A mouse event the chrome owns never reaches
+  the wire at all.
 - **Layout stores ratios, not cell counts** — that is what survives a terminal resize.
 - **Damage is coalesced and render rate capped (~60fps).** Architectural, not a later
   optimization. A large `cat` is the classic multiplexer killer.
@@ -133,7 +137,8 @@ Full topology, crate responsibilities, and protocol: [`docs/ARCHITECTURE.md`](do
 - Never use a caret/range version for `alacritty_terminal` — pin exactly.
 - Never add a `Mutex` to session state.
 - Never emit a render update per PTY read.
-- Never leave the terminal in raw mode on any exit path, including panic.
+- Never leave the terminal in raw mode on any exit path, including panic — and never leave a
+  reporting mode (paste, focus, mouse) on either; register its reset with `RawMode::on_restore`.
 - Never add Windows-specific code — out of scope for v1.
 - Never `unwrap()` in a PTY read, socket read, or render path.
 
@@ -292,7 +297,11 @@ coverage in `src/resize.rs` as of M1-03, and capability negotiation and fallback
 `crates/cloo/tests/cli.rs`, run over a pseudoterminal, as of M0-07 — including the `SIGWINCH`
 chain end to end as of M1-03 — and end-to-end attach/detach coverage in
 `crates/cloo/tests/attach.rs` as of M1-02, extended at M1-03 with a resize asserted on *both*
-halves: the grid reflow and the child's own `stty size`. That file lives in the binary crate
+halves: the grid reflow and the child's own `stty size`, and at M1-07 with input routing end to
+end — a paste bracketed exactly when the child asked, focus and SGR mouse reports reaching a child
+that enabled them and neither reaching one that did not. `cloo-client` gained input decoding and
+mouse-ownership coverage in `src/input.rs` at M1-07, `cloo-server` the matching encoders in
+`src/session.rs`, and `cloo-term` one fixture per negotiated pane mode in `src/emulator.rs`. That file lives in the binary crate
 because it needs both halves of the wire and `cloo-server` may never name `cloo-client`. Keymap
 resolution and config parsing are the next things that must get coverage as they land.
 
@@ -497,3 +506,35 @@ The root `DESIGN.md` was the original planning document and has been folded into
 `docs/PRD.md` (scope, milestones), `docs/ARCHITECTURE.md` (topology, protocol, layout), and
 `docs/DECISIONS.md` (the resolved/open decision log). It no longer exists — do not recreate a
 root-level design doc, since `docs/INDEX.md` forbids root stubs that redirect into `docs/`.
+
+### 2026-07-21 — Encoding input is a function of the child's modes, not the terminal's
+Whether a paste is bracketed, whether a click is reported, and in which encoding are all set by
+private mode sequences the *child* wrote, so only the emulator can answer and only the server sees
+it. That is why `ClientMessage::Paste`/`Focus`/`Mouse` carry events rather than bytes, and why the
+server reports `PaneModes` back — the client needs them to decide whether a click is the
+application's or cloo's chrome's, and it cannot observe them itself.
+
+### 2026-07-21 — A pasted terminator must be stripped, or the bracket is decorative
+`\x1b[201~` inside pasted text closes the bracket early and the remainder of the paste is
+interpreted as typed input — exactly the injection bracketed paste exists to prevent. `paste_bytes`
+strips both delimiters from the body and normalises line endings to `\r`, because a pasted `\n`
+reaches a shell as a literal newline rather than as Enter.
+
+### 2026-07-21 — A lone Escape is a prefix of every sequence the decoder knows
+Holding a partial escape sequence across reads is what makes a split paste or mouse report decode
+correctly, but it also means pressing Escape is held forever waiting for bytes that never come.
+`InputDecoder::flush`, called on the frame tick, is the whole answer — and it deliberately refuses
+to flush mid-paste, since turning half a paste into keystrokes is the failure being prevented.
+
+### 2026-07-21 — A scripted child needs `-icanon` to receive a report with no newline
+`\x1b[I` and an SGR mouse report carry no newline, and a pty in canonical mode delivers nothing to
+the reader until one arrives — an integration test asserting on them hangs to its timeout rather
+than failing. `crates/cloo/tests/attach.rs` runs those children under `stty -echo -icanon` and
+strips the escape byte with `tr`, which is what makes an escape sequence assertable as grid text.
+
+### 2026-07-21 — The Kitty keyboard protocol is off by default in the emulation backend
+`alacritty_terminal`'s `Config::kitty_keyboard` defaults to false, and with it off a child's
+`\x1b[>1u` push is silently discarded — so `Emulator::modes` would report legacy keys forever,
+which is a wrong answer rather than a missing one. cloo turns it on. Related and still open: the
+emulator runs with a `VoidListener`, so any reply it wants to write back to the child (device
+attributes, a keyboard-mode report) is dropped — see DECISIONS.md OPEN-02.

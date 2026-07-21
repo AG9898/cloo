@@ -18,10 +18,13 @@
 //! assert_eq!(wire_size(size), cloo_proto::Size::new(80, 24));
 //! ```
 
-use cloo_proto::{Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, Size};
+use cloo_proto::{
+    Cell, CellAttrs, Color, CursorShape, MouseTracking, PaneModes, Point, RowUpdate, Size,
+};
 use cloo_term::{
     Cell as TermCell, CellAttrs as TermCellAttrs, Color as TermColor,
-    CursorShape as TermCursorShape, CursorState, TermSize,
+    CursorShape as TermCursorShape, CursorState, MouseTracking as TermMouseTracking,
+    PaneModes as TermPaneModes, TermSize,
 };
 
 /// Converts a grid geometry to its wire form.
@@ -105,6 +108,33 @@ pub fn wire_cursor(cursor: CursorState) -> Option<(Point, CursorShape)> {
         TermCursorShape::Hidden => return None,
     };
     Some((Point::new(cursor.col, cursor.row), shape))
+}
+
+/// Converts a pane's negotiated input modes to their wire form.
+///
+/// Written out field by field for the same reason [`wire_attrs`] is: the two
+/// declarations are deliberate mirrors, and a bare struct-literal copy would
+/// keep compiling after somebody changed the meaning of one side.
+#[must_use]
+pub fn wire_modes(modes: TermPaneModes) -> PaneModes {
+    PaneModes {
+        mouse: wire_mouse_tracking(modes.mouse),
+        sgr_mouse: modes.sgr_mouse,
+        bracketed_paste: modes.bracketed_paste,
+        focus_events: modes.focus_events,
+        extended_keys: modes.extended_keys,
+    }
+}
+
+/// Converts a mouse tracking level to its wire form.
+#[must_use]
+pub fn wire_mouse_tracking(tracking: TermMouseTracking) -> MouseTracking {
+    match tracking {
+        TermMouseTracking::Off => MouseTracking::Off,
+        TermMouseTracking::Click => MouseTracking::Click,
+        TermMouseTracking::Drag => MouseTracking::Drag,
+        TermMouseTracking::Motion => MouseTracking::Motion,
+    }
 }
 
 #[cfg(test)]
@@ -213,6 +243,61 @@ mod tests {
             visible: false,
         };
         assert_eq!(wire_cursor(cursor), None);
+    }
+
+    #[test]
+    fn every_tracking_level_survives_the_crossing_in_order() {
+        for (term, wire) in [
+            (TermMouseTracking::Off, MouseTracking::Off),
+            (TermMouseTracking::Click, MouseTracking::Click),
+            (TermMouseTracking::Drag, MouseTracking::Drag),
+            (TermMouseTracking::Motion, MouseTracking::Motion),
+        ] {
+            assert_eq!(wire_mouse_tracking(term), wire);
+        }
+        assert!(
+            MouseTracking::Click < MouseTracking::Drag,
+            "the wire ordering is the filtering rule and must match the emulator's"
+        );
+    }
+
+    #[test]
+    fn every_negotiated_mode_carries_across_on_its_own_field() {
+        // All five distinct from the default, so a conversion that dropped or
+        // crossed a field is caught rather than passing by coincidence.
+        let modes = TermPaneModes {
+            mouse: TermMouseTracking::Drag,
+            sgr_mouse: true,
+            bracketed_paste: true,
+            focus_events: true,
+            extended_keys: true,
+        };
+        assert_eq!(
+            wire_modes(modes),
+            PaneModes {
+                mouse: MouseTracking::Drag,
+                sgr_mouse: true,
+                bracketed_paste: true,
+                focus_events: true,
+                extended_keys: true,
+            }
+        );
+        assert_eq!(wire_modes(TermPaneModes::default()), PaneModes::default());
+    }
+
+    #[test]
+    fn one_negotiated_mode_never_implies_another() {
+        let modes = TermPaneModes {
+            bracketed_paste: true,
+            ..TermPaneModes::default()
+        };
+        assert_eq!(
+            wire_modes(modes),
+            PaneModes {
+                bracketed_paste: true,
+                ..PaneModes::default()
+            }
+        );
     }
 
     #[test]

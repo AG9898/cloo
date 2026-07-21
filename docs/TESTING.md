@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 142 unit tests
-across six crates, 39 integration tests, and eight doctests. This section grows as M1 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 191 unit tests
+across six crates, 48 integration tests, and eight doctests. This section grows as M1 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -172,6 +172,25 @@ Both were confirmed non-vacuous by breaking each half of `PtyReactor::resize` in
 the test fail. A degenerate resize — zero rows, which real terminals report mid-drag — has its own
 test asserting the child is still alive and still at its old geometry.
 
+Input routing, as of M1-07, is covered at three levels because the property spans all three. The
+*decoder* is unit tested in `cloo-client::input`: one fixture per negotiated mode's request and
+its matching reset, one per mouse report kind, sequences split across reads held rather than
+mis-decoded, a lone Escape released only by a flush, and — the one that would otherwise pass
+vacuously — a sequence for a mode that was never requested passing through as ordinary keys. The
+*encoders* are unit tested in `cloo-server::session`, in the same shape: one fixture per mouse
+event kind at the tracking level that asks for it and silence at the level below, a paste
+bracketed only for a child that enabled it, and a paste carrying a paste terminator inside it
+coming out with exactly one terminator at the end.
+
+The end-to-end half is in `crates/cloo/tests/attach.rs`, and it is what proves the two agree. The
+scripted child enables a mode with its own escape sequence, and cloo's answer arrives back through
+`ServerMessage::Modes`; the child then reads a fixed number of bytes and prints them with the
+escape byte stripped, so the encoding is assertable as text on the grid. The negative test is the
+one worth keeping honest: a child that enabled neither focus reporting nor mouse tracking is sent
+both and then four typed bytes, and it must read exactly those four. Those children run under
+`stty -echo -icanon` — without `-icanon` a report with no newline in it is never delivered at all,
+and the test hangs rather than failing.
+
 The `SIGWINCH` end of the same path is covered from `crates/cloo/tests/cli.rs`, because the signal
 has to be delivered to a *process*: the test resizes the outer pseudoterminal, sends the real
 binary a `SIGWINCH`, and asserts the inner child's `stty size` reports the new geometry. That is
@@ -296,25 +315,26 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, and every rejection leaving the tree unchanged |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
-| `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, and cursor crossing into wire types, and the two crates' attribute bit layouts still agreeing |
-| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping |
+| `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
+| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, and one fixture per negotiated input mode — set, read back, and cleared |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |
-| `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, and a handle whose task is gone reporting it rather than hanging |
+| `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Pure only: the frame-rate cap and the session's fixed IDs |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
 | `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
 | `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, `TermCaps` round-tripping over the handshake, an unresolvable `TERM` surfacing as a capability failure, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
+| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, and the three mouse-ownership rules |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
-| `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, and a pipe refused |
+| `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |
 | `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, and a `SIGWINCH` resizing the pane all the way down to the child's own pty |
-| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and a real client over a real socket: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, and a degenerate resize changing nothing |
+| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and a real client over a real socket: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, and input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not |
 
 ---
 

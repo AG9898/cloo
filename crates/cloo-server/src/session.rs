@@ -29,7 +29,9 @@ use std::fmt;
 use std::process::ExitStatus;
 
 use cloo_core::layout::Layout;
-use cloo_proto::{PaneId, PaneRect, Size};
+use cloo_proto::{
+    MouseButton, MouseEvent, MouseKind, MouseTracking, PaneId, PaneModes, PaneRect, Size,
+};
 use cloo_term::TermSize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -49,8 +51,16 @@ const COMMAND_QUEUE: usize = 64;
 /// session state. Splits, closes, and focus join it in M2.
 #[derive(Debug)]
 pub enum Command {
-    /// Keyboard bytes for the focused pane's child.
+    /// Keyboard bytes for the focused pane's child, already encoded.
     Input(Vec<u8>),
+    /// Text the user pasted, as text. Bracketed here or not at all: whether the
+    /// child wants brackets is a mode only this side can see.
+    Paste(Vec<u8>),
+    /// The client gained or lost focus. Reported to the child only if it asked.
+    Focus(bool),
+    /// A mouse event the client decided belongs to the application. Encoded
+    /// here, in the scheme and at the level the child negotiated.
+    Mouse(MouseEvent),
     /// The session area changed. Triggers one layout pass and one `TIOCSWINSZ`
     /// per pane.
     Resize(Size),
@@ -100,6 +110,10 @@ pub struct SessionSnapshot {
     pub focused: PaneId,
     /// The focused pane's contents.
     pub pane: PaneSnapshot,
+    /// The input modes the focused pane's application has negotiated. A client
+    /// cannot observe these for itself, and it needs them to decide whether a
+    /// mouse event is the application's or cloo's chrome's.
+    pub modes: PaneModes,
 }
 
 /// A sender into a session task.
@@ -119,6 +133,33 @@ impl SessionHandle {
     /// Returns [`SessionGone`] if the session task has ended.
     pub async fn input(&self, bytes: Vec<u8>) -> Result<(), SessionGone> {
         self.send(Command::Input(bytes)).await
+    }
+
+    /// Hands the focused pane pasted text.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn paste(&self, text: Vec<u8>) -> Result<(), SessionGone> {
+        self.send(Command::Paste(text)).await
+    }
+
+    /// Tells the focused pane the client gained or lost focus.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn focus(&self, focused: bool) -> Result<(), SessionGone> {
+        self.send(Command::Focus(focused)).await
+    }
+
+    /// Forwards a mouse event the client routed to the application.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn mouse(&self, event: MouseEvent) -> Result<(), SessionGone> {
+        self.send(Command::Mouse(event)).await
     }
 
     /// Tells the session its area changed.
@@ -248,6 +289,25 @@ impl Session {
     fn apply(&mut self, command: Command) -> Result<(), PtyError> {
         match command {
             Command::Input(bytes) => self.reactor.write_all(&bytes),
+            Command::Paste(text) => self.reactor.write_all(&paste_bytes(self.modes(), &text)),
+            Command::Focus(focused) => match focus_bytes(self.modes(), focused) {
+                Some(bytes) => self.reactor.write_all(bytes),
+                // The application never asked to hear about focus. Saying
+                // nothing is the whole of the fallback.
+                None => Ok(()),
+            },
+            Command::Mouse(event) => {
+                // A mouse event names the pane the client hit-tested it into. A
+                // stale one naming some other pane is dropped rather than
+                // delivered to whatever is focused now.
+                if event.pane != self.focused {
+                    return Ok(());
+                }
+                match mouse_bytes(self.modes(), &event) {
+                    Some(bytes) => self.reactor.write_all(&bytes),
+                    None => Ok(()),
+                }
+            }
             Command::Resize(area) => self.resize(area),
             Command::Snapshot(reply) => {
                 // A caller that gave up before the answer arrived is ordinary.
@@ -298,7 +358,13 @@ impl Session {
             panes: self.layout.resolve(self.area),
             focused: self.focused,
             pane: self.reactor.snapshot(),
+            modes: self.modes(),
         }
+    }
+
+    /// What the focused pane's application has negotiated.
+    fn modes(&self) -> PaneModes {
+        cloo_core::grid::wire_modes(self.reactor.emulator().modes())
     }
 
     /// Reports an event, dropping it if one is already pending.
@@ -322,6 +388,184 @@ enum Step {
 #[must_use]
 pub fn usable(area: Size) -> bool {
     area.cols > 0 && area.rows > 0
+}
+
+// ---------------------------------------------------------------------------
+// Encoding input for a pane's application
+// ---------------------------------------------------------------------------
+//
+// Every function below is a pure function of the pane's negotiated
+// [`PaneModes`] and the event, which is what makes the whole of input routing
+// testable without a PTY. The rule they share: **encode what the application
+// asked for, or send nothing.** A mode the application never enabled is never
+// synthesised, because a paste bracket or a mouse report arriving at a program
+// that is not expecting one lands in its input as literal garbage.
+
+/// The sequence that opens a bracketed paste.
+pub const PASTE_START: &[u8] = b"\x1b[200~";
+/// The sequence that closes a bracketed paste.
+pub const PASTE_END: &[u8] = b"\x1b[201~";
+/// Reported to an application that enabled focus reporting when focus is gained.
+pub const FOCUS_IN: &[u8] = b"\x1b[I";
+/// Reported to an application that enabled focus reporting when focus is lost.
+pub const FOCUS_OUT: &[u8] = b"\x1b[O";
+
+/// Encodes pasted text for the focused pane.
+///
+/// Two things happen regardless of the mode. Line endings are normalised to
+/// carriage returns, because that is what the Enter key sends and a pasted `\n`
+/// otherwise reaches a shell as a literal newline it will not run. And any paste
+/// delimiter *inside* the pasted text is stripped: without that, pasted content
+/// could close the bracket early and have the rest of itself interpreted as
+/// typed input, which is the injection bracketed paste exists to prevent.
+#[must_use]
+pub fn paste_bytes(modes: PaneModes, text: &[u8]) -> Vec<u8> {
+    let body = normalize_newlines(&strip_paste_markers(text));
+    if !modes.bracketed_paste {
+        // The documented fallback: pasted text arrives as ordinary typed input.
+        return body;
+    }
+    let mut out = Vec::with_capacity(body.len() + PASTE_START.len() + PASTE_END.len());
+    out.extend_from_slice(PASTE_START);
+    out.extend_from_slice(&body);
+    out.extend_from_slice(PASTE_END);
+    out
+}
+
+/// The focus report for an application that asked for one, or `None`.
+#[must_use]
+pub fn focus_bytes(modes: PaneModes, focused: bool) -> Option<&'static [u8]> {
+    if !modes.focus_events {
+        return None;
+    }
+    Some(if focused { FOCUS_IN } else { FOCUS_OUT })
+}
+
+/// Encodes a mouse event for the focused pane, or `None` if the application
+/// would not want it.
+///
+/// `None` covers three distinct cases that all mean "write nothing": the
+/// application is not tracking the mouse at all, it is tracking at a level below
+/// what this event needs (a bare pointer move under click-only tracking), or the
+/// cell is beyond what the legacy encoding can address. The third is why the SGR
+/// encoding exists, and it is the reason a client is told to prefer it.
+#[must_use]
+pub fn mouse_bytes(modes: PaneModes, event: &MouseEvent) -> Option<Vec<u8>> {
+    if modes.mouse < required_tracking(event.kind) {
+        return None;
+    }
+
+    let released = matches!(event.kind, MouseKind::Release(_));
+    let mut code = button_code(event.kind);
+    if matches!(event.kind, MouseKind::Motion(_)) {
+        code += 32;
+    }
+    if event.mods.shift {
+        code += 4;
+    }
+    if event.mods.alt {
+        code += 8;
+    }
+    if event.mods.ctrl {
+        code += 16;
+    }
+
+    // Both encodings are one-based; the wire carries zero-based cells.
+    let col = u32::from(event.at.col) + 1;
+    let row = u32::from(event.at.row) + 1;
+
+    if modes.sgr_mouse {
+        let final_byte = if released { 'm' } else { 'M' };
+        return Some(format!("\x1b[<{code};{col};{row}{final_byte}").into_bytes());
+    }
+
+    // Legacy X10: a release is button 3 rather than a distinct final byte, and
+    // every field is a single byte biased by 32.
+    let legacy = if released { 3 + (code & !3) } else { code };
+    let byte = |value: u32| u8::try_from(value + 32).ok();
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        byte(legacy)?,
+        byte(col)?,
+        byte(row)?,
+    ])
+}
+
+/// The lowest tracking level at which an application wants to hear about `kind`.
+fn required_tracking(kind: MouseKind) -> MouseTracking {
+    match kind {
+        MouseKind::Press(_)
+        | MouseKind::Release(_)
+        | MouseKind::ScrollUp
+        | MouseKind::ScrollDown => MouseTracking::Click,
+        // Dragging is reported from 1002 up; a move with no button held needs
+        // 1003, which is the mode that produces a report per pointer move.
+        MouseKind::Motion(Some(_)) => MouseTracking::Drag,
+        MouseKind::Motion(None) => MouseTracking::Motion,
+    }
+}
+
+/// The base button number an event encodes as, before modifiers.
+fn button_code(kind: MouseKind) -> u32 {
+    match kind {
+        MouseKind::Press(button) | MouseKind::Release(button) => button_number(button),
+        MouseKind::Motion(Some(button)) => button_number(button),
+        // A move with nothing held reports the "no button" code.
+        MouseKind::Motion(None) => 3,
+        MouseKind::ScrollUp => 64,
+        MouseKind::ScrollDown => 65,
+    }
+}
+
+/// The button numbers both encodings share.
+fn button_number(button: MouseButton) -> u32 {
+    match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    }
+}
+
+/// Removes any paste delimiter found *inside* pasted text.
+fn strip_paste_markers(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut rest = text;
+    'outer: while !rest.is_empty() {
+        for marker in [PASTE_START, PASTE_END] {
+            if rest.starts_with(marker) {
+                rest = &rest[marker.len()..];
+                continue 'outer;
+            }
+        }
+        out.push(rest[0]);
+        rest = &rest[1..];
+    }
+    out
+}
+
+/// Rewrites `\r\n` and a bare `\n` as the carriage return Enter actually sends.
+fn normalize_newlines(text: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        match text[index] {
+            b'\r' if text.get(index + 1) == Some(&b'\n') => {
+                out.push(b'\r');
+                index += 2;
+            }
+            b'\n' => {
+                out.push(b'\r');
+                index += 1;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -352,12 +596,222 @@ mod tests {
         assert!(SessionGone.to_string().contains("no longer running"));
     }
 
+    // -- encoding input for a pane's application ----------------------------
+
+    use cloo_proto::{MouseMods, Point};
+
+    fn modes() -> PaneModes {
+        PaneModes::default()
+    }
+
+    fn event(kind: MouseKind, col: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            pane: PaneId::new(1),
+            at: Point::new(col, row),
+            kind,
+            mods: MouseMods::NONE,
+        }
+    }
+
+    #[test]
+    fn a_paste_is_bracketed_only_for_an_application_that_asked() {
+        let bracketing = PaneModes {
+            bracketed_paste: true,
+            ..modes()
+        };
+        assert_eq!(paste_bytes(bracketing, b"ls"), b"\x1b[200~ls\x1b[201~");
+        assert_eq!(
+            paste_bytes(modes(), b"ls"),
+            b"ls",
+            "the fallback is ordinary typed input, never a bracket the child \
+             would print literally"
+        );
+    }
+
+    #[test]
+    fn a_paste_cannot_close_its_own_bracket() {
+        let bracketing = PaneModes {
+            bracketed_paste: true,
+            ..modes()
+        };
+        let hostile = b"safe\x1b[201~rm -rf /\x1b[200~";
+        let encoded = paste_bytes(bracketing, hostile);
+        assert_eq!(encoded, b"\x1b[200~saferm -rf /\x1b[201~");
+        assert_eq!(
+            encoded
+                .windows(PASTE_END.len())
+                .filter(|w| *w == PASTE_END)
+                .count(),
+            1,
+            "exactly one terminator, at the end, or the rest of the paste is \
+             interpreted as typed input"
+        );
+    }
+
+    #[test]
+    fn pasted_line_endings_become_the_carriage_return_enter_sends() {
+        assert_eq!(
+            paste_bytes(modes(), b"one\r\ntwo\nthree"),
+            b"one\rtwo\rthree"
+        );
+    }
+
+    #[test]
+    fn focus_is_reported_only_to_an_application_that_asked() {
+        let watching = PaneModes {
+            focus_events: true,
+            ..modes()
+        };
+        assert_eq!(focus_bytes(watching, true), Some(FOCUS_IN));
+        assert_eq!(focus_bytes(watching, false), Some(FOCUS_OUT));
+        assert_eq!(
+            focus_bytes(modes(), true),
+            None,
+            "an application that never enabled focus reporting is treated as \
+             always focused, and hears nothing"
+        );
+    }
+
+    #[test]
+    fn an_untracked_mouse_produces_no_bytes_at_all() {
+        assert_eq!(
+            mouse_bytes(modes(), &event(MouseKind::Press(MouseButton::Left), 0, 0)),
+            None,
+            "an application not tracking the mouse must never see a report"
+        );
+    }
+
+    /// One fixture per event kind: the tracking level it needs, and the SGR
+    /// report it produces there. A level below is silence.
+    #[test]
+    fn every_mouse_event_is_encoded_at_the_level_that_asked_for_it() {
+        let cases: [(MouseKind, MouseTracking, &str); 6] = [
+            (
+                MouseKind::Press(MouseButton::Left),
+                MouseTracking::Click,
+                "\x1b[<0;11;6M",
+            ),
+            (
+                MouseKind::Release(MouseButton::Middle),
+                MouseTracking::Click,
+                "\x1b[<1;11;6m",
+            ),
+            (MouseKind::ScrollUp, MouseTracking::Click, "\x1b[<64;11;6M"),
+            (
+                MouseKind::ScrollDown,
+                MouseTracking::Click,
+                "\x1b[<65;11;6M",
+            ),
+            (
+                MouseKind::Motion(Some(MouseButton::Right)),
+                MouseTracking::Drag,
+                "\x1b[<34;11;6M",
+            ),
+            (
+                MouseKind::Motion(None),
+                MouseTracking::Motion,
+                "\x1b[<35;11;6M",
+            ),
+        ];
+
+        for (kind, needs, expected) in cases {
+            let sgr = PaneModes {
+                mouse: needs,
+                sgr_mouse: true,
+                ..modes()
+            };
+            assert_eq!(
+                mouse_bytes(sgr, &event(kind, 10, 5)).as_deref(),
+                Some(expected.as_bytes()),
+                "{kind:?} at {needs:?}"
+            );
+
+            if needs > MouseTracking::Click {
+                let below = PaneModes {
+                    mouse: MouseTracking::Click,
+                    sgr_mouse: true,
+                    ..modes()
+                };
+                assert_eq!(
+                    mouse_bytes(below, &event(kind, 10, 5)),
+                    None,
+                    "{kind:?} must be silent below {needs:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mouse_modifiers_ride_in_the_button_code() {
+        let sgr = PaneModes {
+            mouse: MouseTracking::Click,
+            sgr_mouse: true,
+            ..modes()
+        };
+        let mut click = event(MouseKind::Press(MouseButton::Left), 0, 0);
+        click.mods = MouseMods {
+            shift: true,
+            alt: true,
+            ctrl: true,
+        };
+        assert_eq!(
+            mouse_bytes(sgr, &click).as_deref(),
+            Some("\x1b[<28;1;1M".as_bytes()),
+            "4 + 8 + 16 on top of button 0"
+        );
+    }
+
+    #[test]
+    fn a_legacy_application_gets_the_x10_encoding_and_its_limits() {
+        let legacy = PaneModes {
+            mouse: MouseTracking::Click,
+            sgr_mouse: false,
+            ..modes()
+        };
+        assert_eq!(
+            mouse_bytes(legacy, &event(MouseKind::Press(MouseButton::Left), 0, 0)).as_deref(),
+            Some(&[0x1b, b'[', b'M', 32, 33, 33][..]),
+            "every X10 field is biased by 32"
+        );
+        assert_eq!(
+            mouse_bytes(legacy, &event(MouseKind::Release(MouseButton::Right), 0, 0)).as_deref(),
+            Some(&[0x1b, b'[', b'M', 35, 33, 33][..]),
+            "X10 has no distinct release: it reports button 3"
+        );
+        assert_eq!(
+            mouse_bytes(legacy, &event(MouseKind::Press(MouseButton::Left), 300, 0)),
+            None,
+            "a cell the legacy encoding cannot address is dropped, never sent wrong"
+        );
+    }
+
+    #[test]
+    fn the_sgr_encoding_addresses_a_cell_the_legacy_one_cannot() {
+        let sgr = PaneModes {
+            mouse: MouseTracking::Click,
+            sgr_mouse: true,
+            ..modes()
+        };
+        assert_eq!(
+            mouse_bytes(sgr, &event(MouseKind::Press(MouseButton::Left), 300, 0)).as_deref(),
+            Some("\x1b[<0;301;1M".as_bytes())
+        );
+    }
+
     #[tokio::test]
     async fn a_handle_whose_task_is_gone_reports_it_rather_than_hanging() {
         let (commands, rx) = mpsc::channel(1);
         let handle = SessionHandle { commands };
         drop(rx);
         assert_eq!(handle.input(vec![b'x']).await, Err(SessionGone));
+        assert_eq!(handle.paste(vec![b'x']).await, Err(SessionGone));
+        assert_eq!(handle.focus(true).await, Err(SessionGone));
+        assert_eq!(
+            handle
+                .mouse(event(MouseKind::Press(MouseButton::Left), 0, 0))
+                .await,
+            Err(SessionGone)
+        );
         assert_eq!(handle.resize(Size::new(80, 24)).await, Err(SessionGone));
         assert_eq!(handle.snapshot().await.err(), Some(SessionGone));
     }

@@ -27,11 +27,14 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use cloo_client::capabilities::detect_caps;
+use cloo_client::input::{
+    InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, mouse_owner,
+};
 use cloo_client::outer::current_size;
 use cloo_client::raw_mode::{RawMode, RawModeError};
 use cloo_client::renderer::{Cursor, Grid, RenderError, Renderer};
 use cloo_client::resize::ResizeWatch;
-use cloo_proto::PaneId;
+use cloo_proto::{MouseEvent, PaneId, PaneModes, Point};
 use cloo_server::pty::{PtyConfig, PtyError};
 use cloo_server::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot};
 
@@ -130,13 +133,24 @@ pub fn run(program: &str, args: &[String]) -> Result<ExitStatus, LocalError> {
     let raw = RawMode::stdin().map_err(LocalError::RawMode)?;
     let size = current_size();
 
+    // `detect_caps`, not `detect_attach_caps`: a local pane negotiates with
+    // nobody, so an unresolvable `TERM` claims nothing here rather than refusing
+    // the way an attach does (DECISIONS.md RESOLVED-12).
+    let caps = detect_caps();
+    let modes = OuterModes::negotiated(caps);
+    // Registered before the modes are turned on, so a panic between the two
+    // still resets a mode that did make it out.
+    raw.on_restore(&modes.disable())
+        .map_err(LocalError::RawMode)?;
+    enable_modes(modes)?;
+
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .enable_time()
         .build()
         .map_err(LocalError::Runtime)?;
 
-    let result = runtime.block_on(session(program, args, size));
+    let result = runtime.block_on(session(program, args, size, caps, modes));
 
     // Restore before anything is printed: an error message rendered into a raw
     // terminal comes out as a staircase.
@@ -151,6 +165,8 @@ async fn session(
     program: &str,
     args: &[String],
     size: cloo_proto::Size,
+    caps: cloo_proto::TermCaps,
+    modes: OuterModes,
 ) -> Result<ExitStatus, LocalError> {
     let mut config = PtyConfig::new(program).wire_size(size)?;
     for arg in args {
@@ -168,12 +184,14 @@ async fn session(
     let session = Some(spawned.handle);
 
     let mut grid = Grid::new(size);
-    // `detect_caps`, not `detect_attach_caps`: a local pane negotiates with
-    // nobody, so an unresolvable `TERM` claims nothing here rather than
-    // refusing the way an attach does (DECISIONS.md RESOLVED-12).
-    let mut renderer = Renderer::new(detect_caps());
+    let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
 
+    // What the child has negotiated, as of the last frame drawn. At most one
+    // frame stale, which is what routing a mouse event costs instead of a
+    // round trip to the session task per click.
+    let mut pane_modes = PaneModes::default();
+    let mut decoder = InputDecoder::new(modes);
     let mut input = spawn_input_reader();
     let mut input_open = true;
     let mut frames = tokio::time::interval(FRAME_INTERVAL);
@@ -198,7 +216,11 @@ async fn session(
         match step {
             Step::Session(Some(SessionEvent::Output)) => dirty = true,
             Step::Session(Some(SessionEvent::Exited) | None) => break,
-            Step::Input(bytes) => handle(&session)?.input(bytes).await?,
+            Step::Input(bytes) => {
+                for event in decoder.feed(&bytes) {
+                    route(handle(&session)?, pane_modes, event).await?;
+                }
+            }
             // The outer terminal changed shape. The grid reflow and the child's
             // `TIOCSWINSZ` are the session task's business, in that order.
             Step::Resized(size) => handle(&session)?.resize(size).await?,
@@ -206,8 +228,14 @@ async fn session(
             // gets no more input.
             Step::InputClosed => input_open = false,
             Step::Frame => {
+                // A held escape prefix is released within a frame, which is what
+                // makes a lone Escape key reach the pane at all.
+                if let Some(event) = decoder.flush() {
+                    route(handle(&session)?, pane_modes, event).await?;
+                }
                 if dirty {
                     let snapshot = handle(&session)?.snapshot().await?;
+                    pane_modes = snapshot.modes;
                     draw(&mut out, &mut renderer, &mut grid, &snapshot)?;
                     dirty = false;
                 }
@@ -228,6 +256,54 @@ async fn session(
         .await
         .map_err(|_| LocalError::Session(SessionGone))?
         .map_err(LocalError::Pty)
+}
+
+/// Asks the outer terminal to turn on the modes cloo negotiated.
+///
+/// Paired with the reset registered on the raw-mode guard, which is what turns
+/// them off again on every exit path — including a panic or a signal, where
+/// nothing here gets a chance to run.
+fn enable_modes(modes: OuterModes) -> Result<(), LocalError> {
+    let mut out = io::stdout();
+    out.write_all(&modes.enable()).map_err(LocalError::Output)?;
+    out.flush().map_err(LocalError::Output)
+}
+
+/// Sends one decoded input event to the session.
+///
+/// The one branch worth reading twice is the mouse. An event the pane's
+/// application does not own belongs to cloo's chrome, and it is **dropped
+/// rather than forwarded**: a chrome click delivered to a child appears in the
+/// user's shell as garbage. M1 has no chrome to act on it yet, so dropping is
+/// the whole of the chrome half; M6-01 gives those events somewhere to go.
+async fn route(
+    session: &SessionHandle,
+    modes: PaneModes,
+    event: InputEvent,
+) -> Result<(), LocalError> {
+    match event {
+        InputEvent::Keys(bytes) => session.input(bytes).await?,
+        InputEvent::Paste(text) => session.paste(text).await?,
+        InputEvent::Focus(focused) => session.focus(focused).await?,
+        InputEvent::Mouse(report) => {
+            // One pane filling the whole area, so every report is over it. Real
+            // hit testing arrives with splits in M2.
+            if mouse_owner(modes, &report, true) == MouseOwner::Application {
+                session.mouse(pane_event(&report)).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Places a mouse report in the session's only pane.
+fn pane_event(report: &MouseReport) -> MouseEvent {
+    MouseEvent {
+        pane: THE_PANE,
+        at: Point::new(report.col, report.row),
+        kind: report.kind,
+        mods: report.mods,
+    }
 }
 
 /// Borrows the session handle, or reports that the task is gone.

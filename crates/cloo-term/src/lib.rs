@@ -18,12 +18,14 @@
 //! # Ok::<(), cloo_term::TermError>(())
 //! ```
 //!
-//! Three modules:
+//! Four modules:
 //!
 //! - [`emulator`] — the [`Emulator`] wrapper, and the only place the backend is
 //!   named.
 //! - [`cell`] — cloo-owned grid value types, mirroring the `cloo-proto` shapes
 //!   without depending on them.
+//! - [`modes`] — the input modes the child application has negotiated, which is
+//!   what decides how an input event is encoded for it.
 //! - [`error`] — the crate-local [`TermError`].
 //!
 //! `cloo-term` has no intra-workspace dependencies, by design. It sits at the
@@ -35,7 +37,9 @@
 pub mod cell;
 pub mod emulator;
 pub mod error;
+pub mod modes;
 
 pub use cell::{Cell, CellAttrs, Color, CursorShape, CursorState, TermSize};
 pub use emulator::{DEFAULT_SCROLLBACK_LINES, Emulator};
 pub use error::TermError;
+pub use modes::{MouseTracking, PaneModes};

@@ -25,6 +25,9 @@ pub mod id;
 pub mod layout;
 
 pub use error::LayoutError;
-pub use grid::{wire_attrs, wire_cell, wire_color, wire_cursor, wire_row, wire_size};
+pub use grid::{
+    wire_attrs, wire_cell, wire_color, wire_cursor, wire_modes, wire_mouse_tracking, wire_row,
+    wire_size,
+};
 pub use id::{PaneIdAllocator, SessionIdAllocator, TabIdAllocator};
 pub use layout::{Layout, MIN_PANE_SIZE, Node};

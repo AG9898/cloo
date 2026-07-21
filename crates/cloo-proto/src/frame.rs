@@ -20,7 +20,7 @@ use crate::error::ProtoError;
 /// **Bump this on every change to a type in [`crate::message`].** A stale client
 /// attached to a rebuilt server is a routine occurrence, and a clean "version
 /// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 1;
+pub const PROTOCOL_VERSION: u16 = 2;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -126,8 +126,8 @@ mod tests {
     use crate::ids::{PaneId, SessionId, TabId};
     use crate::message::{
         Action, Cell, CellAttrs, ClientMessage, Color, CursorShape, LayoutSnapshot, MouseButton,
-        MouseEvent, MouseKind, PaneRect, Point, RowUpdate, ServerMessage, Size, TabSummary,
-        TermCaps,
+        MouseEvent, MouseKind, MouseMods, MouseTracking, PaneModes, PaneRect, Point, RowUpdate,
+        ServerMessage, Size, TabSummary, TermCaps,
     };
 
     /// Encodes, decodes, and asserts the value survives unchanged.
@@ -181,32 +181,55 @@ mod tests {
                 pane: PaneId::new(2),
                 at: Point::new(10, 5),
                 kind: MouseKind::Press(MouseButton::Left),
+                mods: MouseMods::NONE,
             }),
             ClientMessage::Mouse(MouseEvent {
                 pane: PaneId::new(2),
                 at: Point::new(0, 0),
                 kind: MouseKind::Motion(Some(MouseButton::Right)),
+                mods: MouseMods {
+                    shift: true,
+                    ..MouseMods::NONE
+                },
             }),
             ClientMessage::Mouse(MouseEvent {
                 pane: PaneId::new(2),
                 at: Point::new(1, 1),
                 kind: MouseKind::Motion(None),
+                mods: MouseMods {
+                    alt: true,
+                    ..MouseMods::NONE
+                },
             }),
             ClientMessage::Mouse(MouseEvent {
                 pane: PaneId::new(2),
                 at: Point::new(1, 1),
                 kind: MouseKind::Release(MouseButton::Middle),
+                mods: MouseMods {
+                    ctrl: true,
+                    ..MouseMods::NONE
+                },
             }),
             ClientMessage::Mouse(MouseEvent {
                 pane: PaneId::new(2),
                 at: Point::new(1, 1),
                 kind: MouseKind::ScrollUp,
+                mods: MouseMods {
+                    shift: true,
+                    alt: true,
+                    ctrl: true,
+                },
             }),
             ClientMessage::Mouse(MouseEvent {
                 pane: PaneId::new(2),
                 at: Point::new(1, 1),
                 kind: MouseKind::ScrollDown,
+                mods: MouseMods::NONE,
             }),
+            ClientMessage::Paste(b"hello\r\nworld".to_vec()),
+            ClientMessage::Paste(Vec::new()),
+            ClientMessage::Focus { focused: true },
+            ClientMessage::Focus { focused: false },
             ClientMessage::Resize(Size::new(200, 60)),
             ClientMessage::Command(Action::SplitVertical),
             ClientMessage::Command(Action::SplitHorizontal),
@@ -265,6 +288,20 @@ mod tests {
                 pos: Point::new(0, 0),
                 shape: CursorShape::Block,
                 visible: true,
+            },
+            ServerMessage::Modes {
+                pane: PaneId::new(4),
+                modes: PaneModes::default(),
+            },
+            ServerMessage::Modes {
+                pane: PaneId::new(4),
+                modes: PaneModes {
+                    mouse: MouseTracking::Motion,
+                    sgr_mouse: true,
+                    bracketed_paste: true,
+                    focus_events: true,
+                    extended_keys: true,
+                },
             },
             ServerMessage::Layout(LayoutSnapshot {
                 tab: TabId::new(1),

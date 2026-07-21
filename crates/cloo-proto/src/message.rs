@@ -269,6 +269,30 @@ pub enum MouseKind {
     ScrollDown,
 }
 
+/// The modifier keys held during a mouse event.
+///
+/// Carried because they change both halves of routing: `shift` is the
+/// conventional "this one is for the multiplexer" override, and all three are
+/// part of the button code an SGR mouse report encodes for the application.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct MouseMods {
+    /// Shift was held.
+    pub shift: bool,
+    /// Alt / Meta was held.
+    pub alt: bool,
+    /// Control was held.
+    pub ctrl: bool,
+}
+
+impl MouseMods {
+    /// No modifiers held.
+    pub const NONE: Self = Self {
+        shift: false,
+        alt: false,
+        ctrl: false,
+    };
+}
+
 /// A mouse event, already resolved to a pane and a cell within it.
 ///
 /// Hit testing is the client's job: it knows the chrome geometry it drew.
@@ -280,6 +304,45 @@ pub struct MouseEvent {
     pub at: Point,
     /// What happened.
     pub kind: MouseKind,
+    /// Which modifiers were held.
+    pub mods: MouseMods,
+}
+
+/// How much of the mouse a pane's application is tracking.
+///
+/// Mirrors `cloo_term::MouseTracking`; the ordering is the filtering rule, since
+/// each level reports everything the level below it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+pub enum MouseTracking {
+    /// Not tracking. Every mouse event belongs to cloo's chrome.
+    #[default]
+    Off,
+    /// Button presses and releases only.
+    Click,
+    /// Presses, releases, and motion while a button is held.
+    Drag,
+    /// All of the above, plus motion with no button held.
+    Motion,
+}
+
+/// The input modes a pane's application has negotiated with its terminal.
+///
+/// The server reports these because the client cannot know them: they are set
+/// by escape sequences the *child* wrote, which only the emulator sees. A client
+/// needs them to decide whether a mouse event belongs to the application or to
+/// cloo's own chrome; the server needs them to decide how an event is encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PaneModes {
+    /// How much of the mouse the application wants reported.
+    pub mouse: MouseTracking,
+    /// Whether mouse reports use the SGR encoding rather than the legacy one.
+    pub sgr_mouse: bool,
+    /// Whether pasted text is wrapped in paste brackets.
+    pub bracketed_paste: bool,
+    /// Whether focus gain and loss are reported to the application.
+    pub focus_events: bool,
+    /// Whether the application reads keys in the extended encoding.
+    pub extended_keys: bool,
 }
 
 /// A cursor shape, as reported to the client for chrome-accurate drawing.
@@ -352,8 +415,29 @@ pub enum ClientMessage {
     /// Leave the session running and disconnect.
     Detach,
     /// Keyboard bytes destined for the focused pane's PTY.
+    ///
+    /// Already encoded by the client, in whichever scheme its terminal
+    /// negotiated. Encoding is the client's business; the pane's own bracketing
+    /// and reporting modes are the server's, which is why paste, focus, and
+    /// mouse are separate variants rather than more bytes on this one.
     Input(Vec<u8>),
+    /// Text the user pasted, as text.
+    ///
+    /// Distinct from [`Input`](Self::Input) because whether it reaches the child
+    /// wrapped in paste brackets depends on a mode the *child* set, which only
+    /// the server can see. A client that sent pre-bracketed bytes would be
+    /// guessing at state it does not hold.
+    Paste(Vec<u8>),
+    /// The client's terminal gained or lost focus.
+    Focus {
+        /// Whether the client is now focused.
+        focused: bool,
+    },
     /// A mouse event already resolved to a pane.
+    ///
+    /// Sent only for events the client decided belong to the *application*.
+    /// Events belonging to cloo's chrome never reach the wire — see
+    /// [`PaneModes`].
     Mouse(MouseEvent),
     /// The client's terminal changed size.
     Resize(Size),
@@ -403,6 +487,17 @@ pub enum ServerMessage {
     },
     /// New resolved geometry for a tab.
     Layout(LayoutSnapshot),
+    /// A pane's application changed which input modes it has negotiated.
+    ///
+    /// The client cannot observe this for itself — the modes were set by
+    /// sequences the child wrote — and it is what decides whether a mouse event
+    /// is the application's or cloo's chrome's.
+    Modes {
+        /// Which pane.
+        pane: PaneId,
+        /// What its application now has enabled.
+        modes: PaneModes,
+    },
     /// A pane rang the bell.
     Bell(PaneId),
     /// The tab set changed — added, removed, renamed, or reordered.

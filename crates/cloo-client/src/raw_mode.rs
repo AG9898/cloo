@@ -12,9 +12,14 @@
 //! | Panic | a panic hook installed on first entry, chained to the previous hook |
 //! | Signal | `SIGINT`, `SIGTERM`, `SIGHUP`, and `SIGQUIT` handlers that restore, then re-raise |
 //!
+//! The same four paths also turn off any reporting modes the client asked the
+//! outer terminal for, registered with [`RawMode::on_restore`]. A terminal left
+//! reporting mouse motion into a shell that knows nothing about it is the same
+//! class of bug as one left in raw mode, and it deserves the same guarantee.
+//!
 //! The panic hook and the signal handlers cannot borrow the guard, so the saved
-//! `termios` also lives in a process-global slot that the guard arms on entry
-//! and disarms on restore. The slot is written with plain atomics and read by a
+//! `termios` and that reset sequence live in a process-global slot that the
+//! guard arms on entry and disarms on restore. The slot is written with plain atomics and read by a
 //! signal handler using only `tcsetattr`, which POSIX lists as
 //! async-signal-safe — no allocation, no locking, and no `Mutex`.
 //!
@@ -35,7 +40,7 @@ use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
 use std::sync::Once;
-use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicU8, AtomicUsize, Ordering};
 
 /// Signals that would otherwise kill the client before [`Drop`] could run.
 ///
@@ -60,6 +65,14 @@ pub enum RawModeError {
     /// may still be raw, which is why the error is surfaced rather than
     /// swallowed.
     Set(io::Error),
+    /// The reset sequence handed to [`RawMode::on_restore`] does not fit in the
+    /// restore slot. Nothing was stored.
+    ResetTooLong {
+        /// How long the sequence was.
+        len: usize,
+        /// How long it may be.
+        max: usize,
+    },
 }
 
 impl fmt::Display for RawModeError {
@@ -69,6 +82,10 @@ impl fmt::Display for RawModeError {
             Self::AlreadyActive => write!(f, "raw mode is already active in this process"),
             Self::Get(e) => write!(f, "could not read the terminal attributes: {e}"),
             Self::Set(e) => write!(f, "could not write the terminal attributes: {e}"),
+            Self::ResetTooLong { len, max } => write!(
+                f,
+                "the terminal reset sequence is {len} bytes, and at most {max} fit"
+            ),
         }
     }
 }
@@ -77,7 +94,7 @@ impl std::error::Error for RawModeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Get(e) | Self::Set(e) => Some(e),
-            Self::NotATerminal | Self::AlreadyActive => None,
+            Self::NotATerminal | Self::AlreadyActive | Self::ResetTooLong { .. } => None,
         }
     }
 }
@@ -94,11 +111,23 @@ const SLOT_ARMING: u8 = 1;
 /// The payload is complete and a handler may restore from it.
 const SLOT_ARMED: u8 = 2;
 
+/// How many bytes of reset sequence the slot can carry.
+///
+/// Generous for the handful of private mode resets a client turns on; a longer
+/// one is refused rather than truncated, since half a sequence would be printed
+/// on the user's screen.
+pub const MAX_RESET_LEN: usize = 128;
+
 /// Process-global saved terminal state, readable from a signal handler.
 struct RestoreSlot {
     state: AtomicU8,
     fd: AtomicI32,
     saved: UnsafeCell<MaybeUninit<libc::termios>>,
+    /// Escape sequences written before the `termios` is put back — the resets
+    /// for whatever reporting modes the client turned on. Published length-last,
+    /// so a handler either sees the whole thing or nothing.
+    reset: UnsafeCell<[u8; MAX_RESET_LEN]>,
+    reset_len: AtomicUsize,
 }
 
 // SAFETY: `saved` is only written by a thread that has won the `IDLE -> ARMING`
@@ -112,6 +141,8 @@ static RESTORE: RestoreSlot = RestoreSlot {
     state: AtomicU8::new(SLOT_IDLE),
     fd: AtomicI32::new(-1),
     saved: UnsafeCell::new(MaybeUninit::uninit()),
+    reset: UnsafeCell::new([0; MAX_RESET_LEN]),
+    reset_len: AtomicUsize::new(0),
 };
 
 impl RestoreSlot {
@@ -136,7 +167,65 @@ impl RestoreSlot {
 
     /// Takes the slot out of service. Idempotent.
     fn disarm(&self) {
+        self.reset_len.store(0, Ordering::Release);
         self.state.store(SLOT_IDLE, Ordering::Release);
+    }
+
+    /// Publishes the escape sequence to write before restoring the `termios`.
+    ///
+    /// Returns `false` if `bytes` does not fit, in which case nothing is stored:
+    /// a truncated reset is worse than none, because half a sequence lands on
+    /// the user's screen as text.
+    fn set_reset(&self, bytes: &[u8]) -> bool {
+        if bytes.len() > MAX_RESET_LEN || self.state.load(Ordering::Acquire) != SLOT_ARMED {
+            return false;
+        }
+        // Length last: a handler that fires mid-copy reads the old length and
+        // writes the old sequence, never a half-written one.
+        self.reset_len.store(0, Ordering::Release);
+        // SAFETY: only a guard-owning thread calls this, and the only reader is
+        // a handler gated on `reset_len`, which is still zero here.
+        unsafe {
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), self.reset.get().cast(), bytes.len())
+        };
+        self.reset_len.store(bytes.len(), Ordering::Release);
+        true
+    }
+
+    /// Writes the stored reset sequence, if there is one.
+    ///
+    /// Async-signal-safe: `write` is on the POSIX list, and a short write is
+    /// retried rather than allocating anything to track it.
+    fn write_reset(&self) {
+        // Taken rather than read: a panic unwinds through the hook *and* then
+        // drops the guard, and a mode reset written twice is at best noise on
+        // the wire and at worst a sequence a terminal reacts to differently the
+        // second time. The swap is lock-free, so it stays handler-safe.
+        let len = self.reset_len.swap(0, Ordering::AcqRel);
+        if len == 0 {
+            return;
+        }
+        let fd = self.fd.load(Ordering::Relaxed);
+        let mut written = 0;
+        while written < len {
+            // SAFETY: `reset` holds `MAX_RESET_LEN` initialized bytes and `len`
+            // is never larger; the pointer is valid for the whole span and
+            // `write` does not retain it.
+            let rc = unsafe {
+                libc::write(
+                    fd,
+                    self.reset.get().cast::<u8>().add(written).cast(),
+                    len - written,
+                )
+            };
+            match rc {
+                // The terminal is gone or refusing. Nothing left to do about it,
+                // and the `termios` restore below is the more important half.
+                -1 | 0 => return,
+                #[allow(clippy::cast_sign_loss)]
+                progressed => written += progressed as usize,
+            }
+        }
     }
 
     /// Restores the saved attributes if the slot is armed.
@@ -148,6 +237,9 @@ impl RestoreSlot {
         if self.state.load(Ordering::Acquire) != SLOT_ARMED {
             return Ok(());
         }
+        // Reporting modes first: they were turned on after raw mode was entered,
+        // and they are turned off before it is left.
+        self.write_reset();
         let fd = self.fd.load(Ordering::Relaxed);
         // SAFETY: the state is `ARMED`, which is only published after the
         // payload has been fully written, so the pointer refers to an
@@ -269,6 +361,30 @@ impl RawMode {
     pub fn stdin() -> Result<Self, RawModeError> {
         let stdin = std::io::stdin();
         Self::enter(stdin.as_fd_ref())
+    }
+
+    /// Registers an escape sequence to write on every restore path.
+    ///
+    /// This is how the reporting modes from
+    /// [`OuterModes`](crate::input::OuterModes) get turned off on a panic or a
+    /// signal, not only on the normal exit: the guard already owns the four
+    /// paths, and a terminal left reporting mouse motion after cloo dies is the
+    /// same class of bug as one left in raw mode. Call it *after* the modes have
+    /// been enabled, with exactly the bytes that undo them.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RawModeError::ResetTooLong`] if the sequence does not fit in
+    /// [`MAX_RESET_LEN`]. Nothing is stored in that case — a truncated reset
+    /// would print itself on the user's screen.
+    pub fn on_restore(&self, bytes: &[u8]) -> Result<(), RawModeError> {
+        if RESTORE.set_reset(bytes) {
+            return Ok(());
+        }
+        Err(RawModeError::ResetTooLong {
+            len: bytes.len(),
+            max: MAX_RESET_LEN,
+        })
     }
 
     /// Restores the terminal and consumes the guard, surfacing any failure.
@@ -438,6 +554,8 @@ mod tests {
             state: AtomicU8::new(SLOT_IDLE),
             fd: AtomicI32::new(-1),
             saved: UnsafeCell::new(MaybeUninit::uninit()),
+            reset: UnsafeCell::new([0; MAX_RESET_LEN]),
+            reset_len: AtomicUsize::new(0),
         };
         assert!(slot.arm(7, cooked()));
         assert!(!slot.arm(9, cooked()), "a second guard must be refused");
@@ -451,6 +569,8 @@ mod tests {
             state: AtomicU8::new(SLOT_IDLE),
             fd: AtomicI32::new(-1),
             saved: UnsafeCell::new(MaybeUninit::uninit()),
+            reset: UnsafeCell::new([0; MAX_RESET_LEN]),
+            reset_len: AtomicUsize::new(0),
         };
         // Would be a `tcsetattr` on fd -1 if the state check were missing.
         assert!(slot.restore().is_ok());

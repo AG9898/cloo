@@ -315,6 +315,17 @@ impl Daemon {
                 Step::From(Ok(Some(ClientMessage::Input(bytes)))) => {
                     self.session()?.input(bytes).await?;
                 }
+                Step::From(Ok(Some(ClientMessage::Paste(text)))) => {
+                    self.session()?.paste(text).await?;
+                }
+                Step::From(Ok(Some(ClientMessage::Focus { focused }))) => {
+                    self.session()?.focus(focused).await?;
+                }
+                // Only events the client routed to the *application* reach the
+                // wire; chrome events never leave the client.
+                Step::From(Ok(Some(ClientMessage::Mouse(event)))) => {
+                    self.session()?.mouse(event).await?;
+                }
                 Step::From(Ok(Some(ClientMessage::Resize(size)))) => {
                     self.resize(size).await?;
                     dirty = true;
@@ -328,9 +339,9 @@ impl Daemon {
                     let _ = conn.shutdown().await;
                     return Ok(Served::Gone);
                 }
-                // Splits, tabs, and mouse routing are M1-07 and M2. Ignoring
-                // them keeps an old client from taking the session down.
-                Step::From(Ok(Some(ClientMessage::Mouse(_) | ClientMessage::Command(_)))) => {}
+                // Splits and tabs are M2. Ignoring them keeps an old client from
+                // taking the session down.
+                Step::From(Ok(Some(ClientMessage::Command(_)))) => {}
                 // A second attach on an attached connection is a desync.
                 Step::From(Ok(Some(ClientMessage::Attach { .. }))) => {
                     let _ = conn::refuse(&mut conn, "this connection is already attached").await;

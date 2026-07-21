@@ -54,9 +54,48 @@ What existing code or docs does this affect?>
 
 ## Open Decisions
 
-There are no open architectural decisions. The visual decisions once deferred to M2 were resolved
-by the project owner on 2026-07-20 and are recorded below, as was OPEN-01, raised during M0
-implementation and resolved the same day as RESOLVED-12.
+The visual decisions once deferred to M2 were resolved by the project owner on 2026-07-20 and are
+recorded below, as was OPEN-01, raised during M0 implementation and resolved the same day as
+RESOLVED-12. One question was raised during M1-07 and is open.
+
+### OPEN-02 — What happens when the outer terminal and the pane disagree about key encoding
+
+**Question:** If the user's terminal reports the Kitty extended keyboard protocol but the pane's
+application has not enabled it — or the reverse — should cloo transcode keys between the two
+encodings, or keep the two ends in the same encoding and never translate?
+
+**Context:** M1-07 shipped the mode plumbing for both ends: `cloo-client::input::OuterModes`
+pushes a Kitty flag set to the outer terminal only when `TermCaps::extended_keys` was negotiated,
+and `cloo_term::Emulator::modes` reports whether the *application* has pushed one. Today the two
+never disagree in practice, because `attach_caps` cannot establish `extended_keys` without writing
+a query and reading a reply, so the client never asks for it and the fallback is the legacy
+encoding on both sides. The moment cloo learns to query, the mismatch becomes reachable, and an
+application reading legacy keys would receive Kitty-encoded ones it will print rather than act on.
+
+A second, narrower gap sits underneath this one. `cloo-term` drives the emulator with a
+`VoidListener`, so anything the emulator wants to write *back* to the child — a device-attributes
+reply, a Kitty keyboard-mode report — is discarded. An application that probes for support gets
+silence and falls back, which is safe but is a fallback rather than an answer.
+
+**Options under consideration:**
+1. **Transcode in the client** — decode Kitty key events and re-emit legacy ones when the
+   application has not asked for the extended encoding. Tradeoff: the transcoder is a real
+   keyboard model, and it is the component most likely to be wrong in a way that only shows up
+   under one harness.
+2. **Match the pane** — push the extended protocol to the outer terminal only while the focused
+   pane's application has it enabled, and pop it otherwise. Tradeoff: the outer terminal's mode
+   then changes on focus switches, and two panes in different modes make it churn.
+3. **Never negotiate extended keys at all** — keep the legacy encoding end to end. Tradeoff:
+   gives up the key disambiguation that `docs/AGENT_WORKFLOWS.md` lists as a required capability
+   for an interactive harness.
+
+**Blocking:** Nothing currently blocked. M1-07 shipped with the modes plumbed and the client not
+asking for extended keys, which is the conservative state; whoever teaches `attach_caps` to query
+the terminal must resolve this first.
+
+**See also:** [`ARCHITECTURE.md`](ARCHITECTURE.md) input routing,
+[`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md) compatibility contract,
+`crates/cloo-client/src/input.rs`.
 
 ## Resolved Decisions
 
@@ -310,3 +349,28 @@ socket is involved. That has to be explained wherever it surfaces — the `TERM`
 capability negotiation, `crates/cloo-client/src/capabilities.rs`, and workboard tasks M1-06 and
 M7-01. Implemented in M1-06: `attach_caps` refuses, `caps_from_env` degrades, and the local pane
 calls the second.
+
+### RESOLVED-13 — The client decodes input, the server encodes it
+
+**Resolved:** 2026-07-21
+
+**Decision:** A paste, a focus change, and a mouse event each cross the wire as *what happened* —
+`ClientMessage::Paste`, `Focus`, and `Mouse` — never as bytes for a child. The server encodes them
+for the pane from the modes the pane's own application negotiated, which it reads out of the
+emulator and reports back to the client as `ServerMessage::Modes { pane, modes }`.
+
+**Why:** Whether a paste is wrapped in paste brackets, whether a click is reported at all, and in
+which encoding are all decided by private mode sets the *child* wrote. Only the emulator sees
+them, and the emulator is the server's. A client that pre-encoded would be guessing at state it
+does not hold, and two clients of one session could guess differently. The reverse direction is
+just as fixed: the client is the only side that knows the geometry it drew, so hit testing and the
+chrome-versus-application ownership decision stay there.
+
+**Alternatives rejected:** Having the client send pre-bracketed bytes on `Input` would have needed
+no new messages, but makes correctness depend on the client's copy of a mode it cannot observe.
+Having the server hit-test would have put chrome geometry into session state, which is the one
+thing the client-side-chrome rule exists to prevent.
+
+**Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md) wire protocol and input routing,
+`crates/cloo-proto/src/message.rs`, `crates/cloo-server/src/session.rs`,
+`crates/cloo-client/src/input.rs`. Implemented in M1-07; `PROTOCOL_VERSION` bumped to 2.

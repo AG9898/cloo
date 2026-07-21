@@ -23,8 +23,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cloo_proto::{
-    ClientMessage, FrameStream, PROTOCOL_VERSION, ProtoError, ServerMessage, SessionId, Size,
-    StreamError, TabSummary, TermCaps, check_version,
+    ClientMessage, FrameStream, MouseEvent, PROTOCOL_VERSION, ProtoError, ServerMessage, SessionId,
+    Size, StreamError, TabSummary, TermCaps, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
@@ -159,6 +159,41 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
     /// Returns the transport failure.
     pub async fn send_input(&mut self, bytes: Vec<u8>) -> Result<(), StreamError> {
         self.conn.send(&ClientMessage::Input(bytes)).await
+    }
+
+    /// Sends pasted text as text.
+    ///
+    /// Deliberately not [`send_input`](Self::send_input): whether the child
+    /// wants paste brackets is a mode only the server can see, so the client
+    /// sends what the user pasted and lets the server encode it.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport failure.
+    pub async fn send_paste(&mut self, text: Vec<u8>) -> Result<(), StreamError> {
+        self.conn.send(&ClientMessage::Paste(text)).await
+    }
+
+    /// Tells the server the client's terminal gained or lost focus.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport failure.
+    pub async fn send_focus(&mut self, focused: bool) -> Result<(), StreamError> {
+        self.conn.send(&ClientMessage::Focus { focused }).await
+    }
+
+    /// Sends a mouse event the client routed to the pane's application.
+    ///
+    /// Only application-owned events belong here. An event
+    /// [`mouse_owner`](crate::input::mouse_owner) gave to the chrome must never
+    /// be sent: it would land in the child's input as garbage.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport failure.
+    pub async fn send_mouse(&mut self, event: MouseEvent) -> Result<(), StreamError> {
+        self.conn.send(&ClientMessage::Mouse(event)).await
     }
 
     /// Tells the server the client's terminal changed size.

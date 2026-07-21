@@ -22,7 +22,8 @@ use std::{fs, io};
 
 use cloo_client::attach::{AttachError, Attached, attach};
 use cloo_proto::{
-    ClientMessage, FrameStream, PROTOCOL_VERSION, RowUpdate, ServerMessage, Size, TermCaps,
+    ClientMessage, FrameStream, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
+    PROTOCOL_VERSION, PaneId, PaneModes, Point, RowUpdate, ServerMessage, Size, TermCaps,
 };
 use cloo_server::daemon::Daemon;
 use cloo_server::pty::PtyConfig;
@@ -304,6 +305,175 @@ async fn a_degenerate_resize_leaves_the_session_alone() {
         .await
         .expect("input must reach the child");
     await_text(&mut attached, "24 80").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+/// Reads frames until the server reports pane modes satisfying `want`.
+async fn await_modes(attached: &mut Attached<UnixStream>, want: fn(PaneModes) -> bool) {
+    let found = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Modes { modes, .. }) if want(modes) => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .expect("the expected modes never arrived");
+    assert!(found, "the server closed before reporting the modes");
+}
+
+/// A child that echoes what it is sent, with escape bytes stripped so the result
+/// is readable on the grid.
+///
+/// `-echo` keeps the pty's own echo out of the rows and `-icanon` is what lets a
+/// report with no newline in it be read at all; `tr` is what makes an escape
+/// sequence assertable as text.
+fn echoing(enable: &str, bytes: usize) -> String {
+    format!(
+        "stty -echo -icanon; printf '{enable}'; printf 'ready\\n'; \
+         head -c {bytes} | tr -d '\\033'"
+    )
+}
+
+#[tokio::test]
+async fn a_paste_is_bracketed_exactly_when_the_child_asked_for_it() {
+    let dir = TempDir::new("paste-bracketed");
+    let socket = dir.socket();
+    // `\x1b[200~hello\x1b[201~` is 17 bytes; the child prints it back without
+    // the escape byte, so the brackets themselves are what the test sees.
+    let (_pid, daemon) = spawn_daemon(&socket, &echoing("\\033[?2004h", 17));
+
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+    await_modes(&mut attached, |modes| modes.bracketed_paste).await;
+
+    attached
+        .send_paste(b"hello".to_vec())
+        .await
+        .expect("the paste must reach the daemon");
+    await_text(&mut attached, "[200~hello[201~").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn a_paste_to_a_child_that_did_not_ask_arrives_as_typed_input() {
+    let dir = TempDir::new("paste-plain");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, &echoing("", 5));
+
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+
+    attached
+        .send_paste(b"hello".to_vec())
+        .await
+        .expect("the paste must reach the daemon");
+    await_text(&mut attached, "hello").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn focus_reaches_a_child_that_asked_for_it() {
+    let dir = TempDir::new("focus");
+    let socket = dir.socket();
+    // `\x1b[I` is three bytes, two of them printable.
+    let (_pid, daemon) = spawn_daemon(&socket, &echoing("\\033[?1004h", 3));
+
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+    await_modes(&mut attached, |modes| modes.focus_events).await;
+
+    attached
+        .send_focus(true)
+        .await
+        .expect("the focus report must reach the daemon");
+    await_text(&mut attached, "[I").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn a_child_that_asked_for_neither_focus_nor_the_mouse_hears_neither() {
+    let dir = TempDir::new("silent");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, &echoing("", 4));
+
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+
+    // Neither of these may put a single byte into the child's input. The typed
+    // "done" that follows is what proves it: if either had been forwarded, the
+    // four bytes the child reads would start with a report instead.
+    attached.send_focus(true).await.expect("focus must send");
+    attached
+        .send_mouse(MouseEvent {
+            pane: PaneId::new(1),
+            at: Point::new(10, 5),
+            kind: MouseKind::Press(MouseButton::Left),
+            mods: MouseMods::NONE,
+        })
+        .await
+        .expect("the mouse event must send");
+    attached
+        .send_input(b"done".to_vec())
+        .await
+        .expect("input must reach the child");
+
+    await_text(&mut attached, "done").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn a_mouse_event_reaches_a_tracking_child_in_the_sgr_encoding() {
+    let dir = TempDir::new("mouse");
+    let socket = dir.socket();
+    // `\x1b[<0;11;6M` is ten bytes: the SGR report for a left press on the cell
+    // at column 10, row 5, one-based on the wire out.
+    let (_pid, daemon) = spawn_daemon(&socket, &echoing("\\033[?1000h\\033[?1006h", 10));
+
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+    await_modes(&mut attached, |modes| {
+        modes.mouse != MouseTracking::Off && modes.sgr_mouse
+    })
+    .await;
+
+    attached
+        .send_mouse(MouseEvent {
+            pane: PaneId::new(1),
+            at: Point::new(10, 5),
+            kind: MouseKind::Press(MouseButton::Left),
+            mods: MouseMods::NONE,
+        })
+        .await
+        .expect("the mouse event must reach the daemon");
+    await_text(&mut attached, "[<0;11;6M").await;
 
     tokio::time::timeout(PATIENCE, daemon)
         .await

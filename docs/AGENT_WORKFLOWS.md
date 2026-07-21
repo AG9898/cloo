@@ -51,6 +51,17 @@ every capability false ([DECISIONS.md](DECISIONS.md) RESOLVED-12). A harness att
 broken `TERM` therefore gets a loud local error instead of a session that has to be diagnosed
 remotely.
 
+The required tier's input half is plumbed end to end as of M1-07. cloo asks the outer terminal for
+bracketed paste, focus reporting, and SGR mouse reporting when the client negotiated them, decodes
+what comes back into typed events, and re-encodes each one for the pane using the modes the
+*harness itself* negotiated — so a harness that never enabled bracketed paste receives pasted text
+as ordinary typing rather than delimiters it would print. A harness that tracks the mouse owns
+mouse events over its own pane; shift is the override that reaches cloo's chrome without the
+harness seeing the click. Extended keys are the one required capability still unclaimed: the
+client cannot establish it without a terminal query, so both ends stay on the legacy encoding and
+the mismatch case is [DECISIONS.md](DECISIONS.md) OPEN-02. See
+[ARCHITECTURE.md](ARCHITECTURE.md#input-routing).
+
 Claude Code documents that tmux needs extended keys and passthrough for some of its terminal
 features; cloo's required and negotiated tiers cover the equivalent responsibilities. Codex
 documents that its terminal pets need graphics support and are unavailable inside tmux and Zellij;

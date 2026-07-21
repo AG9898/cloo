@@ -51,7 +51,7 @@ boundary, which is what makes the emulation backend replaceable.
 | `cloo-term` | Thin wrapper over `alacritty_terminal` — feed bytes, read cells, resize, scrollback | Leak `alacritty_terminal` types across its public API |
 | `cloo-core` | Session/tab/pane model, layout tree, keymap, profiles, pane metadata, config | Perform I/O |
 | `cloo-server` | Daemon: socket, PTY reactor, damage tracking | Decide what anything looks like |
-| `cloo-client` | Attach, raw mode, renderer, theming, input encoding | Hold authoritative session state |
+| `cloo-client` | Attach, raw mode, renderer, theming, input decoding and routing | Hold authoritative session state, or encode input for a pane |
 | `cloo` | The binary; client-vs-server dispatch, CLI surface | Contain logic that belongs in a library crate |
 
 All six crates exist in the workspace and are wired together end to end as of M0-07: `crates/cloo`
@@ -104,13 +104,20 @@ character split across two reads still parses.
 The surface is exactly what the crate table promises. `feed` takes bytes; `row`, `rows`, and
 `row_text` read the visible grid; `resize` reflows it; `scrollback_len`, `scroll_offset`,
 `scroll`, and `scroll_to_bottom` cover history. `cursor` and `is_alt_screen` report the state a
-renderer needs but cannot derive from cells alone.
+renderer needs but cannot derive from cells alone, and `modes` reports the input modes the child
+*application* has negotiated — bracketed paste, focus reporting, mouse tracking and its encoding,
+and the Kitty keyboard protocol. Those come from private mode sets the child wrote, so the
+emulator is the only place that can answer; reading them from it rather than parsing the same
+sequences a second time is what keeps the two answers from disagreeing. The Kitty protocol is off
+by default in the backend and cloo turns it on, or a pushed flag set would be silently discarded
+and `modes` would report legacy keys forever.
 
 `Emulator::resize` moves emulation state only. The child still has to be told through
 `TIOCSWINSZ` from the PTY layer, and the two together are the resize race described in
 `AGENTS.md`.
 
-The value types (`Cell`, `Color`, `CellAttrs`, `CursorState`) are `cloo-term`'s own. They mirror
+The value types (`Cell`, `Color`, `CellAttrs`, `CursorState`, `PaneModes`, `MouseTracking`) are
+`cloo-term`'s own. They mirror
 the `cloo-proto` shapes without depending on them, because `cloo-term` sits at the bottom of the
 dependency graph next to `cloo-proto` and depends on nothing in the workspace. `cloo-core` owns
 the conversion; the `CellAttrs` bit layouts match so it stays a field copy.
@@ -224,7 +231,10 @@ than driven by PTY readiness.
 
 `cloo-server::session` is the one thing that mutates a session. Everything that changes it — a
 keystroke, a resize, a future split — arrives as a `Command` on a single `mpsc` and is applied in
-arrival order by one task, as of M1-03. There is no `Mutex` on session state and no second path
+arrival order by one task, as of M1-03. `Input` carries already-encoded keys; `Paste`, `Focus`,
+and `Mouse` carry events the task encodes itself from the pane's negotiated modes, as of M1-07,
+and `SessionSnapshot` carries those modes back out so a client can route the next event. There is
+no `Mutex` on session state and no second path
 to it: a `SessionHandle` is a sender and nothing more, so a caller cannot reach past it. Both the
 daemon and the binary's local loop hold one, which is why the in-process path and the socket path
 cannot drift.
@@ -308,6 +318,14 @@ ownership, matching the PTY layer, and covers four paths with the same restore:
 | Panic | a panic hook installed on first entry, chained to the previous hook |
 | Signal | `SIGINT`, `SIGTERM`, `SIGHUP`, `SIGQUIT` handlers that restore, then re-raise |
 
+The same four paths also write back any reporting modes the client turned on in the outer
+terminal. `RawMode::on_restore` registers the reset sequence — the bytes `OuterModes::disable`
+produces — and every restore writes it before putting the `termios` back. A terminal left
+reporting mouse motion into a shell that knows nothing about it is the same class of bug as one
+left raw. A sequence longer than `MAX_RESET_LEN` is refused rather than truncated, and the stored
+sequence is *taken* on the first restore, so a panic that unwinds through the hook and then drops
+the guard writes it once.
+
 The panic hook and the signal handlers cannot borrow the guard, so the saved `termios` also lives
 in a process-global restore slot that the guard arms on entry and disarms on restore. The slot is
 a three-state atomic (`IDLE`/`ARMING`/`ARMED`) plus the payload, so a handler firing mid-arm sees
@@ -323,7 +341,7 @@ status a parent shell sees is the one it expects from a signalled child.
 `TIOCGWINSZ`. A terminal that reports a zero-width or zero-height `winsize` gets a conventional
 80x24 rather than an error.
 
-`cloo-client::capabilities` is the other half: what that terminal can *do*, from `TERM` and
+`cloo-client::capabilities` is the next piece: what that terminal can *do*, from `TERM` and
 `COLORTERM`. Detection is a pure function of those two values so it is testable without touching
 the process environment, and it claims only what can be established without writing a query
 sequence and waiting for a reply — everything else stays false and takes its documented fallback.
@@ -365,6 +383,56 @@ flicker worth avoiding.
 
 The new size becomes a `Command::Resize` on the session channel like anything else. The client
 never resizes a grid or a PTY itself.
+
+#### Input routing
+
+`cloo-client::input` is the other half of what the client does with the terminal it sits in, as of
+M1-07. Three pieces, composing in one direction:
+
+- **`OuterModes`** — which reporting modes cloo asks the outer terminal to turn on, derived from
+  the negotiated `TermCaps` and from nothing else. A capability that could not be established is
+  simply not asked for, which is the same silence its fallback already describes. `enable` and
+  `disable` are exact inverses, and the reset is registered on the raw-mode guard so it also runs
+  on a panic or a signal.
+- **`InputDecoder`** — the terminal's byte stream, split back into `InputEvent::{Keys, Paste,
+  Focus, Mouse}`. A sequence is recognised only for a mode cloo actually requested: `ESC [ I` is a
+  legitimate thing for a program to send when focus reporting was never enabled, and stealing it
+  would corrupt input belonging to the pane. A sequence split across two reads is held rather than
+  mis-decoded, and because a lone `ESC` is a prefix of every sequence here, the run loop calls
+  `flush` on the frame tick — that is what makes the Escape key reach a pane at all.
+- **`mouse_owner`** — whether an event is the pane application's or cloo's chrome's.
+
+The encoding sits on the far side. `ClientMessage::Paste`, `Focus`, and `Mouse` carry *what
+happened*; `cloo-server::session` turns each into bytes using the modes the pane's own application
+negotiated, which the client cannot see and is told about in `ServerMessage::Modes`. See
+[DECISIONS.md](DECISIONS.md) RESOLVED-13. Concretely:
+
+| Event | Encoded as | When the application asked for nothing |
+|---|---|---|
+| Paste | `ESC [ 200~` … `ESC [ 201~` | the text alone, as ordinary typed input |
+| Focus | `ESC [ I` / `ESC [ O` | nothing is written |
+| Mouse | SGR `ESC [ < code;col;row M\|m`, else legacy X10 | nothing is written |
+
+Two details are load-bearing rather than incidental. Pasted text has any paste delimiter *inside*
+it stripped and its line endings normalised to carriage returns, because otherwise pasted content
+could close the bracket early and have the rest of itself run as typed input — the injection
+bracketed paste exists to prevent. And a mouse event is filtered by tracking level before it is
+encoded: a bare pointer move is silence under click-only tracking, and a cell the legacy encoding
+cannot address is dropped rather than sent with a wrong coordinate.
+
+##### Mouse ownership
+
+Three rules decide it, in order, and any one of them alone is enough to hand an event to chrome:
+
+1. The pointer is not over a pane — a border or the status bar is never the application's.
+2. Shift is held. This is the conventional multiplexer override, and the only way to reach chrome
+   inside a pane run by a full-screen application.
+3. The application is not tracking the mouse, so it cannot own a mouse event. This is what makes
+   click-to-focus work in an ordinary shell.
+
+**A chrome event never reaches the wire.** Forwarding one would put escape bytes into the child's
+input, where they appear as garbage. M1-07 has no chrome to act on them yet, so they are dropped;
+M6-01 gives them somewhere to go, and hit testing arrives with splits in M2.
 
 ### The binary
 
@@ -435,13 +503,15 @@ Length-framed postcard over the Unix socket. Implemented in `cloo-proto`.
 
 ```
 Client → Server:  Attach { protocol_version, size, term_caps, session }
-                  Detach  Input(Vec<u8>)  Mouse(MouseEvent)
+                  Detach  Input(Vec<u8>)  Paste(Vec<u8>)
+                  Focus { focused }  Mouse(MouseEvent)
                   Resize(Size)  Command(Action)
 
 Server → Client:  Hello { protocol_version, session, tabs, size }
                   Refused { reason }
                   Damage { pane, rows: Vec<RowUpdate> }
                   CursorMoved { pane, pos, shape, visible }
+                  Modes { pane, modes: PaneModes }
                   Layout(LayoutSnapshot)  Bell(pane)  Tabs(Vec<TabSummary>)
                   Detached  Exit(code)
 ```
@@ -514,7 +584,8 @@ client's to read, and the server is told capabilities rather than asked to infer
 all-false `TermCaps`, which a capable terminal could also legitimately report. The in-process local
 pane has no such negotiation and keeps running with every capability false. See
 [DECISIONS.md](DECISIONS.md) RESOLVED-12; the two rules compose as *refuse when there is nothing to
-negotiate from, degrade when there is*. Shipped as of M1-06.
+negotiate from, degrade when there is*. Shipped as of M1-06; the modes those capabilities turn
+into, and the routing built on them, are [Input routing](#input-routing) as of M1-07.
 
 Some child programs emit sequences intended for the *outer* terminal: notifications, titles,
 clipboard writes, hyperlinks, or graphics. These are not raw bytes to relay around the grid.
