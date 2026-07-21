@@ -303,7 +303,10 @@ that enabled them and neither reaching one that did not. `cloo-client` gained in
 mouse-ownership coverage in `src/input.rs` at M1-07, `cloo-server` the matching encoders in
 `src/session.rs`, and `cloo-term` one fixture per negotiated pane mode in `src/emulator.rs`. That file lives in the binary crate
 because it needs both halves of the wire and `cloo-server` may never name `cloo-client`. Keymap
-resolution and config parsing are the next things that must get coverage as they land.
+resolution and config parsing are the next things that must get coverage as they land. M1-04 adds
+row-damage tracker coverage in `cloo-server/src/damage.rs`, byte-exact incremental renderer
+coverage in `cloo-client/src/renderer.rs`, and attach integration coverage that proves bounded
+burst frames, lagged-client recovery, and concurrent-client fan-out.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -559,3 +562,8 @@ strips the escape byte with `tr`, which is what makes an escape sequence asserta
 which is a wrong answer rather than a missing one. cloo turns it on. Related and still open: the
 emulator runs with a `VoidListener`, so any reply it wants to write back to the child (device
 attributes, a keyboard-mode report) is dropped — see DECISIONS.md OPEN-02.
+
+### 2026-07-21 — Subscribe after a resync snapshot, not before it
+The daemon is the only broadcaster, so it can capture a snapshot and create a new `broadcast`
+receiver without an await between them; the receiver then starts strictly after the snapshot. A
+receiver created first could replay an older layout or row after the snapshot and undo the resync.

@@ -140,6 +140,29 @@ async fn await_text(attached: &mut Attached<UnixStream>, want: &str) {
     assert!(found, "the server closed before sending {want:?}");
 }
 
+/// Like [`await_text`], but returns how many bounded damage frames arrived
+/// after the caller began waiting. A burst may span a few frame ticks on a
+/// loaded machine; it must never become one frame per PTY read.
+async fn await_text_counting_damage(attached: &mut Attached<UnixStream>, want: &str) -> usize {
+    tokio::time::timeout(PATIENCE, async {
+        let mut damage_frames = 0;
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Damage { rows, .. }) => {
+                    damage_frames += 1;
+                    if rows.iter().any(|row| row_text(row) == want) {
+                        return damage_frames;
+                    }
+                }
+                Some(_) => {}
+                None => panic!("the server closed before sending {want:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("never saw {want:?} in the pane"))
+}
+
 #[tokio::test]
 async fn attaching_delivers_a_hello_and_a_session_snapshot() {
     let dir = TempDir::new("snapshot");
@@ -216,6 +239,74 @@ async fn a_client_that_vanishes_does_not_take_the_session_with_it() {
         .expect("input must reach the child");
     await_text(&mut second, "still here").await;
 
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn two_clients_receive_one_coalesced_damage_stream() {
+    let dir = TempDir::new("fanout");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, "printf 'ready\\n'; read _; printf 'shared\\n'");
+
+    let mut first = client(&socket).await;
+    await_text(&mut first, "ready").await;
+    let mut second = client(&socket).await;
+    await_text(&mut second, "ready").await;
+
+    first
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input from one client must reach the session");
+    await_text(&mut first, "shared").await;
+    await_text(&mut second, "shared").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn burst_output_is_frame_bounded_and_a_lagging_client_recovers() {
+    let dir = TempDir::new("damage-burst");
+    let socket = dir.socket();
+    // `yes | head` produces far more than one PTY read without relying on
+    // sleeps. The first client deliberately does not read while the burst is
+    // in flight; the second must still see the final marker promptly.
+    let (_pid, daemon) = spawn_daemon(
+        &socket,
+        "printf 'ready\\n'; read _; yes xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx | head -n 80000; printf 'burst-complete\\n'; read _; exit 0",
+    );
+
+    let mut lagging = client(&socket).await;
+    let mut active = client(&socket).await;
+    await_text(&mut active, "ready").await;
+
+    active
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must start the burst");
+    let frames = await_text_counting_damage(&mut active, "burst-complete").await;
+    assert!(
+        frames <= 12,
+        "a burst must be coalesced to frame-bounded updates, got {frames}"
+    );
+
+    // The lagging socket task dropped its bounded backlog and requested a new
+    // snapshot. If it had been allowed to stall the daemon, the active client
+    // above would not have reached the marker; if it did not resync here, this
+    // client would never converge on the same final grid.
+    await_text(&mut lagging, "burst-complete").await;
+
+    active
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the child exit");
     tokio::time::timeout(PATIENCE, daemon)
         .await
         .expect("the daemon must exit")

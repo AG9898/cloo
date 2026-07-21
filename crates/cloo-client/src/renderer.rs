@@ -233,8 +233,8 @@ impl Renderer {
     /// Draws every cell of `grid` and returns the bytes to write.
     ///
     /// This is the unconditional redraw: used on attach, after a resize, and
-    /// whenever a client resyncs. Incremental diffing against previous frames
-    /// lands with damage coalescing in M1-04.
+    /// whenever a client resyncs. Ordinary damage frames use
+    /// [`render_rows`](Self::render_rows) instead.
     ///
     /// The frame is deliberately ordered so nothing is ever seen half-drawn:
     /// hide the cursor, clear, paint, reset the rendition, then place and show
@@ -244,29 +244,68 @@ impl Renderer {
         self.out.push_str("\x1b[?25l");
         self.out.push_str("\x1b[H\x1b[2J");
 
-        let mut style: Option<Style> = None;
+        let mut style = None;
         for row in 0..grid.size().rows {
-            let Some(cells) = grid.row(row) else { continue };
-            move_to(&mut self.out, row, 0);
-            for cell in cells {
-                let wanted = Style::of(cell);
-                if style != Some(wanted) {
-                    push_sgr(&mut self.out, wanted, self.caps);
-                    style = Some(wanted);
-                }
-                self.out.push(cell.ch);
-            }
+            self.paint_row_with_style(grid, row, &mut style);
         }
 
-        self.out.push_str("\x1b[0m");
+        self.finish(cursor);
 
+        self.output()
+    }
+
+    /// Draws only the rows named by coalesced server damage.
+    ///
+    /// Callers first apply and validate every [`RowUpdate`] in their [`Grid`],
+    /// then pass its row indices here. A bad update is therefore refused before
+    /// this method can draw a partial guess. Each invocation starts its own
+    /// rendition from an absolute reset, so a dropped frame cannot make a row
+    /// inherit an outer-terminal style from an earlier one.
+    ///
+    /// This never clears the screen. Resync and geometry changes remain the
+    /// explicit full-redraw path above; ordinary output repaints only the rows
+    /// the server found different at its frame boundary.
+    pub fn render_rows(&mut self, grid: &Grid, rows: &[u16], cursor: Option<Cursor>) -> &[u8] {
+        self.out.clear();
+        self.out.push_str("\x1b[?25l");
+        for &row in rows {
+            self.paint_row(grid, row);
+        }
+        self.finish(cursor);
+
+        self.output()
+    }
+
+    /// Draws one complete damaged row from the cache.
+    fn paint_row(&mut self, grid: &Grid, row: u16) {
+        let mut style = None;
+        self.paint_row_with_style(grid, row, &mut style);
+    }
+
+    /// Draws one row while carrying rendition state across a paint operation.
+    fn paint_row_with_style(&mut self, grid: &Grid, row: u16, style: &mut Option<Style>) {
+        let Some(cells) = grid.row(row) else {
+            return;
+        };
+        move_to(&mut self.out, row, 0);
+        for cell in cells {
+            let wanted = Style::of(cell);
+            if *style != Some(wanted) {
+                push_sgr(&mut self.out, wanted, self.caps);
+                *style = Some(wanted);
+            }
+            self.out.push(cell.ch);
+        }
+    }
+
+    /// Resets rendition and restores the cursor after any paint operation.
+    fn finish(&mut self, cursor: Option<Cursor>) {
+        self.out.push_str("\x1b[0m");
         if let Some(cursor) = cursor {
             move_to(&mut self.out, cursor.pos.row, cursor.pos.col);
             self.out.push_str(shape_sequence(cursor.shape));
             self.out.push_str("\x1b[?25h");
         }
-
-        self.output()
     }
 }
 
@@ -562,6 +601,33 @@ mod tests {
         let first = renderer.render_full(&grid, None).to_vec();
         let second = renderer.render_full(&grid, None).to_vec();
         assert_eq!(first, second, "the buffer must be cleared between frames");
+    }
+
+    #[test]
+    fn incremental_damage_repaints_only_the_named_row() {
+        let mut grid = Grid::new(Size::new(2, 2));
+        grid.apply(&RowUpdate {
+            row: 1,
+            cells: row_of("hi", Color::Indexed(4), CellAttrs::BOLD),
+        })
+        .expect("the damage fits");
+        let mut renderer = Renderer::new(TermCaps::default());
+        assert_eq!(
+            renderer.render_rows(
+                &grid,
+                &[1],
+                Some(Cursor::new(Point::new(1, 1), CursorShape::Block)),
+            ),
+            b"\x1b[?25l\x1b[2;1H\x1b[0;1;38;5;4mhi\x1b[0m\x1b[2;2H\x1b[2 q\x1b[?25h"
+        );
+    }
+
+    #[test]
+    fn incremental_damage_does_not_clear_the_outer_terminal() {
+        let grid = Grid::new(Size::new(1, 1));
+        let mut renderer = Renderer::new(TermCaps::default());
+        let frame = renderer.render_rows(&grid, &[0], None);
+        assert!(!frame.windows(3).any(|bytes| bytes == b"\x1b[2J"));
     }
 
     #[test]

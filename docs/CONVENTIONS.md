@@ -85,8 +85,9 @@ crates/
   session task via `mpsc<Command>`.
 - One task per PTY, one session task, one task per attached client. A new long-lived task needs
   a justification in the PR description.
-- Damage goes out over `broadcast`. Client tasks that lag are dropped and told to resync, never
-  allowed to stall the session task.
+- Damage goes out over a bounded `broadcast` channel as one ordered frame batch. A client task
+  that lags drops its partial backlog, subscribes after a fresh session snapshot, and resyncs;
+  it is never allowed to stall the session task or the damage coordinator.
 - Anything in the render path is frame-budgeted. Coalesce; never emit one update per PTY read.
 - A handle to an actor is a **sender and nothing more**. Never hand out a reference to the state
   behind it, and never keep a second path to that state "just for reads" — the point of the

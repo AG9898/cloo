@@ -150,9 +150,9 @@ recoverable direction to be inconsistent in.
 `PtyReactor::snapshot` is the other half of the boundary: it captures the whole visible grid as a
 `PaneSnapshot` of wire geometry, `RowUpdate`s, and an optional cursor. Nothing in it describes an
 appearance. The conversion from emulator cells to wire cells lives in `cloo-core::grid` — the one
-crate that sees both vocabularies — and a full capture per frame is the M0 shape, bounded by the
-caller's frame timer rather than by output volume. M1-04 replaces the capture with coalesced
-per-row damage; the type a client applies does not change.
+crate that sees both vocabularies. At M1-04 the daemon's `DamageTracker` compares those captures
+only at its frame boundary and publishes the changed rows; the type a client applies does not
+change.
 
 #### Socket lifecycle
 
@@ -222,10 +222,16 @@ and resize it receives becomes a command on that channel; snapshots come back th
 is what makes it a transport rather than a second owner: there is no other path to the grid or
 the PTY for a bug to take.
 
-Two things in the daemon are deliberate placeholders. It serves one client at a time and sends a
-full grid capture per frame tick — fan-out and coalesced row damage are M1-04. What is already
-true is the property that task must not break: the update rate is capped by a frame timer rather
-than driven by PTY readiness.
+As of M1-04, the daemon accepts connections continuously and gives each attached client its own
+socket task and bounded `broadcast` receiver. The coordinator is the only task that captures the
+session: on a dirty frame tick it compares the new snapshot to the last published one and sends a
+single ordered batch — layout, changed rows, modes, cursor — without awaiting any socket. A client
+whose receiver reports lag discards the partial backlog and asks the coordinator for a full
+snapshot; a slow terminal can therefore delay only its own resync, never the session task.
+
+The session geometry is the component-wise minimum of usable attached-client sizes. When a client
+attaches, disconnects, or resizes, the coordinator relays that minimum through the session task;
+with no clients it keeps the last usable geometry so a detached child is not surprised by a resize.
 
 #### The session task
 
@@ -320,6 +326,9 @@ failure.
 `Renderer` turns a grid into bytes. It is a pure function of grid, cursor, and `TermCaps` into an
 owned buffer — it never writes to a descriptor, which is what lets a fake grid be rendered in a
 unit test against an exact expected byte string. The caller writes the buffer wherever it likes.
+`render_full` remains the resync and geometry-change path; `render_rows` repaints only validated,
+coalesced row indices and never clears the outer terminal. The local composition path uses the
+same split, so a complete snapshot that contains only unchanged rows still costs no repaint.
 
 Three rendering invariants:
 
@@ -517,7 +526,9 @@ Tokio, actor-shaped rather than shared mutable state:
 - One task per attached client, holding a `broadcast` receiver for damage.
 
 Everything reaches the session task through a single `mpsc<Command>`. There is no `Mutex` on
-session state. Expect bugs in PTY/resize *ordering*, not in lock discipline.
+session state. The daemon coordinator alone captures and compares snapshots; its bounded
+`broadcast` channel is deliberately allowed to lag, because a receiver resyncs from the session
+actor rather than backpressuring it. Expect bugs in PTY/resize *ordering*, not in lock discipline.
 
 The session task is real as of M1-03 — see [The session task](#the-session-task). It owns every
 pane's PTY directly rather than talking to a separate per-PTY task, and as of M2-01 it owns

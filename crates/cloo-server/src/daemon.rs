@@ -1,50 +1,39 @@
-//! The single-pane daemon: own the PTY, serve clients over the socket, and
-//! outlive every one of them.
+//! The daemon's bounded damage fan-out loop.
 //!
-//! This is the M1 shape of the loop `crates/cloo/src/local.rs` runs in-process.
-//! The difference that matters is lifetime: the child belongs to the daemon,
-//! not to whoever is watching it. A client that detaches, disconnects, or dies
-//! takes nothing with it — the PTY keeps being pumped between connections, so a
-//! reattaching client finds the session where it left it rather than where it
-//! last drew it.
-//!
-//! The daemon owns no session state. It owns a [`SessionHandle`] — a sender —
-//! and every keystroke and resize it receives becomes a command on that
-//! channel, applied by the session task in arrival order. Snapshots come back
-//! the same way. That is what makes the daemon a *transport*: there is no
-//! second path to the grid or the PTY for a bug to take.
-//!
-//! One client at a time, and a full grid capture per frame tick. Both are
-//! deliberate placeholders with a real successor: damage coalescing and fan-out
-//! to several clients are M1-04. What is already true is the property that task
-//! must not break — the render rate is capped by a timer rather than driven by
-//! PTY readiness, so a fast child cannot turn into one frame per read.
+//! The daemon is a transport coordinator, not another owner of session state.
+//! It receives coalesced [`SessionEvent::Output`] notifications, captures one
+//! authoritative snapshot on a frame tick, and publishes the row delta through
+//! a bounded `broadcast` channel. Every socket lives in its own task, so a
+//! slow terminal can delay only its own writes. A lagged task discards its
+//! partial history and asks the coordinator for a full snapshot.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
 
 use cloo_proto::{
-    Action, ClientMessage, PaneId, ServerMessage, SessionId, Size, StreamError, TabId,
+    Action, ClientId, ClientMessage, PaneId, ServerMessage, SessionId, Size, StreamError, TabId,
 };
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
+use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::task::{JoinHandle, JoinSet};
 
-use crate::conn::{self, Connection};
+use crate::conn::{self, AttachRequest, Connection};
+use crate::damage::{DamageFrame, DamageTracker};
 use crate::pty::{PtyConfig, PtyError};
 use crate::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, usable};
 use crate::socket::{Listener, SocketError};
 
-/// The render tick, capping the fan-out rate at roughly 60fps.
-///
-/// A large `cat` is the classic multiplexer killer: without a cap, every PTY
-/// read becomes a full-screen update on the wire and the socket, not the child,
-/// becomes the bottleneck.
+/// The render tick, capping fan-out at roughly 60fps.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Frames held for each client before it must resync from a snapshot.
+const DAMAGE_QUEUE: usize = 8;
+/// Client-to-daemon requests waiting for the coordinator.
+const CLIENT_COMMAND_QUEUE: usize = 64;
 
-/// The single session, tab, and pane this milestone's daemon owns.
+/// The single session, tab, and initial pane this milestone's daemon owns.
 const THE_SESSION: SessionId = SessionId::new(1);
 /// See [`THE_SESSION`].
 const THE_TAB: TabId = TabId::new(1);
@@ -104,16 +93,45 @@ impl From<PtyError> for DaemonError {
     }
 }
 
-/// Why one client's turn ended.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Served {
-    /// The client left. The session keeps running.
-    Gone,
-    /// The child exited while this client was attached.
-    ChildExited,
+/// A command sent from one socket task to the coordinator.
+///
+/// Socket tasks deliberately hold no [`SessionHandle`]. That keeps client
+/// backpressure outside the session actor and lets the daemon release the only
+/// handle promptly when the child exits.
+enum ClientCommand {
+    /// A version-checked client needs its hello, snapshot, and update receiver.
+    Attached {
+        client: ClientId,
+        request: AttachRequest,
+        reply: oneshot::Sender<ClientStart>,
+    },
+    /// A normal post-handshake client message.
+    Message {
+        client: ClientId,
+        message: ClientMessage,
+    },
+    /// A broadcast receiver fell behind and needs a fresh baseline.
+    Resync {
+        reply: oneshot::Sender<ClientResync>,
+    },
+    /// The connection ended, so it no longer contributes to the minimum size.
+    Gone { client: ClientId },
 }
 
-/// A bound socket and the pane behind it.
+/// State a newly attached client needs before it can enter its socket loop.
+struct ClientStart {
+    size: Size,
+    snapshot: SessionSnapshot,
+    updates: broadcast::Receiver<DamageFrame>,
+}
+
+/// The private reply to a lagged client's resync request.
+struct ClientResync {
+    snapshot: SessionSnapshot,
+    updates: broadcast::Receiver<DamageFrame>,
+}
+
+/// A bound socket and the session behind it.
 ///
 /// The [`Listener`] is held for the daemon's whole life, which is what unlinks
 /// the socket on a clean exit; the async listener is a duplicate of the same
@@ -122,15 +140,24 @@ pub struct Daemon {
     /// Owns the socket file and its lock. Dropped last, unlinking the path.
     _listener: Listener,
     accepting: UnixListener,
-    /// The only way into the session. `None` once the daemon has released it so
+    /// The only way into the session. `None` once the daemon releases it so
     /// the session task can finish and report the child's status.
     session: Option<SessionHandle>,
     events: mpsc::Receiver<SessionEvent>,
     task: Option<JoinHandle<Result<ExitStatus, PtyError>>>,
     child_id: u32,
-    /// What the daemon last told the session the area was. A cache for the
-    /// hello, not authority: the session owns the real geometry.
+    /// What the daemon last told the session its area was. The session remains
+    /// authoritative; this is the answer to put in the next hello.
     size: Size,
+    /// Current usable geometry of every attached client.
+    client_sizes: BTreeMap<ClientId, Size>,
+    next_client: u64,
+    client_commands: mpsc::Receiver<ClientCommand>,
+    client_tx: mpsc::Sender<ClientCommand>,
+    /// Bounded frames fan out without a socket write in the coordinator.
+    updates: broadcast::Sender<DamageFrame>,
+    clients: JoinSet<()>,
+    damage: DamageTracker,
 }
 
 impl Daemon {
@@ -152,6 +179,8 @@ impl Daemon {
 
         let spawned = Session::spawn(config, THE_PANE)?;
         let size = cloo_core::grid::wire_size(config.term_size());
+        let (client_tx, client_commands) = mpsc::channel(CLIENT_COMMAND_QUEUE);
+        let (updates, _) = broadcast::channel(DAMAGE_QUEUE);
 
         Ok(Self {
             _listener: listener,
@@ -161,6 +190,13 @@ impl Daemon {
             task: Some(spawned.task),
             child_id: spawned.child_id,
             size,
+            client_sizes: BTreeMap::new(),
+            next_client: 1,
+            client_commands,
+            client_tx,
+            updates,
+            clients: JoinSet::new(),
+            damage: DamageTracker::default(),
         })
     }
 
@@ -185,20 +221,47 @@ impl Daemon {
 
     /// Serves clients until the session's child exits, then reaps it.
     ///
-    /// # Errors
-    ///
-    /// Returns [`DaemonError::Pty`] if the PTY failed, or
-    /// [`DaemonError::Accept`] if the listener did. A client that misbehaves is
-    /// never one of these: it is disconnected and the session carries on.
+    /// Each attached client owns only a socket task and a bounded broadcast
+    /// receiver. The select below is therefore the sole place that captures
+    /// session state and sends a damage frame, so a lagging socket can never
+    /// delay a PTY read or a session command.
     pub async fn run(&mut self) -> Result<ExitStatus, DaemonError> {
+        let mut frames = tokio::time::interval(FRAME_INTERVAL);
+        frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut dirty = false;
+
         loop {
-            let stream = match self.wait_for_client().await? {
-                Some(stream) => stream,
-                // The child exited with nobody watching.
-                None => break,
-            };
-            if self.serve(stream).await? == Served::ChildExited {
-                break;
+            // All receives are cancel-safe: they wait for readiness and do not
+            // mutate state before returning an item. The state changes happen
+            // below in this single coordinator after the select chooses one.
+            tokio::select! {
+                event = self.events.recv() => match event {
+                    Some(SessionEvent::Output) => dirty = true,
+                    Some(SessionEvent::Exited) | None => {
+                        self.publish_current().await?;
+                        let _ = self.updates.send(DamageFrame::exit(0));
+                        break;
+                    }
+                },
+                command = self.client_commands.recv() => {
+                    if let Some(command) = command {
+                        self.apply_client_command(command, &mut dirty).await?;
+                    }
+                }
+                accepted = self.accepting.accept() => {
+                    let (stream, _addr) = accepted.map_err(DaemonError::Accept)?;
+                    self.spawn_client(stream);
+                }
+                _ = frames.tick(), if dirty => {
+                    self.publish_current().await?;
+                    dirty = false;
+                }
+                joined = self.clients.join_next(), if !self.clients.is_empty() => {
+                    // A connection task's own final `Gone` command owns the
+                    // size bookkeeping. Reaping here only prevents completed
+                    // tasks accumulating during a long-lived daemon.
+                    let _ = joined;
+                }
             }
         }
 
@@ -208,154 +271,118 @@ impl Daemon {
         let Some(task) = self.task.take() else {
             return Err(DaemonError::Session(SessionGone));
         };
-        task.await
-            .map_err(|_| DaemonError::Session(SessionGone))?
-            .map_err(DaemonError::Pty)
-    }
-
-    /// Waits for a client, letting the session run in the meantime.
-    ///
-    /// Returns `None` if the child exited first. The PTY is pumped by the
-    /// session task throughout, attached or not — that is the half of "detach
-    /// leaves the child running" that is easy to get wrong, since a session
-    /// read only while someone is watching loses everything written in between.
-    async fn wait_for_client(&mut self) -> Result<Option<UnixStream>, DaemonError> {
-        loop {
-            tokio::select! {
-                event = self.events.recv() => {
-                    match event {
-                        // Output nobody is here to see. The grid keeps it.
-                        Some(SessionEvent::Output) => {}
-                        Some(SessionEvent::Exited) | None => return Ok(None),
-                    }
-                }
-                accepted = self.accepting.accept() => {
-                    let (stream, _addr) = accepted.map_err(DaemonError::Accept)?;
-                    return Ok(Some(stream));
-                }
-            }
-        }
-    }
-
-    /// Runs one client's connection from handshake to disconnect.
-    async fn serve(&mut self, stream: UnixStream) -> Result<Served, DaemonError> {
-        let mut conn = Connection::new(stream);
-
-        let request = match conn::accept_attach(&mut conn).await {
-            Ok(request) => request,
-            // A client that is refused, broken, or gone is not a daemon
-            // failure. It has already been told why where that was possible,
-            // and the session is untouched either way.
-            Err(_) => return Ok(Served::Gone),
-        };
-
-        // The session renders at what the attached client can draw. With one
-        // client this is simply its size; the minimum across several clients
-        // arrives with fan-out in M1-04.
-        self.resize(request.size).await?;
-
-        let hello = ServerMessage::Hello {
-            protocol_version: cloo_proto::PROTOCOL_VERSION,
-            session: THE_SESSION,
-            tabs: conn::single_tab(THE_TAB, "shell"),
-            size: self.size,
-        };
-        if conn.send(&hello).await.is_err() {
-            return Ok(Served::Gone);
-        }
-        let snapshot = self.snapshot().await?;
-        if send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+        let status = task
             .await
-            .is_err()
-        {
-            return Ok(Served::Gone);
-        }
+            .map_err(|_| DaemonError::Session(SessionGone))?
+            .map_err(DaemonError::Pty)?;
 
-        let mut frames = tokio::time::interval(FRAME_INTERVAL);
-        // Missed ticks are frames nobody saw; there is no value in catching up.
-        frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut dirty = false;
+        // Socket tasks never hold a session handle, so aborting them cannot
+        // keep the session actor alive. Waiting for the session gave queued
+        // final damage a scheduling turn; this then stops any terminal write
+        // that still cannot make progress.
+        self.clients.abort_all();
+        while self.clients.join_next().await.is_some() {}
+        Ok(status)
+    }
 
-        loop {
-            // All three are cancel-safe: each awaits readiness and buffers
-            // before it decides anything, so losing this race drops a wakeup and
-            // never a byte, a command, or an event.
-            let step = tokio::select! {
-                event = self.events.recv() => Step::Session(event),
-                received = conn.recv::<ClientMessage>() => Step::From(received),
-                _ = frames.tick() => Step::Frame,
-            };
+    /// Starts a connection task without letting an unfinished handshake stall
+    /// accepts, frame ticks, or every already-attached client.
+    fn spawn_client(&mut self, stream: UnixStream) {
+        let client = ClientId::new(self.next_client);
+        self.next_client = self.next_client.saturating_add(1);
+        let commands = self.client_tx.clone();
+        self.clients.spawn(async move {
+            serve_client(stream, client, commands).await;
+        });
+    }
 
-            match step {
-                Step::Session(Some(SessionEvent::Output)) => dirty = true,
-                Step::Session(Some(SessionEvent::Exited) | None) => {
-                    // The session task is still alive and still answering, so
-                    // the child's last words can be drawn before its death is
-                    // reported.
-                    if let Ok(snapshot) = self.snapshot().await {
-                        let _ =
-                            send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot)).await;
+    /// Applies one request sent by a socket task.
+    async fn apply_client_command(
+        &mut self,
+        command: ClientCommand,
+        dirty: &mut bool,
+    ) -> Result<(), DaemonError> {
+        match command {
+            ClientCommand::Attached {
+                client,
+                request,
+                reply,
+            } => {
+                // The capabilities were negotiated in the handshake. They do
+                // not affect server state, so dropping them here preserves the
+                // client-side policy boundary.
+                let _ = request.term_caps;
+                if usable(request.size) {
+                    self.client_sizes.insert(client, request.size);
+                    if self.resize_to_clients().await? {
+                        *dirty = true;
                     }
-                    let _ = conn.send(&ServerMessage::Exit(0)).await;
-                    let _ = conn.shutdown().await;
-                    return Ok(Served::ChildExited);
                 }
-                Step::Frame => {
-                    if dirty {
-                        let snapshot = self.snapshot().await?;
-                        if send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
-                            .await
-                            .is_err()
-                        {
-                            return Ok(Served::Gone);
-                        }
-                        dirty = false;
-                    }
-                }
-                Step::From(Ok(Some(ClientMessage::Input(bytes)))) => {
-                    self.session()?.input(bytes).await?;
-                }
-                Step::From(Ok(Some(ClientMessage::Paste(text)))) => {
-                    self.session()?.paste(text).await?;
-                }
-                Step::From(Ok(Some(ClientMessage::Focus { focused }))) => {
-                    self.session()?.focus(focused).await?;
-                }
-                // Only events the client routed to the *application* reach the
-                // wire; chrome events never leave the client.
-                Step::From(Ok(Some(ClientMessage::Mouse(event)))) => {
-                    self.session()?.mouse(event).await?;
-                }
-                Step::From(Ok(Some(ClientMessage::Resize(size)))) => {
-                    self.resize(size).await?;
-                    dirty = true;
-                }
-                Step::From(Ok(Some(
-                    ClientMessage::Detach | ClientMessage::Command(Action::DetachClient),
-                ))) => {
-                    // Acknowledge, close, and leave everything else alone. The
-                    // child never learns this happened.
-                    let _ = conn.send(&ServerMessage::Detached).await;
-                    let _ = conn.shutdown().await;
-                    return Ok(Served::Gone);
-                }
-                // The session can split and close as of M2-01, but a client
-                // cannot yet draw more than the focused pane — per-pane
-                // contents reach the wire with M2-03, and the keybindings that
-                // would ask for a split with M2-10. Serving a split before then
-                // would hand a client a pane it has nowhere to put, so these
-                // stay ignored, which also keeps an old client from taking the
-                // session down.
-                Step::From(Ok(Some(ClientMessage::Command(_)))) => {}
-                // A second attach on an attached connection is a desync.
-                Step::From(Ok(Some(ClientMessage::Attach { .. }))) => {
-                    let _ = conn::refuse(&mut conn, "this connection is already attached").await;
-                    return Ok(Served::Gone);
-                }
-                // The client closed, or its connection broke. Either way the
-                // session outlives it.
-                Step::From(Ok(None) | Err(_)) => return Ok(Served::Gone),
+
+                // The snapshot and subscription have no await between them.
+                // No damage frame can be published in that gap, so this new
+                // receiver starts strictly after its full baseline.
+                let snapshot = self.snapshot().await?;
+                self.publish_snapshot(&snapshot);
+                let updates = self.updates.subscribe();
+                let _ = reply.send(ClientStart {
+                    size: self.size,
+                    snapshot,
+                    updates,
+                });
             }
+            ClientCommand::Message { client, message } => match message {
+                ClientMessage::Input(bytes) => self.session()?.input(bytes).await?,
+                ClientMessage::Paste(text) => self.session()?.paste(text).await?,
+                ClientMessage::Focus { focused } => self.session()?.focus(focused).await?,
+                ClientMessage::Mouse(event) => self.session()?.mouse(event).await?,
+                ClientMessage::Resize(size) => {
+                    if usable(size) {
+                        self.client_sizes.insert(client, size);
+                        if self.resize_to_clients().await? {
+                            *dirty = true;
+                        }
+                    }
+                }
+                // Detach is handled by the connection task so it can send the
+                // acknowledgement before it reports `Gone`. All other actions
+                // still await their own client and layout milestones.
+                ClientMessage::Detach
+                | ClientMessage::Attach { .. }
+                | ClientMessage::Command(Action::DetachClient)
+                | ClientMessage::Command(_) => {}
+            },
+            ClientCommand::Resync { reply } => {
+                // As on attach, subscribe only after the snapshot command
+                // returned. The coordinator is the only broadcaster, so this
+                // receiver cannot miss a newer frame between the two.
+                let snapshot = self.snapshot().await?;
+                self.publish_snapshot(&snapshot);
+                let updates = self.updates.subscribe();
+                let _ = reply.send(ClientResync { snapshot, updates });
+            }
+            ClientCommand::Gone { client } => {
+                if self.client_sizes.remove(&client).is_some() && self.resize_to_clients().await? {
+                    *dirty = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Captures one authoritative snapshot and broadcasts only its delta.
+    async fn publish_current(&mut self) -> Result<(), DaemonError> {
+        let snapshot = self.snapshot().await?;
+        self.publish_snapshot(&snapshot);
+        Ok(())
+    }
+
+    /// Pushes `snapshot` through the non-blocking bounded fan-out.
+    fn publish_snapshot(&mut self, snapshot: &SessionSnapshot) {
+        if let Some(frame) = self.damage.update(THE_TAB, snapshot) {
+            // With no clients this returns an error carrying the frame. That
+            // is expected — a future attach gets a direct full snapshot.
+            let _ = self.updates.send(frame);
         }
     }
 
@@ -364,33 +391,141 @@ impl Daemon {
         Ok(self.session()?.snapshot().await?)
     }
 
-    /// Tells the session its area changed.
-    ///
-    /// The grid, the layout pass, and the child's `TIOCSWINSZ` are the session
-    /// task's business; the daemon only forwards, and caches the size for the
-    /// hello it hands the next client. A zero-sized client is ignored rather
-    /// than refused: it has no bearing on a child that is running fine.
-    async fn resize(&mut self, size: Size) -> Result<(), DaemonError> {
+    /// Returns the minimum size of all usable attached clients.
+    fn minimum_client_size(&self) -> Option<Size> {
+        self.client_sizes
+            .values()
+            .copied()
+            .reduce(|smallest, size| {
+                Size::new(smallest.cols.min(size.cols), smallest.rows.min(size.rows))
+            })
+    }
+
+    /// Applies the currently negotiated minimum size, if any.
+    async fn resize_to_clients(&mut self) -> Result<bool, DaemonError> {
+        match self.minimum_client_size() {
+            Some(size) => self.resize(size).await,
+            // No client means no outer-terminal authority. Keep the last
+            // usable geometry so a detached child does not receive a surprise
+            // resize to an arbitrary default.
+            None => Ok(false),
+        }
+    }
+
+    /// Tells the session its area changed and records the successful result.
+    async fn resize(&mut self, size: Size) -> Result<bool, DaemonError> {
         if size == self.size || !usable(size) {
-            return Ok(());
+            return Ok(false);
         }
         self.session()?.resize(size).await?;
         self.size = size;
-        Ok(())
+        Ok(true)
     }
 }
 
-/// What one turn of a served connection did.
-enum Step {
-    /// The session reported something, or its task ended.
-    Session(Option<SessionEvent>),
-    /// The client sent something, closed, or broke.
-    From(Result<Option<ClientMessage>, StreamError>),
-    /// The frame timer fired.
-    Frame,
+/// Runs one client from handshake through disconnect.
+///
+/// A socket write is intentionally confined here. A full terminal, a paused
+/// debugger, or a slow remote filesystem underneath a terminal can stall this
+/// task, but never the coordinator's damage publication or the session actor.
+async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Sender<ClientCommand>) {
+    let mut conn = Connection::new(stream);
+    let request = match conn::accept_attach(&mut conn).await {
+        Ok(request) => request,
+        Err(_) => return,
+    };
+
+    let (reply, started) = oneshot::channel();
+    if commands
+        .send(ClientCommand::Attached {
+            client,
+            request,
+            reply,
+        })
+        .await
+        .is_err()
+    {
+        return;
+    }
+    let Ok(ClientStart {
+        size,
+        snapshot,
+        mut updates,
+    }) = started.await
+    else {
+        return;
+    };
+
+    let hello = ServerMessage::Hello {
+        protocol_version: cloo_proto::PROTOCOL_VERSION,
+        session: THE_SESSION,
+        tabs: conn::single_tab(THE_TAB, "shell"),
+        size,
+    };
+    if conn.send(&hello).await.is_err()
+        || send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+            .await
+            .is_err()
+    {
+        let _ = commands.send(ClientCommand::Gone { client }).await;
+        return;
+    }
+
+    loop {
+        // `recv` on both the framed socket and a broadcast receiver is
+        // cancel-safe: a losing select branch has not consumed a frame. The
+        // subsequent socket writes are deliberately outside the select, where
+        // they can delay only this one client task.
+        tokio::select! {
+            update = updates.recv() => match update {
+                Ok(frame) => {
+                    let ends_session = frame.ends_session();
+                    if send_all(&mut conn, frame.messages()).await.is_err() || ends_session {
+                        break;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    let (reply, resynced) = oneshot::channel();
+                    if commands.send(ClientCommand::Resync { reply }).await.is_err() {
+                        break;
+                    }
+                    let Ok(ClientResync { snapshot, updates: replacement }) = resynced.await else {
+                        break;
+                    };
+                    if send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    updates = replacement;
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            },
+            received = conn.recv::<ClientMessage>() => match received {
+                Ok(Some(ClientMessage::Detach | ClientMessage::Command(Action::DetachClient))) => {
+                    let _ = conn.send(&ServerMessage::Detached).await;
+                    let _ = conn.shutdown().await;
+                    break;
+                }
+                Ok(Some(ClientMessage::Attach { .. })) => {
+                    let _ = conn::refuse(&mut conn, "this connection is already attached").await;
+                    break;
+                }
+                Ok(Some(message)) => {
+                    if commands.send(ClientCommand::Message { client, message }).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(None) | Err(_) => break,
+            },
+        }
+    }
+
+    let _ = commands.send(ClientCommand::Gone { client }).await;
 }
 
-/// Sends a batch of messages, stopping at the first failure.
+/// Sends a batch of messages, stopping at the first socket failure.
 async fn send_all<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     conn: &mut Connection<T>,
     messages: &[ServerMessage],
@@ -405,9 +540,6 @@ async fn send_all<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
 mod tests {
     use super::*;
 
-    // Anything that needs a real PTY and a real socket lives in
-    // `tests/attach.rs` — see docs/TESTING.md.
-
     #[test]
     fn the_frame_interval_is_about_sixty_per_second() {
         let per_second = 1000 / FRAME_INTERVAL.as_millis();
@@ -419,5 +551,40 @@ mod tests {
         assert_eq!(THE_SESSION.get(), 1);
         assert_eq!(THE_TAB.get(), 1);
         assert_eq!(THE_PANE.get(), 1);
+    }
+
+    #[test]
+    fn the_smallest_attached_client_sets_both_dimensions() {
+        let mut clients = BTreeMap::new();
+        clients.insert(ClientId::new(1), Size::new(100, 30));
+        clients.insert(ClientId::new(2), Size::new(80, 40));
+        let smallest = clients.values().copied().reduce(|current, size| {
+            Size::new(current.cols.min(size.cols), current.rows.min(size.rows))
+        });
+        assert_eq!(smallest, Some(Size::new(80, 30)));
+    }
+
+    #[tokio::test]
+    async fn a_lagged_receiver_can_be_replaced_without_waiting_for_it() {
+        let (updates, mut lagging) = broadcast::channel(1);
+        let sent = updates.send(DamageFrame::exit(0));
+        assert!(matches!(sent, Ok(1)));
+        let sent = updates.send(DamageFrame::exit(0));
+        assert!(matches!(sent, Ok(1)));
+        assert!(matches!(
+            lagging.recv().await,
+            Err(broadcast::error::RecvError::Lagged(1))
+        ));
+
+        let mut replacement = updates.subscribe();
+        let sent = updates.send(DamageFrame::exit(0));
+        assert!(matches!(sent, Ok(2)));
+        assert!(
+            replacement
+                .recv()
+                .await
+                .expect("replacement receives")
+                .ends_session()
+        );
     }
 }

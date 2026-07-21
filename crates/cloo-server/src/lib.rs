@@ -25,12 +25,14 @@
 
 pub mod conn;
 pub mod daemon;
+pub mod damage;
 pub mod pty;
 pub mod session;
 pub mod socket;
 
 pub use conn::{AttachRejection, AttachRequest, Connection, accept_attach};
 pub use daemon::{Daemon, DaemonError};
+pub use damage::{DamageFrame, DamageTracker};
 pub use pty::{PaneSnapshot, Pty, PtyConfig, PtyError, PtyReactor, Pump};
 pub use session::{
     Command, Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, SpawnedSession,

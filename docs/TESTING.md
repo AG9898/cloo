@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 191 unit tests
-across six crates, 48 integration tests, and eight doctests. This section grows as M1 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 200 unit tests
+across six crates, 56 integration tests, and eight doctests. This section grows as M1 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -182,6 +182,10 @@ bounded by a timeout — never by sleeping:
   session still attachable afterwards.
 - Attaching where nothing is listening, and where a `SIGKILL`ed daemon left a socket file behind,
   both reporting "no cloo daemon is listening".
+- Two clients attached at once both receiving a shared update, proving neither handshake waits for
+  the other client to disconnect.
+- A large `yes | head` burst reaching an active client in a bounded number of `Damage` frames
+  while an unread client falls behind and later converges on the final grid from a fresh snapshot.
 
 Resize is covered there too, as of M1-03, and it is the one case where a single assertion would
 be worthless. A resize is two things — the grid reflows and the child is told through
@@ -239,6 +243,7 @@ frame is asserted against an exact expected string rather than eyeballed — all
   cube entries rather than the greyscale ramp.
 - The cursor hidden for the whole paint and placed, shaped, and shown only after the reset; and
   no cursor message leaving it hidden.
+- Incremental row damage repainting only its named row and never emitting a full-screen clear.
 - Row updates rejected out of range and at the wrong width, each compared against a clone taken
   before the call to prove the grid is unchanged.
 - Resize keeping the overlapping cells and blanking the rest, a zero-sized grid rendering without
@@ -309,8 +314,8 @@ The intended shape for the rest, in the order it becomes testable:
 - **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06, and the
   signal restore path joined them from the binary's own tests once M0-07 gave it a child process
   to signal. `SIGWINCH` went the same way at M1-03, for the same reason: a library test that
-  signals itself signals the test runner. Incremental diffing against previous frames arrives
-  with damage coalescing at M1-04.
+  signals itself signals the test runner. Incremental row diffing and its byte-exact renderer
+  coverage landed with damage coalescing at M1-04.
 
 ### Agent-harness compatibility
 
@@ -350,8 +355,9 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |
 | `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
-| `crates/cloo-server/src/daemon.rs` | Daemon | Pure only: the frame-rate cap and the session's fixed IDs |
-| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
+| `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, and exit-frame detection |
+| `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
+| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
 | `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
@@ -361,7 +367,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |
 | `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, and a `SIGWINCH` resizing the pane all the way down to the child's own pty |
-| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and a real client over a real socket: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, and input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not |
+| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and clients over real sockets: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, bounded burst damage with lagged-client recovery, concurrent-client fan-out, and input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not |
 
 ---
 

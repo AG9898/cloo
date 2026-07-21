@@ -186,6 +186,10 @@ async fn session(
     let mut grid = Grid::new(size);
     let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
+    // The first picture and every geometry change must clear stale outer
+    // terminal cells. Ordinary snapshots below then repaint only rows whose
+    // server contents actually changed.
+    let mut needs_full_render = true;
 
     // What the child has negotiated, as of the last frame drawn. At most one
     // frame stale, which is what routing a mouse event costs instead of a
@@ -236,7 +240,13 @@ async fn session(
                 if dirty {
                     let snapshot = handle(&session)?.snapshot().await?;
                     pane_modes = snapshot.modes;
-                    draw(&mut out, &mut renderer, &mut grid, &snapshot)?;
+                    draw(
+                        &mut out,
+                        &mut renderer,
+                        &mut grid,
+                        &snapshot,
+                        &mut needs_full_render,
+                    )?;
                     dirty = false;
                 }
             }
@@ -247,7 +257,13 @@ async fn session(
     // and the session task is still answering until its handle is dropped.
     if dirty {
         let snapshot = handle(&session)?.snapshot().await?;
-        draw(&mut out, &mut renderer, &mut grid, &snapshot)?;
+        draw(
+            &mut out,
+            &mut renderer,
+            &mut grid,
+            &snapshot,
+            &mut needs_full_render,
+        )?;
     }
 
     drop(session);
@@ -335,18 +351,30 @@ fn draw(
     renderer: &mut Renderer,
     grid: &mut Grid,
     snapshot: &SessionSnapshot,
+    needs_full_render: &mut bool,
 ) -> Result<(), LocalError> {
     let pane = &snapshot.pane;
     if grid.size() != pane.size {
         grid.resize(pane.size);
+        *needs_full_render = true;
     }
+    let mut changed = Vec::new();
     for row in &pane.rows {
-        grid.apply(row)?;
+        if grid.row(row.row) != Some(row.cells.as_slice()) {
+            grid.apply(row)?;
+            changed.push(row.row);
+        }
     }
     let cursor = pane.cursor.map(|(pos, shape)| Cursor::new(pos, shape));
-    out.write_all(renderer.render_full(grid, cursor))
-        .map_err(LocalError::Output)?;
-    out.flush().map_err(LocalError::Output)
+    let frame = if *needs_full_render {
+        renderer.render_full(grid, cursor)
+    } else {
+        renderer.render_rows(grid, &changed, cursor)
+    };
+    out.write_all(frame).map_err(LocalError::Output)?;
+    out.flush().map_err(LocalError::Output)?;
+    *needs_full_render = false;
+    Ok(())
 }
 
 /// Reads stdin on a dedicated thread and forwards bytes to the loop.
