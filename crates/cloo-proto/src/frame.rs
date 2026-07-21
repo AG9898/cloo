@@ -20,7 +20,7 @@ use crate::error::ProtoError;
 /// **Bump this on every change to a type in [`crate::message`].** A stale client
 /// attached to a rebuilt server is a routine occurrence, and a clean "version
 /// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 3;
+pub const PROTOCOL_VERSION: u16 = 4;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -127,8 +127,8 @@ mod tests {
     use crate::message::{
         Action, Cell, CellAttrs, ClientMessage, ClipboardTarget, Color, CursorShape,
         GraphicsEffect, LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods,
-        MouseTracking, OuterTerminalEffect, PaneModes, PaneRect, Point, ProgressState, RowUpdate,
-        ServerMessage, Size, TabSummary, TermCaps,
+        MouseTracking, OuterTerminalEffect, PaneInfo, PaneModes, PaneRect, Point, ProgressState,
+        RowUpdate, ServerMessage, Size, TabSummary, TermCaps,
     };
 
     /// Encodes, decodes, and asserts the value survives unchanged.
@@ -328,6 +328,23 @@ mod tests {
                 focused: None,
                 zoomed: Some(PaneId::new(4)),
             }),
+            ServerMessage::Panes(vec![
+                PaneInfo {
+                    pane: PaneId::new(4),
+                    profile: "claude".into(),
+                    name: "api".into(),
+                    task: Some("fix the flaky test".into()),
+                    cwd: "/home/dev/api".into(),
+                },
+                PaneInfo {
+                    pane: PaneId::new(5),
+                    profile: "generic".into(),
+                    name: "shell".into(),
+                    task: None,
+                    cwd: "/home/dev".into(),
+                },
+            ]),
+            ServerMessage::Panes(Vec::new()),
             ServerMessage::Bell(PaneId::new(4)),
             ServerMessage::Tabs(Vec::new()),
             ServerMessage::Detached,

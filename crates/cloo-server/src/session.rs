@@ -48,14 +48,16 @@ use std::task::Poll;
 
 use cloo_core::error::LayoutError;
 use cloo_core::layout::{Layout, Side};
+use cloo_core::pane::PaneMeta;
 use cloo_proto::{
     ClipboardTarget, Direction, GraphicsEffect, MouseButton, MouseEvent, MouseKind, MouseTracking,
-    OuterTerminalEffect, PaneId, PaneModes, PaneRect, ProgressState, Size,
+    OuterTerminalEffect, PaneId, PaneInfo, PaneModes, PaneRect, ProgressState, Size,
 };
 use cloo_term::TermSize;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::launch::Launch;
 use crate::pty::{PaneSnapshot, PtyConfig, PtyError, PtyReactor, Pump};
 
 /// How many commands may be in flight before a sender waits.
@@ -96,6 +98,12 @@ pub enum Command {
         dir: Direction,
         /// The share of it kept by the pane being split.
         ratio: f32,
+        /// What to launch in the new pane. `None` repeats the launch the
+        /// session was created with, which is what an unqualified "split" means.
+        ///
+        /// Boxed because it is much larger than the other variants and this
+        /// enum rides an `mpsc` on every keystroke.
+        launch: Option<Box<Launch>>,
         /// The new pane's id, or why no pane was created.
         reply: oneshot::Sender<Result<PaneId, PaneError>>,
     },
@@ -217,6 +225,12 @@ pub struct SessionSnapshot {
     /// The pane shown alone at the full area, if any. Always the focused pane
     /// while it is set: zoom follows focus rather than pinning it.
     pub zoomed: Option<PaneId>,
+    /// Who every pane is: profile, name, task label, and working directory.
+    ///
+    /// In the same order as [`panes`](Self::panes), and always describing the
+    /// same set. Explicit metadata every time — nothing in this vector is
+    /// derived from what a child printed.
+    pub metas: Vec<PaneInfo>,
     /// The focused pane's contents.
     pub pane: PaneSnapshot,
     /// The input modes the focused pane's application has negotiated. A client
@@ -293,7 +307,42 @@ impl SessionHandle {
     /// session is unchanged in every one of those cases.
     pub async fn split(&self, dir: Direction, ratio: f32) -> Result<PaneId, PaneError> {
         let (reply, answer) = oneshot::channel();
-        self.send(Command::Split { dir, ratio, reply }).await?;
+        self.send(Command::Split {
+            dir,
+            ratio,
+            launch: None,
+            reply,
+        })
+        .await?;
+        answer.await.map_err(|_| PaneError::Gone)?
+    }
+
+    /// Splits the focused pane and launches `launch` in the new one.
+    ///
+    /// The explicit form of [`split`](Self::split): the new pane runs the named
+    /// profile, under the name, task label, and working directory the user gave,
+    /// and carries all of that as metadata from the moment it exists. A plain
+    /// split repeats the session's own launch instead.
+    ///
+    /// # Errors
+    ///
+    /// As [`split`](Self::split). A program that is not on `PATH` is a
+    /// [`PaneError::Spawn`] whose message names it, and the layout has already
+    /// been rolled back when it arrives.
+    pub async fn launch(
+        &self,
+        dir: Direction,
+        ratio: f32,
+        launch: Launch,
+    ) -> Result<PaneId, PaneError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::Split {
+            dir,
+            ratio,
+            launch: Some(Box::new(launch)),
+            reply,
+        })
+        .await?;
         answer.await.map_err(|_| PaneError::Gone)?
     }
 
@@ -382,6 +431,10 @@ pub struct SpawnedSession {
 struct Pane {
     id: PaneId,
     reactor: PtyReactor,
+    /// Who this pane is: the profile it was launched from and what the user
+    /// called it. Explicit from the moment the pane exists, and never revised by
+    /// anything the child prints.
+    meta: PaneMeta,
     /// Set once this pane's PTY reached end of file. Its grid is still drawn —
     /// a child's last words outlive it — but it is never pumped again.
     ended: bool,
@@ -401,9 +454,13 @@ pub struct Session {
     layout: Layout,
     focused: PaneId,
     area: Size,
-    /// The template a split's child is started from. Working directory and
-    /// profile environment replace it in M2-06.
+    /// What belongs to the *session* rather than to a profile: the environment
+    /// every pane inherits and a fallback geometry. A [`Launch`] is applied over
+    /// it to produce one pane's configuration.
     config: PtyConfig,
+    /// What a plain [`Command::Split`] launches — the launch this session was
+    /// created with, which is what "split this again" means.
+    default_launch: Launch,
     ids: cloo_core::PaneIdAllocator,
     /// Where the next pump starts looking, so a loud pane cannot starve a quiet
     /// one of its turn.
@@ -413,15 +470,27 @@ pub struct Session {
 }
 
 impl Session {
-    /// Spawns a child on a fresh PTY and puts a session task in front of it.
+    /// Launches a session's first pane on a fresh PTY and puts a session task
+    /// in front of it.
+    ///
+    /// `base` carries the session's environment and its fallback geometry;
+    /// `launch` decides what actually runs and what the pane is called. The
+    /// launch was validated before it got here, so the only thing left to fail
+    /// is the spawn itself.
     ///
     /// Must be called from inside a Tokio runtime context.
     ///
     /// # Errors
     ///
-    /// Propagates any [`PtyReactor::spawn`] failure.
-    pub fn spawn(config: &PtyConfig, pane: PaneId) -> Result<SpawnedSession, PtyError> {
-        let reactor = PtyReactor::spawn(config)?;
+    /// Propagates any [`PtyReactor::spawn`] failure — including a program that
+    /// is not on `PATH`, whose message names it.
+    pub fn spawn(
+        base: &PtyConfig,
+        pane: PaneId,
+        launch: Launch,
+    ) -> Result<SpawnedSession, PtyError> {
+        let config = launch.configure(base);
+        let reactor = PtyReactor::spawn(&config)?;
         let child_id = reactor.child_id();
         let area = cloo_core::grid::wire_size(config.term_size());
 
@@ -434,12 +503,14 @@ impl Session {
             panes: vec![Pane {
                 id: pane,
                 reactor,
+                meta: launch.meta().clone(),
                 ended: false,
             }],
             layout: Layout::new(pane),
             focused: pane,
             area,
-            config: config.clone(),
+            config: base.clone(),
+            default_launch: launch,
             ids: cloo_core::PaneIdAllocator::resuming_after(pane),
             cursor: 0,
             commands: command_rx,
@@ -546,8 +617,13 @@ impl Session {
                 }
             }
             Command::Resize(area) => self.resize(area),
-            Command::Split { dir, ratio, reply } => {
-                let outcome = self.split(dir, ratio);
+            Command::Split {
+                dir,
+                ratio,
+                launch,
+                reply,
+            } => {
+                let outcome = self.split(dir, ratio, launch.map(|launch| *launch));
                 let changed = outcome.is_ok();
                 // A caller that gave up before the answer arrived is ordinary.
                 let _ = reply.send(outcome);
@@ -583,7 +659,13 @@ impl Session {
     /// layout pass produced, and a spawn that fails collapses the split back
     /// out. There is no await in between, so no other command can observe a
     /// pane that exists in one half and not the other.
-    fn split(&mut self, dir: Direction, ratio: f32) -> Result<PaneId, PaneError> {
+    fn split(
+        &mut self,
+        dir: Direction,
+        ratio: f32,
+        launch: Option<Launch>,
+    ) -> Result<PaneId, PaneError> {
+        let launch = launch.unwrap_or_else(|| self.default_launch.clone());
         let target = self.focused;
         let new_pane = self.ids.peek();
         // A successful split unzooms — the new pane is what the user is about
@@ -594,7 +676,7 @@ impl Session {
             .split(target, dir, ratio, new_pane, self.area)
             .map_err(PaneError::Layout)?;
 
-        match self.spawn_pane(new_pane) {
+        match self.spawn_pane(new_pane, &launch) {
             Ok(pane) => {
                 self.panes.push(pane);
                 let _ = self.ids.allocate();
@@ -621,15 +703,17 @@ impl Session {
     /// moment later, but a child reads its `winsize` at startup: handing it the
     /// session's whole area and then shrinking it is a spurious `SIGWINCH` and,
     /// for a program that only looks once, a lasting wrong answer.
-    fn spawn_pane(&self, pane: PaneId) -> Result<Pane, PtyError> {
+    fn spawn_pane(&self, pane: PaneId, launch: &Launch) -> Result<Pane, PtyError> {
         let size = match self.layout.rect_of(pane, self.area) {
             Some(rect) => TermSize::new(rect.size.cols, rect.size.rows)?,
             // Unreachable: the pane was resolved a moment ago.
             None => self.config.term_size(),
         };
+        let config = launch.configure(&self.config.clone().size(size));
         Ok(Pane {
             id: pane,
-            reactor: PtyReactor::spawn(&self.config.clone().size(size))?,
+            reactor: PtyReactor::spawn(&config)?,
+            meta: launch.meta().clone(),
             ended: false,
         })
     }
@@ -747,10 +831,25 @@ impl Session {
     }
 
     /// The current picture.
+    ///
+    /// Metadata is projected from the same pass that resolves geometry, so a
+    /// client can never be told about a pane it has no identity for, or given an
+    /// identity for a pane that is not on screen.
     fn snapshot(&self) -> SessionSnapshot {
+        let panes = self.layout.resolve(self.area);
+        let metas = panes
+            .iter()
+            .filter_map(|rect| {
+                self.panes
+                    .iter()
+                    .find(|pane| pane.id == rect.pane)
+                    .map(|pane| pane.meta.to_wire(pane.id))
+            })
+            .collect();
         SessionSnapshot {
             area: self.area,
-            panes: self.layout.resolve(self.area),
+            panes,
+            metas,
             focused: self.focused,
             zoomed: self.layout.zoomed(),
             pane: self

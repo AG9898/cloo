@@ -18,11 +18,13 @@
 
 use std::time::Duration;
 
+use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
+use cloo_core::profile::{Profile, ProfileCommand, ProfileId};
 use cloo_core::{LayoutError, Side};
 use cloo_proto::{Direction, PaneId, Size};
+use cloo_server::launch::Launch;
 use cloo_server::pty::PtyConfig;
 use cloo_server::session::{PaneError, Session, SessionHandle, SessionSnapshot};
-use cloo_term::TermSize;
 
 /// How long a child gets to answer before a test gives up.
 ///
@@ -43,14 +45,35 @@ const REPORT_ON_DEMAND: &str = "while read _; do stty size; done";
 /// a freshly cleared grid.
 const PID_THEN_REPORT: &str = "echo pid=$$; while read _; do stty size; done";
 
-/// A config running `script` under `sh`, at `cols` x `rows`.
-fn scripted(script: &str, cols: u16, rows: u16) -> PtyConfig {
-    let size = TermSize::new(cols, rows).expect("test sizes are non-zero");
-    PtyConfig::new("sh")
-        .arg("-c")
-        .arg(script)
+/// The session's half of a config at `cols` x `rows`: geometry and `TERM`.
+fn base(cols: u16, rows: u16) -> PtyConfig {
+    PtyConfig::session(Size::new(cols, rows))
+        .expect("test sizes are non-zero")
         .env("TERM", "xterm-256color")
-        .size(size)
+}
+
+/// A launch running `script` under `sh`, as the `generic` profile.
+///
+/// Built the same way the CLI builds one for an explicitly named program: a
+/// profile value with its command replaced, never a special case.
+fn scripted(script: &str) -> Launch {
+    launch_named(script, None, None)
+}
+
+/// The same launch under a user-supplied name and task label.
+fn launch_named(script: &str, name: Option<&str>, task: Option<&str>) -> Launch {
+    let mut profile = Profile::generic();
+    profile.command = ProfileCommand::Program {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), script.to_owned()],
+    };
+    Launch::new(
+        profile,
+        name.map(|name| PaneName::new(name).expect("a valid test name")),
+        task.map(|task| TaskLabel::new(task).expect("a valid test label")),
+        WorkingDir::new("/").expect("absolute"),
+    )
+    .expect("the generic profile validates")
 }
 
 /// The focused pane's grid as lines, trailing blanks trimmed.
@@ -115,7 +138,7 @@ fn session_running(
     rows: u16,
 ) -> (PaneId, cloo_server::session::SpawnedSession) {
     let root = PaneId::new(0);
-    let spawned = Session::spawn(&scripted(script, cols, rows), root)
+    let spawned = Session::spawn(&base(cols, rows), root, scripted(script))
         .expect("a pty and an sh child must be available");
     (root, spawned)
 }
@@ -467,4 +490,184 @@ async fn a_resize_is_divided_between_every_pane() {
     // reach the wire with M2-03 — but the rects above and this report come from
     // the same layout pass that drove both children's `TIOCSWINSZ`.
     ask_size(&session.handle, "30 160").await;
+}
+
+// --- Launching from an explicit profile (M2-06) -----------------------------
+
+/// The metadata a snapshot carries for one pane.
+fn info_of(snapshot: &SessionSnapshot, pane: PaneId) -> cloo_proto::PaneInfo {
+    snapshot
+        .metas
+        .iter()
+        .find(|info| info.pane == pane)
+        .unwrap_or_else(|| {
+            panic!(
+                "no metadata for {pane:?}; snapshot has {:?}",
+                snapshot.metas
+            )
+        })
+        .clone()
+}
+
+#[tokio::test]
+async fn a_launch_carries_its_metadata_into_every_snapshot() {
+    let (root, session) = session(120, 40);
+
+    let new_pane = session
+        .handle
+        .launch(
+            Direction::Horizontal,
+            0.5,
+            launch_named(REPORT_ON_DEMAND, Some("api"), Some("fix the flaky test")),
+        )
+        .await
+        .expect("a 120x40 session has room for two panes");
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(
+        snapshot.metas.len(),
+        2,
+        "every laid-out pane must have an identity"
+    );
+
+    let launched = info_of(&snapshot, new_pane);
+    assert_eq!(launched.name, "api");
+    assert_eq!(launched.task.as_deref(), Some("fix the flaky test"));
+    assert_eq!(launched.profile, "generic");
+    assert_eq!(launched.cwd, "/");
+
+    // The pane that was split is untouched by what was launched beside it, and
+    // it kept the session's own launch rather than inheriting a name.
+    let original = info_of(&snapshot, root);
+    assert_eq!(original.name, "shell");
+    assert_eq!(
+        original.task, None,
+        "a task is only ever what the user said, so a pane nobody labelled has none"
+    );
+}
+
+#[tokio::test]
+async fn a_launched_pane_starts_in_the_directory_it_was_given() {
+    // The half a metadata assertion cannot reach: the child's own `pwd`. A
+    // `cwd` that only reached the snapshot would look right and run in the
+    // wrong place.
+    let mut profile = Profile::generic();
+    profile.command = ProfileCommand::Program {
+        program: "sh".to_owned(),
+        args: vec![
+            "-c".to_owned(),
+            "pwd; while read _; do pwd; done".to_owned(),
+        ],
+    };
+    let launch = Launch::new(
+        profile,
+        None,
+        None,
+        WorkingDir::new("/usr").expect("absolute"),
+    )
+    .expect("valid");
+
+    let (_, session) = session(120, 40);
+    let _ = session
+        .handle
+        .launch(Direction::Horizontal, 0.5, launch)
+        .await
+        .expect("the split must fit");
+
+    assert_eq!(wait_for_line(&session.handle, "/usr").await, "/usr");
+}
+
+#[tokio::test]
+async fn a_profile_naming_a_missing_program_fails_clearly_and_changes_nothing() {
+    let (root, session) = session(120, 40);
+
+    let mut profile = Profile::generic();
+    profile.command = ProfileCommand::program("cloo-no-such-program-exists");
+    let launch = Launch::new(profile, None, None, WorkingDir::new("/").expect("absolute"))
+        .expect("the profile itself is well-formed; only the program is missing");
+
+    let err = session
+        .handle
+        .launch(Direction::Horizontal, 0.5, launch)
+        .await
+        .expect_err("a program that is not on PATH cannot be launched");
+
+    assert!(matches!(err, PaneError::Spawn(_)), "got {err}");
+    let message = err.to_string();
+    assert!(
+        message.contains("cloo-no-such-program-exists"),
+        "the error must name the program, got: {message}"
+    );
+    assert!(
+        message.contains("PATH"),
+        "the error must say where it was looked for, got: {message}"
+    );
+
+    // The layout was rolled back: the session is exactly what it was.
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.panes.len(), 1);
+    assert_eq!(snapshot.metas.len(), 1);
+    assert_eq!(snapshot.focused, root);
+    ask_size(&session.handle, "40 120").await;
+}
+
+#[tokio::test]
+async fn a_plain_split_repeats_the_sessions_own_launch() {
+    // The default a keybinding means by "split": the same thing again, with the
+    // same identity, rather than a nameless pane.
+    let root = PaneId::new(0);
+    let spawned = Session::spawn(
+        &base(120, 40),
+        root,
+        launch_named(REPORT_ON_DEMAND, Some("build"), Some("watch the tests")),
+    )
+    .expect("a pty and an sh child must be available");
+
+    let new_pane = spawned
+        .handle
+        .split_even(Direction::Horizontal)
+        .await
+        .expect("the split must fit");
+
+    let snapshot = spawned.handle.snapshot().await.expect("session is alive");
+    let repeated = info_of(&snapshot, new_pane);
+    let original = info_of(&snapshot, root);
+    assert_eq!(repeated.profile, original.profile);
+    assert_eq!(repeated.name, original.name);
+    assert_eq!(repeated.task, original.task);
+    assert_eq!(repeated.cwd, original.cwd);
+    assert_ne!(repeated.pane, original.pane, "two panes, one launch");
+}
+
+#[tokio::test]
+async fn a_named_profile_reaches_the_pane_it_launched() {
+    // A profile with a real ID, so the snapshot proves the *profile* travelled
+    // and not just the command. `sh` stands in for a harness cloo does not
+    // require to be installed.
+    let mut profile = Profile::new(
+        ProfileId::new("harness").expect("valid id"),
+        ProfileCommand::Program {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), REPORT_ON_DEMAND.to_owned()],
+        },
+        "harness",
+    );
+    profile.min_size = cloo_core::MIN_PANE_SIZE;
+    let launch =
+        Launch::new(profile, None, None, WorkingDir::new("/").expect("absolute")).expect("valid");
+
+    let (_, session) = session(120, 40);
+    let new_pane = session
+        .handle
+        .launch(Direction::Horizontal, 0.5, launch)
+        .await
+        .expect("the split must fit");
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let info = info_of(&snapshot, new_pane);
+    assert_eq!(info.profile, "harness");
+    assert_eq!(
+        info.name, "harness",
+        "an unnamed pane takes the profile's default name"
+    );
 }

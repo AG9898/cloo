@@ -22,6 +22,19 @@ not require a vendor account, call a cloud API, or make cloo depend on a vendor 
 The user controls the pane name, task label, and working directory at launch. cloo does not guess
 a task from process names or transcript text.
 
+As of M2-06 a pane is launched from an explicit profile through
+`cloo-server::launch::Launch` — a validated profile plus the name, task label, and directory the
+user gave. On the command line that is `cloo --profile <id> [--name ...] [--task ...] [--cwd ...]`;
+a bare program (`cloo htop`) is the `generic` profile with its command replaced, named for the
+program, and a bare `cloo` is `generic` on the login shell. The three built-ins and any configured
+profile reach the same launch path, so a local profile works with no extra code. The launch is
+validated before any process exists, so a bad name, an unexpanded `~`, or an unknown profile is a
+usage error that spawns nothing; a program that is not on `PATH` is a launch-time failure whose
+message names it. Nothing is inferred: `Launch` has no constructor that reads a grid or a process
+name, and a task nobody supplied stays absent rather than becoming an invented one. The pane's
+identity travels to clients in `ServerMessage::Panes`, projected from the same layout pass that
+resolves geometry.
+
 As of M2-04 the model is `cloo-core::profile::Profile` — `id`, `command`, `default_name`,
 `min_size`, and an optional `adapter`. The three built-ins are values of that struct rather than
 code paths, so adding a harness is configuration and never a patch; the test that would fail if a

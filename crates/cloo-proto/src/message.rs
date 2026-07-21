@@ -306,6 +306,31 @@ pub struct LayoutSnapshot {
     pub zoomed: Option<PaneId>,
 }
 
+/// What a pane *is*, as opposed to where it sits.
+///
+/// Every field is explicit: it came from the profile the pane was launched from
+/// or from what the user typed at launch. Nothing here is ever derived by
+/// reading the pane's grid — a task inferred from transcript text would make the
+/// rendered output a second source of truth, and it would be wrong the moment a
+/// harness changed its wording.
+///
+/// The client renders this and never computes it. Strings rather than the
+/// `cloo-core` newtypes, because the wire is the boundary those types validate
+/// *at*: everything here was checked before the pane existed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneInfo {
+    /// Which pane this describes.
+    pub pane: PaneId,
+    /// The ID of the profile the pane was launched from.
+    pub profile: String,
+    /// The pane's user-visible name — the user's, or the profile's default.
+    pub name: String,
+    /// What the user said the pane is for, if they said.
+    pub task: Option<String>,
+    /// The absolute directory the pane's child was launched in.
+    pub cwd: String,
+}
+
 /// Enough about a tab to draw the tab bar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabSummary {
@@ -565,6 +590,14 @@ pub enum ServerMessage {
     },
     /// New resolved geometry for a tab.
     Layout(LayoutSnapshot),
+    /// Who every pane is: profile, name, task label, and working directory.
+    ///
+    /// Separate from [`Layout`](Self::Layout) because the two change on
+    /// completely different clocks — geometry moves on every resize, while a
+    /// pane's identity changes only when one is launched, closed, or renamed.
+    /// Sent whole rather than per pane, so a client can replace its map
+    /// wholesale and never hold an entry for a pane that no longer exists.
+    Panes(Vec<PaneInfo>),
     /// A pane's application changed which input modes it has negotiated.
     ///
     /// The client cannot observe this for itself — the modes were set by

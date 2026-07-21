@@ -31,6 +31,7 @@ use std::fmt;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 
 use cloo_core::grid::{wire_cursor, wire_row, wire_size};
@@ -80,6 +81,16 @@ impl fmt::Display for PtyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Open(e) => write!(f, "could not allocate a pseudoterminal: {e}"),
+            // A missing executable is the ordinary way a profile fails, and
+            // "No such file or directory" on its own reads as a missing
+            // *working directory* just as easily. Say which, and say where it
+            // was looked for, so the user knows whether to fix `PATH` or the
+            // profile.
+            Self::Spawn { program, source } if source.kind() == io::ErrorKind::NotFound => write!(
+                f,
+                "could not spawn {}: no such program on PATH",
+                program.to_string_lossy()
+            ),
             Self::Spawn { program, source } => {
                 write!(f, "could not spawn {}: {source}", program.to_string_lossy())
             }
@@ -118,13 +129,15 @@ impl From<TermError> for PtyError {
 
 /// How to start a pane's child process.
 ///
-/// Deliberately small: this is the M0 surface. Working directory and profile
-/// environment arrive with pane metadata in M2.
+/// Built from a [`Launch`](crate::launch::Launch) for any pane a profile
+/// created, which is every pane as of M2-06; the fields are still settable one
+/// at a time so the PTY layer stays testable without a profile.
 #[derive(Debug, Clone)]
 pub struct PtyConfig {
     program: OsString,
     args: Vec<OsString>,
     env: Vec<(OsString, OsString)>,
+    cwd: Option<PathBuf>,
     size: TermSize,
 }
 
@@ -149,8 +162,42 @@ impl PtyConfig {
             program: program.as_ref().to_os_string(),
             args: Vec::new(),
             env: Vec::new(),
+            cwd: None,
             size,
         }
+    }
+
+    /// A session's half of a configuration: a geometry, an empty environment,
+    /// and no program.
+    ///
+    /// The program is a [`Launch`](crate::launch::Launch)'s to supply, because
+    /// it comes from a profile rather than from the session. Spawning one of
+    /// these without applying a launch first fails at `execvp` with an empty
+    /// program name, which is why nothing does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtyError::Size`] if either dimension is zero.
+    pub fn session(size: Size) -> Result<Self, PtyError> {
+        Ok(Self {
+            program: OsString::new(),
+            args: Vec::new(),
+            env: Vec::new(),
+            cwd: None,
+            size: TermSize::new(size.cols, size.rows)?,
+        })
+    }
+
+    /// Replaces the program and its arguments.
+    ///
+    /// What a [`Launch`](crate::launch::Launch) applies to a session's base
+    /// config: the environment and the geometry are the session's, the argv is
+    /// the profile's.
+    #[must_use]
+    pub fn command(mut self, program: impl AsRef<OsStr>, args: &[String]) -> Self {
+        self.program = program.as_ref().to_os_string();
+        self.args = args.iter().map(OsString::from).collect();
+        self
     }
 
     /// Appends one argument.
@@ -165,6 +212,17 @@ impl PtyConfig {
     pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
         self.env
             .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self
+    }
+
+    /// Sets the directory the child is started in.
+    ///
+    /// Absent means "wherever the daemon is", which is only ever right for a
+    /// test: a pane's directory is part of what the user launched it with, and
+    /// a daemon's own cwd is not stable across restarts.
+    #[must_use]
+    pub fn cwd(mut self, cwd: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(cwd.into());
         self
     }
 
@@ -189,6 +247,30 @@ impl PtyConfig {
     #[must_use]
     pub fn term_size(&self) -> TermSize {
         self.size
+    }
+
+    /// The program that will be executed.
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    /// The arguments it will be given.
+    #[must_use]
+    pub fn args(&self) -> &[OsString] {
+        &self.args
+    }
+
+    /// The environment overrides applied on top of the daemon's own.
+    #[must_use]
+    pub fn env_overrides(&self) -> &[(OsString, OsString)] {
+        &self.env
+    }
+
+    /// The directory the child will be started in, if one was set.
+    #[must_use]
+    pub fn working_dir(&self) -> Option<&Path> {
+        self.cwd.as_deref()
     }
 }
 
@@ -230,6 +312,9 @@ impl Pty {
             .stderr(Stdio::from(dup(slave.as_fd())?));
         for (key, value) in &config.env {
             command.env(key, value);
+        }
+        if let Some(cwd) = &config.cwd {
+            command.current_dir(cwd);
         }
 
         // SAFETY: `pre_exec` runs in the forked child between `fork` and

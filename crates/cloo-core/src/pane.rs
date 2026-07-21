@@ -34,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cloo_proto::Size;
+use cloo_proto::{PaneId, PaneInfo, Size};
 
 use crate::error::MetadataError;
 use crate::profile::{AdapterId, Profile, ProfileId};
@@ -371,6 +371,23 @@ impl PaneMeta {
             attention: Attention::default(),
         })
     }
+
+    /// The projection of this metadata a client is sent.
+    ///
+    /// Identity only. The recommended minimum stays on the server because it is
+    /// an input to a split the server performs, and attention crosses the wire
+    /// with its provenance at M2-07 rather than being flattened in here — a
+    /// state without its source is exactly the claim the chrome must not make.
+    #[must_use]
+    pub fn to_wire(&self, pane: PaneId) -> PaneInfo {
+        PaneInfo {
+            pane,
+            profile: self.profile.as_str().to_owned(),
+            name: self.name.as_str().to_owned(),
+            task: self.task.as_ref().map(|task| task.as_str().to_owned()),
+            cwd: self.cwd.as_path().to_string_lossy().into_owned(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -573,6 +590,31 @@ mod tests {
         assert_eq!(meta.name.as_str(), "api");
         assert_eq!(meta.task.expect("task").as_str(), "fix the flaky test");
         assert_eq!(meta.cwd.as_path(), Path::new("/home/dev/api"));
+    }
+
+    #[test]
+    fn the_wire_projection_carries_what_the_user_supplied() {
+        let meta = PaneMeta::from_profile(
+            &Profile::codex(),
+            Some(PaneName::new("api").expect("valid name")),
+            Some(TaskLabel::new("fix the flaky test").expect("valid label")),
+            cwd(),
+        )
+        .expect("valid");
+        let wire = meta.to_wire(cloo_proto::PaneId::new(7));
+        assert_eq!(wire.pane, cloo_proto::PaneId::new(7));
+        assert_eq!(wire.profile, "codex");
+        assert_eq!(wire.name, "api");
+        assert_eq!(wire.task.as_deref(), Some("fix the flaky test"));
+        assert_eq!(wire.cwd, "/home/dev/api");
+    }
+
+    #[test]
+    fn an_absent_task_stays_absent_on_the_wire() {
+        // Not "", and not the pane name: a client must be able to tell "the
+        // user said nothing" from "the user said something short".
+        let meta = PaneMeta::from_profile(&Profile::generic(), None, None, cwd()).expect("valid");
+        assert_eq!(meta.to_wire(cloo_proto::PaneId::new(1)).task, None);
     }
 
     #[test]

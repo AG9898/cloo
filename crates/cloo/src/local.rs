@@ -36,6 +36,7 @@ use cloo_client::raw_mode::{RawMode, RawModeError};
 use cloo_client::renderer::{Cursor, Grid, RenderError, Renderer};
 use cloo_client::resize::ResizeWatch;
 use cloo_proto::{MouseEvent, PaneId, PaneModes, Point};
+use cloo_server::launch::Launch;
 use cloo_server::pty::{PtyConfig, PtyError};
 use cloo_server::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot};
 
@@ -118,7 +119,11 @@ impl From<RenderError> for LocalError {
     }
 }
 
-/// Runs `program` in a single pane until it exits, and reports its status.
+/// Runs `launch` in a single pane until its child exits, and reports the status.
+///
+/// The launch was validated before it got here — profile, name, task label, and
+/// directory — so the only failure left is the spawn itself, which is where a
+/// program that is not on `PATH` surfaces.
 ///
 /// The outer terminal is restored on every exit path — normal, error, panic,
 /// and signal — by the guard taken here; see `cloo-client`'s `raw_mode`.
@@ -127,7 +132,7 @@ impl From<RenderError> for LocalError {
 ///
 /// Returns a [`LocalError`] if the terminal could not be prepared, the child
 /// could not be spawned, or a frame could not be drawn.
-pub fn run(program: &str, args: &[String]) -> Result<ExitStatus, LocalError> {
+pub fn run(launch: Launch) -> Result<ExitStatus, LocalError> {
     // First, and before the child exists: "cloo must be run from a terminal" is
     // the error a misuse should produce, and a failure here leaves nothing to
     // clean up.
@@ -151,7 +156,7 @@ pub fn run(program: &str, args: &[String]) -> Result<ExitStatus, LocalError> {
         .build()
         .map_err(LocalError::Runtime)?;
 
-    let result = runtime.block_on(session(program, args, size, caps, modes));
+    let result = runtime.block_on(session(launch, size, caps, modes));
 
     // Restore before anything is printed: an error message rendered into a raw
     // terminal comes out as a staircase.
@@ -163,22 +168,21 @@ pub fn run(program: &str, args: &[String]) -> Result<ExitStatus, LocalError> {
 
 /// The async body of [`run`], with the terminal already raw.
 async fn session(
-    program: &str,
-    args: &[String],
+    launch: Launch,
     size: cloo_proto::Size,
     caps: cloo_proto::TermCaps,
     modes: OuterModes,
 ) -> Result<ExitStatus, LocalError> {
-    let mut config = PtyConfig::new(program).wire_size(size)?;
-    for arg in args {
-        config = config.arg(arg);
-    }
+    // The base carries what belongs to the session rather than to the profile:
+    // the geometry, and the environment a pane inherits. The launch supplies the
+    // argv and the working directory.
+    let base = PtyConfig::session(size)?;
 
     // Installed before the session exists so a `SIGWINCH` between spawning the
     // child and entering the loop is not the one resize that gets lost.
     let mut resizes = ResizeWatch::new(size).map_err(LocalError::Signal)?;
 
-    let spawned = Session::spawn(&config, THE_PANE)?;
+    let spawned = Session::spawn(&base, THE_PANE, launch)?;
     let mut events = spawned.events;
     // Held for the loop's whole life. Dropping it is what lets the session task
     // finish, so it happens exactly once, below.
@@ -412,40 +416,13 @@ fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
     rx
 }
 
-/// The program a bare `cloo` should run.
-///
-/// `$SHELL` is what the user actually chose; `/bin/sh` is the fallback that
-/// POSIX guarantees exists.
-#[must_use]
-pub fn default_shell() -> String {
-    shell_from(std::env::var("SHELL").ok().as_deref())
-}
-
-/// The pure form of [`default_shell`].
-fn shell_from(shell: Option<&str>) -> String {
-    match shell {
-        Some(shell) if !shell.is_empty() => shell.to_owned(),
-        _ => "/bin/sh".to_owned(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     // Anything that needs a real terminal is driven through the binary from
-    // `tests/cli.rs` — see docs/TESTING.md.
-
-    #[test]
-    fn a_set_shell_is_preferred() {
-        assert_eq!(shell_from(Some("/usr/bin/fish")), "/usr/bin/fish");
-    }
-
-    #[test]
-    fn an_absent_or_empty_shell_falls_back_to_sh() {
-        assert_eq!(shell_from(None), "/bin/sh");
-        assert_eq!(shell_from(Some("")), "/bin/sh");
-    }
+    // `tests/cli.rs` — see docs/TESTING.md. Login-shell resolution moved to
+    // `cloo-server::launch` at M2-06, since it is a profile's answer now.
 
     #[test]
     fn the_frame_interval_is_about_sixty_per_second() {

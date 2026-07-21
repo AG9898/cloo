@@ -196,6 +196,69 @@ fn an_unknown_flag_is_a_usage_error_and_is_never_executed() {
 }
 
 #[test]
+fn help_documents_the_launch_options_and_the_built_in_profiles() {
+    let out = cloo().arg("--help").output().expect("cloo runs");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in [
+        "--profile",
+        "--name",
+        "--task",
+        "--cwd",
+        "generic",
+        "codex",
+        "claude",
+    ] {
+        assert!(
+            stdout.contains(expected),
+            "{expected} missing from:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn an_unknown_profile_is_refused_before_the_terminal_is_touched() {
+    // A usage error, not a launch failure: nothing was spawned, and the message
+    // names the profiles that do exist.
+    let out = cloo()
+        .args(["--profile", "codx"])
+        .stdin(Stdio::piped())
+        .output()
+        .expect("cloo runs");
+    assert_eq!(out.status.code(), Some(64));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("codx"), "got:\n{stderr}");
+    assert!(stderr.contains("codex"), "got:\n{stderr}");
+}
+
+#[test]
+fn a_task_label_that_could_repaint_the_chrome_is_refused() {
+    let out = cloo()
+        .args(["--task", "esc\u{1b}[31m", "true"])
+        .stdin(Stdio::piped())
+        .output()
+        .expect("cloo runs");
+    assert_eq!(out.status.code(), Some(64));
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("task label"),
+        "the message must name the field"
+    );
+}
+
+#[test]
+fn a_profile_whose_program_is_missing_says_so_and_names_it() {
+    // The acceptance criterion for M2-06: a launch-time failure, reported in
+    // terms a user can act on rather than as a bare errno.
+    let tty = open_tty();
+    let mut child = spawn_on(&tty, &["cloo-no-such-program-exists"]);
+    let status = child.wait().expect("cloo exits");
+    assert_eq!(status.code(), Some(125), "a cloo failure, not the child's");
+
+    let seen = read_until(&tty.master, "cloo-no-such-program-exists")
+        .unwrap_or_else(|seen| panic!("the failure never named the program; saw:\n{seen}"));
+    assert!(seen.contains("PATH"), "got:\n{seen}");
+}
+
+#[test]
 fn without_a_terminal_cloo_refuses_rather_than_spawning_a_child() {
     let out = cloo()
         .arg("true")

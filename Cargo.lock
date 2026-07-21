@@ -95,6 +95,7 @@ name = "cloo"
 version = "0.0.1"
 dependencies = [
  "cloo-client",
+ "cloo-core",
  "cloo-proto",
  "cloo-server",
  "libc",

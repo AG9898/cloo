@@ -22,12 +22,15 @@ use std::{fs, io};
 
 use cloo_client::attach::{AttachError, Attached, attach};
 use cloo_client::effects::{EffectPolicy, apply_effect};
+use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
+use cloo_core::profile::{Profile, ProfileCommand};
 use cloo_proto::{
     ClientMessage, ClipboardTarget, FrameStream, MouseButton, MouseEvent, MouseKind, MouseMods,
     MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId, PaneModes, Point, RowUpdate,
     ServerMessage, Size, TermCaps,
 };
 use cloo_server::daemon::Daemon;
+use cloo_server::launch::Launch;
 use cloo_server::pty::PtyConfig;
 use cloo_server::socket::Listener;
 use tokio::net::UnixStream;
@@ -63,14 +66,27 @@ impl Drop for TempDir {
     }
 }
 
-/// A config running `script` under `sh` at 80x24.
-fn scripted(script: &str) -> PtyConfig {
-    PtyConfig::new("sh")
-        .arg("-c")
-        .arg(script)
-        .env("TERM", "xterm-256color")
-        .wire_size(Size::new(80, 24))
+/// The session's half of a config at 80x24: geometry and `TERM`.
+fn base() -> PtyConfig {
+    PtyConfig::session(Size::new(80, 24))
         .expect("80x24 is a valid size")
+        .env("TERM", "xterm-256color")
+}
+
+/// A launch running `script` under `sh`, named the way a user would name it.
+fn scripted(script: &str) -> Launch {
+    let mut profile = Profile::generic();
+    profile.command = ProfileCommand::Program {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), script.to_owned()],
+    };
+    Launch::new(
+        profile,
+        Some(PaneName::new("api").expect("a valid name")),
+        Some(TaskLabel::new("fix the flaky test").expect("a valid label")),
+        WorkingDir::new("/").expect("absolute"),
+    )
+    .expect("the generic profile validates")
 }
 
 /// Binds a daemon on `socket` and runs it in the background.
@@ -85,7 +101,8 @@ fn spawn_daemon(
     tokio::task::JoinHandle<Result<std::process::ExitStatus, cloo_server::DaemonError>>,
 ) {
     let listener = Listener::bind(socket).expect("a fresh socket path must bind");
-    let mut daemon = Daemon::new(listener, &scripted(script)).expect("the daemon must start");
+    let mut daemon =
+        Daemon::new(listener, &base(), scripted(script)).expect("the daemon must start");
     let pid = daemon.child_id();
     let handle = tokio::spawn(async move { daemon.run().await });
     (pid, handle)
@@ -183,6 +200,45 @@ async fn await_text_counting_damage(attached: &mut Attached<UnixStream>, want: &
     })
     .await
     .unwrap_or_else(|_| panic!("never saw {want:?} in the pane"))
+}
+
+/// Reads until the server describes who the panes are.
+async fn await_panes(attached: &mut Attached<UnixStream>) -> Vec<cloo_proto::PaneInfo> {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Panes(panes)) => return panes,
+                Some(_) => {}
+                None => panic!("the server closed before describing its panes"),
+            }
+        }
+    })
+    .await
+    .expect("pane identity must reach an attached client")
+}
+
+#[tokio::test]
+async fn a_clients_resync_says_who_every_pane_is() {
+    // A client caches the visible grid and nothing else, so the identity it
+    // draws in a pane header has to arrive over the wire. All of it is explicit:
+    // the profile the pane was launched from, and what the user called it.
+    let dir = TempDir::new("panes");
+    let socket = dir.socket();
+    let (_, daemon) = spawn_daemon(&socket, "read _; exit 0");
+
+    let mut attached = client(&socket).await;
+    let panes = await_panes(&mut attached).await;
+    assert_eq!(panes.len(), 1);
+    assert_eq!(panes[0].profile, "generic");
+    assert_eq!(panes[0].name, "api");
+    assert_eq!(panes[0].task.as_deref(), Some("fix the flaky test"));
+    assert_eq!(panes[0].cwd, "/");
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must reach the child");
+    let _ = tokio::time::timeout(PATIENCE, daemon).await;
 }
 
 #[tokio::test]

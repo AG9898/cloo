@@ -22,6 +22,7 @@ use tokio::task::{JoinHandle, JoinSet};
 
 use crate::conn::{self, AttachRequest, Connection};
 use crate::damage::{DamageFrame, DamageTracker};
+use crate::launch::Launch;
 use crate::pty::{PtyConfig, PtyError};
 use crate::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, usable};
 use crate::socket::{Listener, SocketError};
@@ -161,7 +162,11 @@ pub struct Daemon {
 }
 
 impl Daemon {
-    /// Binds `listener` and spawns the session's child on a fresh PTY.
+    /// Binds `listener` and launches the session's first pane on a fresh PTY.
+    ///
+    /// `base` carries the session's environment and geometry; `launch` decides
+    /// what runs in the pane and what it is called. Both were validated before
+    /// they got here, so the only failure left is the spawn.
     ///
     /// Must be called from inside a Tokio runtime context.
     ///
@@ -169,15 +174,19 @@ impl Daemon {
     ///
     /// Returns [`DaemonError::Accept`] if the listener could not be registered
     /// with the runtime, or [`DaemonError::Pty`] if the child could not be
-    /// started.
-    pub fn new(listener: Listener, config: &PtyConfig) -> Result<Self, DaemonError> {
+    /// started — a profile naming a program that is not on `PATH` arrives here.
+    pub fn new(
+        listener: Listener,
+        config: &PtyConfig,
+        launch: Launch,
+    ) -> Result<Self, DaemonError> {
         let std_listener = listener.try_clone_std().map_err(DaemonError::Accept)?;
         std_listener
             .set_nonblocking(true)
             .map_err(DaemonError::Accept)?;
         let accepting = UnixListener::from_std(std_listener).map_err(DaemonError::Accept)?;
 
-        let spawned = Session::spawn(config, THE_PANE)?;
+        let spawned = Session::spawn(config, THE_PANE, launch)?;
         let size = cloo_core::grid::wire_size(config.term_size());
         let (client_tx, client_commands) = mpsc::channel(CLIENT_COMMAND_QUEUE);
         let (updates, _) = broadcast::channel(DAMAGE_QUEUE);

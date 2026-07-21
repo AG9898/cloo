@@ -112,6 +112,9 @@ impl DamageTracker {
             }
         };
 
+        // Identity moves on a different clock from geometry: a resize is not a
+        // rename, so a full-screen drag must not resend every pane's name.
+        let metas_changed = previous.is_none_or(|before| before.metas != current.metas);
         let modes_changed = previous.is_none_or(|before| before.modes != current.modes);
         let cursor_changed =
             previous.is_none_or(|before| before.pane.cursor != current.pane.cursor);
@@ -124,6 +127,9 @@ impl DamageTracker {
                 focused: Some(current.focused),
                 zoomed: current.zoomed,
             }));
+        }
+        if metas_changed {
+            messages.push(ServerMessage::Panes(current.metas.clone()));
         }
         if !rows.is_empty() {
             messages.push(ServerMessage::Damage {
@@ -171,6 +177,12 @@ mod tests {
     use cloo_proto::{Cell, PaneRect, RowUpdate, Size};
 
     fn snapshot(rows: &[&str]) -> SessionSnapshot {
+        named_snapshot(rows, "shell")
+    }
+
+    /// The same picture with the pane under a given name, so a rename can be
+    /// told apart from grid damage.
+    fn named_snapshot(rows: &[&str], name: &str) -> SessionSnapshot {
         let pane = PaneId::new(1);
         let cols = u16::try_from(rows.first().map_or(0, |row| row.len())).unwrap_or(0);
         let size = Size::new(cols, u16::try_from(rows.len()).unwrap_or(0));
@@ -181,6 +193,13 @@ mod tests {
                 x: 0,
                 y: 0,
                 size,
+            }],
+            metas: vec![cloo_proto::PaneInfo {
+                pane,
+                profile: "generic".into(),
+                name: name.to_owned(),
+                task: None,
+                cwd: "/home/dev".into(),
             }],
             focused: pane,
             zoomed: None,
@@ -216,17 +235,47 @@ mod tests {
             frame.messages().first(),
             Some(ServerMessage::Layout(_))
         ));
+        assert!(matches!(
+            frame.messages().get(1),
+            Some(ServerMessage::Panes(panes)) if panes.len() == 1
+        ));
         assert!(
-            matches!(frame.messages().get(1), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
+            matches!(frame.messages().get(2), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
         );
         assert!(matches!(
-            frame.messages().get(2),
+            frame.messages().get(3),
             Some(ServerMessage::Modes { .. })
         ));
         assert!(matches!(
-            frame.messages().get(3),
+            frame.messages().get(4),
             Some(ServerMessage::CursorMoved { visible: false, .. })
         ));
+    }
+
+    #[test]
+    fn identity_is_resent_only_when_it_changes() {
+        // Geometry and identity move on different clocks: a row that changed
+        // must not drag every pane's name across the wire with it.
+        let mut tracker = DamageTracker::default();
+        let _ = tracker.update(TabId::new(1), &named_snapshot(&["ab"], "shell"));
+        let frame = tracker
+            .update(TabId::new(1), &named_snapshot(&["XX"], "shell"))
+            .expect("a changed row produces damage");
+        assert!(
+            !frame
+                .messages()
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Panes(_))),
+            "an unchanged name costs no wire frame"
+        );
+
+        let renamed = tracker
+            .update(TabId::new(1), &named_snapshot(&["XX"], "api"))
+            .expect("a rename is a visible change");
+        assert_eq!(
+            renamed.messages(),
+            &[ServerMessage::Panes(named_snapshot(&["XX"], "api").metas)]
+        );
     }
 
     #[test]

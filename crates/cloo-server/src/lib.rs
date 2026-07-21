@@ -7,10 +7,13 @@
 //! All session mutation funnels through a single session task over
 //! `mpsc<Command>`. There is no `Mutex` on session state.
 //!
-//! Five modules today:
+//! Six modules today:
 //!
 //! - [`pty`] — the single-pane PTY reactor: pseudoterminal allocation, the
 //!   child process, and the read loop that feeds a `cloo-term` grid.
+//! - [`launch`] — a profile plus what the user typed, turned into a spawn
+//!   configuration and the pane's metadata. The only way a pane is created, and
+//!   where `$SHELL` and a working directory are resolved.
 //! - [`session`] — the session task: the single `mpsc<Command>` every mutation
 //!   arrives on, the layout pass, and the coalesced events it reports.
 //! - [`socket`] — the session socket lifecycle: path resolution, exclusive
@@ -26,6 +29,7 @@
 pub mod conn;
 pub mod daemon;
 pub mod damage;
+pub mod launch;
 pub mod pty;
 pub mod session;
 pub mod socket;
@@ -33,6 +37,7 @@ pub mod socket;
 pub use conn::{AttachRejection, AttachRequest, Connection, accept_attach};
 pub use daemon::{Daemon, DaemonError};
 pub use damage::{DamageFrame, DamageTracker};
+pub use launch::{Launch, login_shell};
 pub use pty::{PaneSnapshot, Pty, PtyConfig, PtyError, PtyReactor, Pump};
 pub use session::{
     Command, Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, SpawnedSession,

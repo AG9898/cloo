@@ -134,11 +134,14 @@ pub async fn refuse<T: AsyncRead + AsyncWrite + Unpin>(
 
 /// The messages that bring a freshly attached client fully up to date.
 ///
-/// Geometry first, then contents, then the modes, then the cursor. That order
+/// Geometry first, then who the panes are, then contents, then the modes, then
+/// the cursor. That order
 /// is what lets a
 /// client apply the batch without ever holding rows it has nowhere to put: the
 /// [`ServerMessage::Layout`] tells it how big the pane is before a single
-/// [`ServerMessage::Damage`] row arrives.
+/// [`ServerMessage::Damage`] row arrives, and the
+/// [`ServerMessage::Panes`] tells it what to write in a pane header before it
+/// has anything to draw one around.
 ///
 /// The geometry is the session task's own layout pass, carried through
 /// untouched. Recomputing it here would be a second answer to a question that
@@ -153,6 +156,7 @@ pub fn session_snapshot(tab: TabId, snapshot: &SessionSnapshot) -> Vec<ServerMes
             focused: Some(pane),
             zoomed: snapshot.zoomed,
         }),
+        ServerMessage::Panes(snapshot.metas.clone()),
         ServerMessage::Damage {
             pane,
             rows: snapshot.pane.rows.clone(),
@@ -210,6 +214,13 @@ mod tests {
                 x: 0,
                 y: 0,
                 size: Size::new(2, 1),
+            }],
+            metas: vec![cloo_proto::PaneInfo {
+                pane,
+                profile: "codex".into(),
+                name: "api".into(),
+                task: Some("fix the flaky test".into()),
+                cwd: "/home/dev/api".into(),
             }],
             focused: pane,
             zoomed: None,
@@ -339,15 +350,29 @@ mod tests {
             matches!(messages.first(), Some(ServerMessage::Layout(_))),
             "layout must come first so rows have somewhere to land"
         );
+        assert!(matches!(messages.get(1), Some(ServerMessage::Panes(_))));
         assert!(matches!(
-            messages.get(1),
+            messages.get(2),
             Some(ServerMessage::Damage { rows, .. }) if rows.len() == 1
         ));
-        assert!(matches!(messages.get(2), Some(ServerMessage::Modes { .. })));
+        assert!(matches!(messages.get(3), Some(ServerMessage::Modes { .. })));
         assert!(matches!(
-            messages.get(3),
+            messages.get(4),
             Some(ServerMessage::CursorMoved { visible: true, .. })
         ));
+    }
+
+    #[test]
+    fn a_freshly_attached_client_is_told_who_every_pane_is() {
+        // A client caches the visible grid and nothing else, so identity has to
+        // arrive with the resync or its chrome has nothing to write.
+        let snapshot = snapshot();
+        let messages = session_snapshot(TabId::new(1), &snapshot);
+        let Some(ServerMessage::Panes(panes)) = messages.get(1) else {
+            panic!("the resync must carry pane identity");
+        };
+        assert_eq!(panes, &snapshot.metas);
+        assert_eq!(panes[0].task.as_deref(), Some("fix the flaky test"));
     }
 
     #[test]
@@ -371,7 +396,7 @@ mod tests {
         let messages = session_snapshot(TabId::new(1), &snapshot);
         assert!(
             matches!(
-                messages.get(3),
+                messages.get(4),
                 Some(ServerMessage::CursorMoved { visible: false, .. })
             ),
             "a client with a stale cursor must be told to stop drawing it"

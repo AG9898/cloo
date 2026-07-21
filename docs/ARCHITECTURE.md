@@ -132,7 +132,8 @@ recognizes title changes and OSC 52 clipboard stores, but drops backend replies,
 every event cloo has no allowlisted type for. `OuterTerminalEffect` deliberately offers intent
 such as title, clipboard, hyperlink, notification, and progress changes, plus
 `Graphics(Unavailable)`; it contains no raw OSC, DCS, or graphics payload. `cloo-proto` mirrors
-that vocabulary in `ServerMessage::Effect { pane, effect }` and the handshake is v3 as a result.
+that vocabulary in `ServerMessage::Effect { pane, effect }`, which took the handshake to v3;
+M2-06's `ServerMessage::Panes` took it to v4.
 M1-09 drains those values through the session actor and fans each one out as its own non-damage
 frame. The server neither chooses nor applies an effect: each client combines its terminal
 capabilities with a default-deny local policy. Title changes are permitted only by the title
@@ -223,9 +224,11 @@ to report to.
 
 `conn::session_snapshot` is what an attach delivers. A client caches the visible grid and nothing
 else, so it needs the whole picture the moment it connects, and it arrives as the same message
-types an incremental update uses — `Layout`, then `Damage`, then `CursorMoved` — so a resync and a
+types an incremental update uses — `Layout`, then `Panes`, then `Damage`, then `Modes`, then
+`CursorMoved` — so a resync and a
 damage frame stay one code path on the client. Geometry comes first so rows never arrive with
-nowhere to land.
+nowhere to land, and identity comes before contents so a pane header has something to say before
+there is anything to draw it around.
 
 `cloo-server::daemon` is the serving loop that owns the pane and outlives every client attached to
 it. The property it exists to guarantee is that the child belongs to the daemon, not to whoever is
@@ -335,6 +338,32 @@ they are the reason it is modelled this way:
 
 `SessionSnapshot::zoomed` carries the state out, and it reaches clients as `LayoutSnapshot::zoomed`
 on both the attach resync and any frame in which it changed. Chrome for it is M2-03.
+
+##### Launching from a profile
+
+As of M2-06 a pane is only ever created from a `cloo-server::launch::Launch`: a validated profile
+plus the name, task label, and working directory the user supplied. `Launch::new` validates the
+profile and builds the pane's `PaneMeta` **before any process exists**, which is the same ordering
+split and close use — ask the half that can refuse first, and a refusal never costs a child. What
+is left to fail is `execvp`, and a program that is not on `PATH` surfaces as `PaneError::Spawn`
+naming it, with the layout already rolled back.
+
+`Launch::configure` is where the pure model meets the server's I/O. It applies a launch over the
+*session's* half of a `PtyConfig` — the environment every pane inherits, and the geometry the
+layout pass is about to correct — and overwrites the profile's half: the argv and the working
+directory. Splitting it that way is why a split can launch a different profile without losing the
+session's `TERM`. Resolving `$SHELL` for a `ProfileCommand::LoginShell` happens here too, because
+`cloo-core` performs no I/O; `/bin/sh` is the fallback POSIX guarantees.
+
+`SessionHandle::launch` is the explicit form of `split`: it names what to run, while a plain
+`split` repeats the session's own launch, which is what a keybinding means by "split this again".
+Every pane's metadata rides out in `SessionSnapshot::metas`, projected from the same layout pass
+that resolves geometry — so a client can never be told about a pane it has no identity for, or
+handed an identity for a pane that is not on screen.
+
+**Nothing in a `Launch` is inferred.** There is no constructor that takes a grid, a process name,
+or transcript text, which is what makes "cloo does not guess a task" a property of the type rather
+than a rule someone has to remember.
 
 Reading N PTYs is a hand-rolled `select_all` over the unended panes rather than a dependency:
 `PtyReactor::pump` is cancel-safe, so the futures that lose are dropped and cost a wakeup, never a
@@ -660,9 +689,18 @@ Server → Client:  Hello { protocol_version, session, tabs, size }
                   Damage { pane, rows: Vec<RowUpdate> }
                   CursorMoved { pane, pos, shape, visible }
                   Modes { pane, modes: PaneModes }  Effect { pane, effect }
-                  Layout(LayoutSnapshot)  Bell(pane)  Tabs(Vec<TabSummary>)
+                  Layout(LayoutSnapshot)  Panes(Vec<PaneInfo>)
+                  Bell(pane)  Tabs(Vec<TabSummary>)
                   Detached  Exit(code)
 ```
+
+`Panes` is who the panes are — profile, name, task label, working directory — as opposed to
+`Layout`, which is where they sit. The two are separate messages because they change on
+completely different clocks: geometry moves on every resize, identity only when a pane is
+launched, closed, or renamed, and a full-screen drag must not resend every pane's name. It is
+sent whole rather than per pane, so a client replaces its map and can never hold an entry for a
+pane that no longer exists. Every field of a `PaneInfo` was supplied by the user or by the
+profile's defaults; none of it is ever derived from a pane's grid.
 
 ### Framing
 

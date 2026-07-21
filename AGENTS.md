@@ -316,7 +316,12 @@ chrome spans in `cloo-client/src/renderer.rs`. M2-04 adds the profile and pane-m
 validation of names, labels, and an absolute-only cwd, and attention as state plus provenance with
 its coalescing rule. M2-05 adds profile-configuration parsing coverage in `cloo-core/src/config.rs`
 — a document error keeping the defaults against one bad profile dropped alone, the merge and
-override rules, and the command and `min_size` surface.
+override rules, and the command and `min_size` surface. M2-06 adds launch coverage in
+`cloo-server/src/launch.rs` and command-line coverage in `crates/cloo/src/cli.rs`, plus profile
+launches through the session actor in `cloo-server/tests/session.rs` — metadata in every snapshot,
+the child's own `pwd` proving the working directory, and a missing program failing with a message
+that names it while the layout rolls back — and pane identity reaching a client in
+`crates/cloo/tests/attach.rs`.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -654,3 +659,20 @@ panes, and cannot be asserted against an exact string. `chrome::header_cells` sp
 fixed order (task label, then state text, then title truncation, glyph last) and is tested for
 being *exactly* the pane width at every width from 0 to 60 — that loop, not the pretty cases, is
 what catches an off-by-one in the gap arithmetic.
+
+### 2026-07-21 — A pane is created only from a Launch, and that is what makes "no inference" a type
+`cloo-server::launch::Launch` is the sole way `Session::spawn`/`split` makes a pane: a validated
+profile plus the user's name, task, and cwd, built before any process exists so a bad profile
+never costs a child and a missing program is the only thing left to fail at `execvp`. "cloo does
+not guess a task" is enforced by the type having no constructor that takes a grid or a process
+name — not by a rule someone remembers. Split the `PtyConfig` in two: `PtyConfig::session` carries
+the environment and geometry, `Launch::configure` overwrites the argv and cwd, which is why a
+split can launch a different profile without losing the session's `TERM`.
+
+### 2026-07-21 — Identity is a wire message on its own clock, separate from geometry
+`ServerMessage::Panes(Vec<PaneInfo>)` (handshake v4) carries profile/name/task/cwd, and the
+`DamageTracker` resends it only when the metas change — a resize is not a rename, so a full-screen
+drag must not drag every pane's name across the wire. It is sent whole, not per pane, so a client
+replaces its map and never holds an entry for a pane that closed. `SessionSnapshot::metas` is
+projected from the same `Layout::resolve` pass as the rects, so a client can never be told about a
+pane it has no identity for, or vice versa.
