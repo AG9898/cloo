@@ -237,6 +237,12 @@ impl Daemon {
             tokio::select! {
                 event = self.events.recv() => match event {
                     Some(SessionEvent::Output) => dirty = true,
+                    Some(SessionEvent::Effect { pane, effect }) => {
+                        // This is client-local and deliberately not captured in
+                        // a damage snapshot. Each active connection receives
+                        // the typed request once, then applies its own policy.
+                        let _ = self.updates.send(DamageFrame::effect(pane, effect));
+                    }
                     Some(SessionEvent::Exited) | None => {
                         self.publish_current().await?;
                         let _ = self.updates.send(DamageFrame::exit(0));

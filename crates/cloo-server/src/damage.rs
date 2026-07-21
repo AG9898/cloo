@@ -6,7 +6,9 @@
 //! The daemon publishes that frame through a bounded `broadcast` channel; it
 //! never waits for an individual socket while the session task is running.
 
-use cloo_proto::{CursorShape, LayoutSnapshot, PaneId, Point, ServerMessage, TabId};
+use cloo_proto::{
+    CursorShape, LayoutSnapshot, OuterTerminalEffect, PaneId, Point, ServerMessage, TabId,
+};
 
 use crate::session::SessionSnapshot;
 
@@ -41,6 +43,16 @@ impl DamageFrame {
     pub fn exit(code: i32) -> Self {
         Self {
             messages: vec![ServerMessage::Exit(code)],
+        }
+    }
+
+    /// Carries one typed outer-terminal request without claiming it is grid
+    /// damage. A client may suppress it under local policy, but it must never
+    /// be folded into a snapshot or authoritative session state.
+    #[must_use]
+    pub fn effect(pane: PaneId, effect: OuterTerminalEffect) -> Self {
+        Self {
+            messages: vec![ServerMessage::Effect { pane, effect }],
         }
     }
 }
@@ -251,5 +263,20 @@ mod tests {
     #[test]
     fn an_exit_frame_is_detectable_by_a_client_task() {
         assert!(DamageFrame::exit(0).ends_session());
+    }
+
+    #[test]
+    fn an_effect_frame_keeps_the_request_out_of_grid_damage() {
+        let frame = DamageFrame::effect(
+            PaneId::new(1),
+            cloo_proto::OuterTerminalEffect::SetTitle("agent task".into()),
+        );
+        assert_eq!(
+            frame.messages(),
+            &[ServerMessage::Effect {
+                pane: PaneId::new(1),
+                effect: cloo_proto::OuterTerminalEffect::SetTitle("agent task".into()),
+            }]
+        );
     }
 }

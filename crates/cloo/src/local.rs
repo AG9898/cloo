@@ -27,6 +27,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use cloo_client::capabilities::detect_caps;
+use cloo_client::effects::{EffectPolicy, apply_effect};
 use cloo_client::input::{
     InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, mouse_owner,
 };
@@ -186,6 +187,9 @@ async fn session(
     let mut grid = Grid::new(size);
     let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
+    // No preference surface exists yet, so the local pane begins deny-all.
+    // The policy is still applied here, matching the attached-client path.
+    let effect_policy = EffectPolicy::default();
     // The first picture and every geometry change must clear stale outer
     // terminal cells. Ordinary snapshots below then repaint only rows whose
     // server contents actually changed.
@@ -219,6 +223,10 @@ async fn session(
 
         match step {
             Step::Session(Some(SessionEvent::Output)) => dirty = true,
+            Step::Session(Some(SessionEvent::Effect { effect, .. })) => {
+                let _ = apply_effect(&mut out, caps, effect_policy, &effect)
+                    .map_err(LocalError::Output)?;
+            }
             Step::Session(Some(SessionEvent::Exited) | None) => break,
             Step::Input(bytes) => {
                 for event in decoder.feed(&bytes) {

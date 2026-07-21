@@ -42,7 +42,8 @@ use std::task::Poll;
 use cloo_core::error::LayoutError;
 use cloo_core::layout::Layout;
 use cloo_proto::{
-    Direction, MouseButton, MouseEvent, MouseKind, MouseTracking, PaneId, PaneModes, PaneRect, Size,
+    ClipboardTarget, Direction, GraphicsEffect, MouseButton, MouseEvent, MouseKind, MouseTracking,
+    OuterTerminalEffect, PaneId, PaneModes, PaneRect, ProgressState, Size,
 };
 use cloo_term::TermSize;
 use tokio::sync::{mpsc, oneshot};
@@ -147,11 +148,23 @@ impl From<SessionGone> for PaneError {
 }
 
 /// What a session tells whoever is listening.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionEvent {
     /// Something changed and the current snapshot differs from the last one
     /// drawn. Coalesced: at most one is pending at a time.
     Output,
+    /// A pane requested one typed, client-local outer-terminal effect.
+    ///
+    /// This is not coalesced with output: two title changes are two ordered
+    /// requests, even if they leave the grid identical. The emulator queue may
+    /// safely suppress an effect before it reaches this point, but a value
+    /// delivered here reaches the daemon exactly once.
+    Effect {
+        /// Pane whose application emitted the request.
+        pane: PaneId,
+        /// The wire-owned, allowlisted request.
+        effect: OuterTerminalEffect,
+    },
     /// The session's child exited. The task stays alive and still answers
     /// [`Command::Snapshot`], so the child's last words can still be drawn.
     Exited,
@@ -417,7 +430,10 @@ impl Session {
             };
 
             match step {
-                Step::Pumped(Some((_, Ok(Pump::Bytes(_))))) => self.notify(SessionEvent::Output),
+                Step::Pumped(Some((pane, Ok(Pump::Bytes(_))))) => {
+                    self.report_effects(pane).await;
+                    self.notify(SessionEvent::Output);
+                }
                 Step::Pumped(Some((pane, Ok(Pump::Eof)))) => {
                     if let Some(pane) = self.pane_mut(pane) {
                         pane.ended = true;
@@ -675,6 +691,72 @@ impl Session {
     /// read, and a second `Output` tells a reader nothing the first did not.
     fn notify(&self, event: SessionEvent) {
         let _ = self.events.try_send(event);
+    }
+
+    /// Drains one pane's typed outer-terminal requests after feeding output.
+    ///
+    /// Effects are sent before the coalesced output level so a title-only OSC
+    /// is observable even when it made no grid cell dirty. Unlike an output
+    /// wakeup, each request carries information and is therefore awaited by
+    /// the session-to-daemon channel; that channel has no socket write in its
+    /// path, so a slow terminal cannot stall this actor.
+    async fn report_effects(&mut self, pane: PaneId) {
+        let effects = self
+            .pane_mut(pane)
+            .map_or_else(Vec::new, |pane| pane.reactor.emulator_mut().drain_effects());
+        for effect in effects {
+            if self
+                .events
+                .send(SessionEvent::Effect {
+                    pane,
+                    effect: wire_effect(effect),
+                })
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
+    }
+}
+
+/// Converts the emulation crate's leaf-owned effect vocabulary to the wire.
+///
+/// `cloo-term` and `cloo-proto` deliberately cannot depend on one another, so
+/// this is the explicit conversion boundary `cloo-core::grid` owns for cells
+/// and pane modes.
+fn wire_effect(effect: cloo_term::OuterTerminalEffect) -> OuterTerminalEffect {
+    match effect {
+        cloo_term::OuterTerminalEffect::SetTitle(title) => OuterTerminalEffect::SetTitle(title),
+        cloo_term::OuterTerminalEffect::ResetTitle => OuterTerminalEffect::ResetTitle,
+        cloo_term::OuterTerminalEffect::ClipboardStore { target, text } => {
+            OuterTerminalEffect::ClipboardStore {
+                target: match target {
+                    cloo_term::ClipboardTarget::Clipboard => ClipboardTarget::Clipboard,
+                    cloo_term::ClipboardTarget::PrimarySelection => {
+                        ClipboardTarget::PrimarySelection
+                    }
+                },
+                text,
+            }
+        }
+        cloo_term::OuterTerminalEffect::Hyperlink { uri } => OuterTerminalEffect::Hyperlink { uri },
+        cloo_term::OuterTerminalEffect::Notification { title, body } => {
+            OuterTerminalEffect::Notification { title, body }
+        }
+        cloo_term::OuterTerminalEffect::Progress(progress) => {
+            OuterTerminalEffect::Progress(match progress {
+                cloo_term::ProgressState::Clear => ProgressState::Clear,
+                cloo_term::ProgressState::Indeterminate => ProgressState::Indeterminate,
+                cloo_term::ProgressState::Value(value) => ProgressState::Value(value),
+                cloo_term::ProgressState::Error => ProgressState::Error,
+            })
+        }
+        cloo_term::OuterTerminalEffect::Graphics(graphics) => {
+            OuterTerminalEffect::Graphics(match graphics {
+                cloo_term::GraphicsEffect::Unavailable => GraphicsEffect::Unavailable,
+            })
+        }
     }
 }
 

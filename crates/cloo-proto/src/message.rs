@@ -83,8 +83,8 @@ pub enum Direction {
 /// What the client's outer terminal can actually do.
 ///
 /// Reported once at attach. A client that lacks a capability must pick a
-/// documented fallback rather than claim support; the server uses this to decide
-/// which typed outer-terminal effects are worth sending at all.
+/// documented fallback rather than claim support; it combines these values
+/// with its local policy before applying a typed outer-terminal effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct TermCaps {
     /// True colour (24-bit SGR) rather than only the 256-colour palette.

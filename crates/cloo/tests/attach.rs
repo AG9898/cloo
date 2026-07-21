@@ -21,9 +21,11 @@ use std::time::Duration;
 use std::{fs, io};
 
 use cloo_client::attach::{AttachError, Attached, attach};
+use cloo_client::effects::{EffectPolicy, apply_effect};
 use cloo_proto::{
-    ClientMessage, FrameStream, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
-    PROTOCOL_VERSION, PaneId, PaneModes, Point, RowUpdate, ServerMessage, Size, TermCaps,
+    ClientMessage, ClipboardTarget, FrameStream, MouseButton, MouseEvent, MouseKind, MouseMods,
+    MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId, PaneModes, Point, RowUpdate,
+    ServerMessage, Size, TermCaps,
 };
 use cloo_server::daemon::Daemon;
 use cloo_server::pty::PtyConfig;
@@ -108,13 +110,33 @@ fn row_text(row: &RowUpdate) -> String {
 
 /// Attaches to `socket`, failing the test with the daemon's own reason.
 async fn client(socket: &Path) -> Attached<UnixStream> {
-    tokio::time::timeout(
-        PATIENCE,
-        attach(socket, Size::new(80, 24), TermCaps::default(), None),
-    )
+    client_with_caps(socket, TermCaps::default()).await
+}
+
+/// Attaches with exactly the capabilities a client policy will later use.
+async fn client_with_caps(socket: &Path, caps: TermCaps) -> Attached<UnixStream> {
+    tokio::time::timeout(PATIENCE, attach(socket, Size::new(80, 24), caps, None))
+        .await
+        .expect("the attach must not hang")
+        .expect("the attach must succeed")
+}
+
+/// Reads until one matching typed outer-terminal request arrives.
+async fn await_effect(
+    attached: &mut Attached<UnixStream>,
+    want: &OuterTerminalEffect,
+) -> OuterTerminalEffect {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Effect { effect, .. }) if &effect == want => return effect,
+                Some(_) => {}
+                None => panic!("the server closed before sending {want:?}"),
+            }
+        }
+    })
     .await
-    .expect("the attach must not hang")
-    .expect("the attach must succeed")
+    .unwrap_or_else(|_| panic!("never saw typed effect {want:?}"))
 }
 
 /// Reads frames until a damage update puts `want` on some row of the pane.
@@ -265,6 +287,62 @@ async fn two_clients_receive_one_coalesced_damage_stream() {
     await_text(&mut first, "shared").await;
     await_text(&mut second, "shared").await;
 
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn a_typed_clipboard_effect_reaches_a_capable_client_once() {
+    let dir = TempDir::new("clipboard-effect");
+    let socket = dir.socket();
+    // The first read lets the client attach before the effect is emitted. OSC
+    // 52 carries base64 `hi`; `cloo-term` decodes it into the typed text the
+    // server then fans out, never into raw terminal bytes.
+    let (_pid, daemon) = spawn_daemon(
+        &socket,
+        "read _; printf '\\033]52;c;aGk=\\007'; read _; exit 0",
+    );
+    let caps = TermCaps {
+        clipboard_osc52: true,
+        ..TermCaps::default()
+    };
+    let mut attached = client_with_caps(&socket, caps).await;
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must start the effect fixture");
+    let expected = OuterTerminalEffect::ClipboardStore {
+        target: ClipboardTarget::Clipboard,
+        text: "hi".into(),
+    };
+    let effect = await_effect(&mut attached, &expected).await;
+    assert_eq!(effect, expected);
+
+    // Client policy is the final gate. This byte-exact assertion proves the
+    // typed request reaches a capable, permitted client exactly once rather
+    // than a raw OSC payload bypassing the renderer.
+    let mut terminal = Vec::new();
+    assert!(
+        apply_effect(
+            &mut terminal,
+            caps,
+            EffectPolicy::allow_supported(),
+            &effect,
+        )
+        .expect("the in-memory terminal accepts one effect")
+    );
+    assert_eq!(terminal, b"\x1b]52;c;aGk=\x1b\\");
+
+    // The script's second read keeps the daemon alive until the assertion is
+    // complete, then lets it reap normally.
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
     tokio::time::timeout(PATIENCE, daemon)
         .await
         .expect("the daemon must exit")

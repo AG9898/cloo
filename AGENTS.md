@@ -301,7 +301,7 @@ halves: the grid reflow and the child's own `stty size`, and at M1-07 with input
 end — a paste bracketed exactly when the child asked, focus and SGR mouse reports reaching a child
 that enabled them and neither reaching one that did not. `cloo-client` gained input decoding and
 mouse-ownership coverage in `src/input.rs` at M1-07, `cloo-server` the matching encoders in
-`src/session.rs`, and `cloo-term` one fixture per negotiated pane mode in `src/emulator.rs`. That file lives in the binary crate
+`src/session.rs`, and `cloo-term` one fixture per negotiated pane mode in `src/emulator.rs`. M1-09 adds default-deny outer-terminal effect policy coverage in `cloo-client/src/effects.rs` and an end-to-end typed OSC 52 effect fixture in `crates/cloo/tests/attach.rs`. That file lives in the binary crate
 because it needs both halves of the wire and `cloo-server` may never name `cloo-client`. Keymap
 resolution and config parsing are the next things that must get coverage as they land. M1-04 adds
 row-damage tracker coverage in `cloo-server/src/damage.rs`, byte-exact incremental renderer

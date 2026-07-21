@@ -129,8 +129,11 @@ every event cloo has no allowlisted type for. `OuterTerminalEffect` deliberately
 such as title, clipboard, hyperlink, notification, and progress changes, plus
 `Graphics(Unavailable)`; it contains no raw OSC, DCS, or graphics payload. `cloo-proto` mirrors
 that vocabulary in `ServerMessage::Effect { pane, effect }` and the handshake is v3 as a result.
-M1-09 will map and fan out these queued values through the server and apply per-client policy; no
-drained effect changes session state or reaches a terminal yet.
+M1-09 drains those values through the session actor and fans each one out as its own non-damage
+frame. The server neither chooses nor applies an effect: each client combines its terminal
+capabilities with a default-deny local policy. Title changes are permitted only by the title
+policy, OSC 52 stores need both clipboard policy and `clipboard_osc52`, and every unsupported
+effect is a no-op. Drained effects never change session state.
 
 ### Server
 
@@ -643,10 +646,14 @@ clipboard writes, hyperlinks, or graphics. These are not raw bytes to relay arou
 M1-08 parses backend title and OSC 52 store events into narrowly typed, versioned effects and
 models the remaining allowlisted requests as title reset, hyperlink, notification, progress, and
 explicitly unavailable graphics. Its type model has no raw OSC/DCS or graphics-payload variant.
-M1-09 will make each client apply only effects its capabilities and local policy permit. Effects
-must be safe to suppress and must never alter authoritative session state; arbitrary passthrough
-is forbidden because clients can differ and because it can bypass cloo chrome, damage accounting,
-and terminal-state restoration.
+As of M1-09, the session actor drains each value and the daemon broadcasts it as an ordered,
+non-damage `Effect` frame. The client then applies title changes only when its local title policy
+permits them, and OSC 52 stores only when both its clipboard policy and `clipboard_osc52` permit
+them. Hyperlinks need a renderer-owned span, while notifications, progress, and graphics have no
+safe standalone renderer yet, so all remain suppressed even under the broad supported-effects
+policy. Effects must be safe to suppress and must never alter authoritative session state;
+arbitrary passthrough is forbidden because clients can differ and because it can bypass cloo
+chrome, damage accounting, and terminal-state restoration.
 
 Inline graphics are an optional enhancement, never a compatibility requirement. If a terminal or
 intermediate multiplexer cannot support graphics, the pane remains usable and cloo exposes no
