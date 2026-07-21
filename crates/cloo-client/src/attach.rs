@@ -29,9 +29,14 @@ use cloo_proto::{
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
+use crate::capabilities::CapsError;
+
 /// Everything attaching can refuse to do.
 #[derive(Debug)]
 pub enum AttachError {
+    /// The outer terminal's capabilities could not be negotiated, so there was
+    /// nothing to attach with. Refused before the socket is touched.
+    Capabilities(CapsError),
     /// Nothing is listening on the socket.
     NoDaemon(PathBuf),
     /// The socket could not be connected to.
@@ -56,6 +61,7 @@ pub enum AttachError {
 impl fmt::Display for AttachError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Capabilities(e) => write!(f, "{e}"),
             Self::NoDaemon(path) => write!(
                 f,
                 "no cloo daemon is listening on {}; start one first",
@@ -78,6 +84,7 @@ impl fmt::Display for AttachError {
 impl std::error::Error for AttachError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
+            Self::Capabilities(e) => Some(e),
             Self::Connect { source, .. } => Some(source),
             Self::Version(e) => Some(e),
             Self::Stream(e) => Some(e),
@@ -89,6 +96,12 @@ impl std::error::Error for AttachError {
 impl From<StreamError> for AttachError {
     fn from(value: StreamError) -> Self {
         Self::Stream(value)
+    }
+}
+
+impl From<CapsError> for AttachError {
+    fn from(value: CapsError) -> Self {
+        Self::Capabilities(value)
     }
 }
 
@@ -183,6 +196,14 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
 }
 
 /// Connects to a daemon's socket and attaches to its session.
+///
+/// `term_caps` is a parameter rather than something read here so the handshake
+/// stays a pure function of what it is given. A caller negotiating from the
+/// real environment gets them from
+/// [`detect_attach_caps`](crate::capabilities::detect_attach_caps), whose
+/// [`CapsError`] converts into [`AttachError::Capabilities`] with a `?` — that
+/// is where an unset or `dumb` `TERM` is turned away, before the socket is
+/// touched.
 ///
 /// # Errors
 ///
@@ -313,6 +334,51 @@ mod tests {
         assert_eq!(attached.size(), Size::new(80, 24));
         assert_eq!(attached.tabs().len(), 1);
         scripted.await.expect("the scripted server finishes");
+    }
+
+    #[tokio::test]
+    async fn the_reported_capabilities_reach_the_server_unchanged() {
+        // Every field distinct from `TermCaps::default()`, so a handshake that
+        // dropped or defaulted one is caught rather than passing by coincidence.
+        let sent = TermCaps {
+            truecolor: true,
+            bracketed_paste: true,
+            sgr_mouse: true,
+            focus_events: true,
+            extended_keys: true,
+            clipboard_osc52: true,
+            hyperlinks: true,
+            graphics: true,
+        };
+        assert_ne!(sent, TermCaps::default());
+
+        let (client, server) = duplex(4096);
+        let scripted = tokio::spawn(async move {
+            let mut conn = FrameStream::new(server);
+            let attach = conn.recv::<ClientMessage>().await.expect("attach arrives");
+            let Some(ClientMessage::Attach { term_caps, .. }) = attach else {
+                panic!("expected an attach, got {attach:?}");
+            };
+            conn.send(&hello()).await.expect("hello sends");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            term_caps
+        });
+
+        handshake(FrameStream::new(client), Size::new(80, 24), sent, None)
+            .await
+            .expect("the attach succeeds");
+        let received = scripted.await.expect("the scripted server finishes");
+        assert_eq!(
+            received, sent,
+            "TermCaps must round-trip over the handshake"
+        );
+    }
+
+    #[test]
+    fn an_unresolvable_term_is_an_attach_failure_with_the_capability_reason() {
+        let err = AttachError::from(CapsError::TermDumb);
+        assert!(matches!(err, AttachError::Capabilities(_)), "got {err}");
+        assert!(err.to_string().contains("set TERM"), "got: {err}");
     }
 
     #[tokio::test]

@@ -41,6 +41,16 @@ always-on status bar displays a compact count.
 | Negotiated | Clipboard, hyperlinks, notifications, terminal-title changes, and progress effects are typed effects applied only when the attached client permits and supports them. |
 | Optional | Inline graphics. They may be unavailable through cloo without breaking the harness. |
 
+A tier is a contract about behaviour, not a requirement the terminal must meet. A client whose
+terminal lacks a required capability still attaches and still runs the harness — it takes the
+documented fallback for that capability, listed in
+[ARCHITECTURE.md](ARCHITECTURE.md#outer-terminal). The one refusal is a `TERM` that cannot be
+resolved at all: there is no baseline to negotiate from, so an attach is turned away with an
+actionable error rather than degraded silently, while the local in-process pane keeps running with
+every capability false ([DECISIONS.md](DECISIONS.md) RESOLVED-12). A harness attaching under a
+broken `TERM` therefore gets a loud local error instead of a session that has to be diagnosed
+remotely.
+
 Claude Code documents that tmux needs extended keys and passthrough for some of its terminal
 features; cloo's required and negotiated tiers cover the equivalent responsibilities. Codex
 documents that its terminal pets need graphics support and are unavailable inside tmux and Zellij;

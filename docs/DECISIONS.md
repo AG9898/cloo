@@ -307,4 +307,6 @@ socket is involved. That has to be explained wherever it surfaces — the `TERM`
 [ENV_VARS.md](ENV_VARS.md) and the attach error message are the two places that must carry it.
 
 **Affects:** [`ENV_VARS.md`](ENV_VARS.md) `TERM` row, [`ARCHITECTURE.md`](ARCHITECTURE.md)
-capability negotiation, `crates/cloo-client/src/outer.rs`, and workboard tasks M1-06 and M7-01.
+capability negotiation, `crates/cloo-client/src/capabilities.rs`, and workboard tasks M1-06 and
+M7-01. Implemented in M1-06: `attach_caps` refuses, `caps_from_env` degrades, and the local pane
+calls the second.

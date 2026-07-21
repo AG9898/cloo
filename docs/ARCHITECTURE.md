@@ -153,7 +153,7 @@ per-row damage; the type a client applies does not change.
 it, and clears the one a dead daemon left behind. Path resolution is a pure function of its
 inputs — `resolve_socket_path(session, CLOO_SOCKET, XDG_RUNTIME_DIR, uid)` — with
 `session_socket_path` as the thin wrapper that reads the process environment, matching
-`cloo-client::outer`. Precedence is `CLOO_SOCKET` verbatim, then
+`cloo-client::capabilities`. Precedence is `CLOO_SOCKET` verbatim, then
 `$XDG_RUNTIME_DIR/cloo/<session>.sock`, then `/tmp/cloo-<uid>/<session>.sock`. `CLOO_SOCKET`
 names a socket rather than a directory and ignores the session name entirely, because its purpose
 is standing a development daemon beside a live one. The `/tmp` form is per-uid so two users never
@@ -319,14 +319,37 @@ status a parent shell sees is the one it expects from a signalled child.
 
 #### Outer terminal
 
-`cloo-client::outer` is what the client knows about the terminal it draws into: its geometry from
-`TIOCGWINSZ` and its capabilities from `TERM` and `COLORTERM`. Detection is a pure function of
-those two values so it is testable without touching the process environment, and it claims only
-what can be established without writing a query sequence and waiting for a reply — everything
-else stays false and takes its documented fallback. Both belong to the client, never to session
-state, which is what keeps a capability difference between two attached clients from becoming
-something the server has to model. A terminal that reports a zero-width or zero-height `winsize`
-gets a conventional 80x24 rather than an error.
+`cloo-client::outer` is the geometry of the terminal the client draws into, read with
+`TIOCGWINSZ`. A terminal that reports a zero-width or zero-height `winsize` gets a conventional
+80x24 rather than an error.
+
+`cloo-client::capabilities` is the other half: what that terminal can *do*, from `TERM` and
+`COLORTERM`. Detection is a pure function of those two values so it is testable without touching
+the process environment, and it claims only what can be established without writing a query
+sequence and waiting for a reply — everything else stays false and takes its documented fallback.
+Both belong to the client, never to session state, which is what keeps a capability difference
+between two attached clients from becoming something the server has to model.
+
+The module has two entry points, and the difference between them is the whole of RESOLVED-12:
+
+| Entry point | `TERM` resolves | `TERM` unset or `dumb` |
+|---|---|---|
+| `attach_caps` / `detect_attach_caps` | negotiates, degrading per the table below | `CapsError`, converted into `AttachError::Capabilities` before the socket is touched |
+| `caps_from_env` / `detect_caps` (local pane) | the same negotiation | every capability false, and the pane runs |
+
+`Capability` enumerates the fields of `TermCaps` in a form that can be named and paired with a
+`Fallback`; `degradations(caps)` is the list of baseline capabilities a given attach lacks, each
+with the behaviour taken in its place. The fallback for a capability is fixed, not per client —
+two clients of one session must not behave differently for the same missing capability.
+
+| Missing capability | Fallback |
+|---|---|
+| `truecolor` | `Color::Rgb` downsampled to the nearest 256-palette entry |
+| `bracketed_paste` | pasted text forwarded as ordinary typed input |
+| `sgr_mouse` | chrome driven from the keyboard only; no mouse mode sent to the pane |
+| `focus_events` | the client is treated as always focused |
+| `extended_keys` | legacy key encoding |
+| `clipboard_osc52`, `hyperlinks`, `graphics` | the typed effect is suppressed |
 
 #### Noticing a resize
 
@@ -480,14 +503,18 @@ session and into the client — post-v1.
 baseline for an interactive pane includes UTF-8 and color rendering, alternate-screen handling,
 cursor updates, bracketed paste, extended keyboard input, focus events, SGR mouse routing, and
 resize. A client that lacks a required capability must choose a documented fallback rather than
-pretend support.
+pretend support; the fallback table lives with the client module that owns the decision, under
+[Outer terminal](#outer-terminal).
 
 Failing to *resolve* `TERM` at all is the one case that is refused rather than degraded. A client
 attaching with an unset or `dumb` `TERM` is turned away with an actionable error, because there is
 no baseline to negotiate from and a silently degraded remote session is the harder failure to
-diagnose. The in-process local pane has no such negotiation and keeps running with every
-capability false. See [DECISIONS.md](DECISIONS.md) RESOLVED-12; the two rules compose as *refuse
-when there is nothing to negotiate from, degrade when there is*.
+diagnose. The refusal is client-side and happens before the socket is touched: `TERM` is the
+client's to read, and the server is told capabilities rather than asked to infer them from an
+all-false `TermCaps`, which a capable terminal could also legitimately report. The in-process local
+pane has no such negotiation and keeps running with every capability false. See
+[DECISIONS.md](DECISIONS.md) RESOLVED-12; the two rules compose as *refuse when there is nothing to
+negotiate from, degrade when there is*. Shipped as of M1-06.
 
 Some child programs emit sequences intended for the *outer* terminal: notifications, titles,
 clipboard writes, hyperlinks, or graphics. These are not raw bytes to relay around the grid.

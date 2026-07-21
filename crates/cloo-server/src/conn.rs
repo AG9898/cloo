@@ -216,19 +216,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_matching_attach_is_accepted() {
+    async fn a_matching_attach_is_accepted_with_its_capabilities_intact() {
         let (client, server) = duplex(1024);
         let mut client = Connection::new(client);
         let mut server = Connection::new(server);
+
+        // A mixed set rather than all-true or the default, so a handshake that
+        // dropped a field or substituted a default is caught here.
+        let term_caps = TermCaps {
+            truecolor: true,
+            bracketed_paste: true,
+            sgr_mouse: false,
+            focus_events: true,
+            extended_keys: false,
+            clipboard_osc52: true,
+            hyperlinks: false,
+            graphics: false,
+        };
 
         client
             .send(&ClientMessage::Attach {
                 protocol_version: PROTOCOL_VERSION,
                 size: Size::new(100, 30),
-                term_caps: TermCaps {
-                    truecolor: true,
-                    ..TermCaps::default()
-                },
+                term_caps,
                 session: Some(SessionId::new(3)),
             })
             .await
@@ -238,7 +248,10 @@ mod tests {
             .await
             .expect("attach is accepted");
         assert_eq!(request.size, Size::new(100, 30));
-        assert!(request.term_caps.truecolor);
+        assert_eq!(
+            request.term_caps, term_caps,
+            "the server serves what the client reported, never a guess"
+        );
         assert_eq!(request.session, Some(SessionId::new(3)));
     }
 

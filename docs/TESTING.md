@@ -218,10 +218,18 @@ back cooked. **All four restore paths are now asserted automatically.** The libr
   collision cannot overwrite the first guard's saved state.
 - A pipe refused as `NotATerminal`.
 
-Outer-terminal capability detection is a pure function of `TERM` and `COLORTERM`, unit tested in
-`src/outer.rs`: truecolor established only by an explicit signal, a `dumb` or absent `TERM`
-claiming nothing at all, capabilities that need a query-and-reply staying false, and a degenerate
-`winsize` falling back to 80x24 rather than rendering into a zero-sized grid.
+Outer-terminal geometry is unit tested in `src/outer.rs`: a degenerate `winsize` falls back to
+80x24 rather than rendering into a zero-sized grid.
+
+Capability detection is a pure function of `TERM` and `COLORTERM`, unit tested in
+`src/capabilities.rs`: truecolor established only by an explicit signal, capabilities that need a
+query-and-reply staying false, an unresolvable `TERM` refusing an *attach* with a message naming
+both the fix and the local-pane alternative while the same `TERM` leaves the *local pane* claiming
+nothing, and every baseline capability's documented fallback. Two of those tests exist because
+they fail loudly rather than vacuously: `every_capability_reads_its_own_field` sets one field at a
+time and asserts exactly one capability reads back, which is what catches a `present_in` arm
+wired to a neighbouring field, and `a_present_capability_takes_no_fallback` pins the exact
+degradation list rather than asserting it is merely short.
 
 These tests share the process-global restore slot, so each takes a module-level `Mutex` first;
 Rust runs integration tests in parallel threads within one binary and two live guards would
@@ -294,13 +302,14 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
-| `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |
+| `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |
 | `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, and a handle whose task is gone reporting it rather than hanging |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Pure only: the frame-rate cap and the session's fixed IDs |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
-| `crates/cloo-client/src/outer.rs` | Outer terminal | Capability detection from `TERM`/`COLORTERM` and the degenerate-`winsize` fallback |
+| `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
+| `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
 | `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
-| `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
+| `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, `TermCaps` round-tripping over the handshake, an unresolvable `TERM` surfacing as a capability failure, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, and a pipe refused |
 | `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |

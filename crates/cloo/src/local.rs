@@ -26,7 +26,8 @@ use std::io::{self, Read, Write};
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use cloo_client::outer::{current_size, detect_caps};
+use cloo_client::capabilities::detect_caps;
+use cloo_client::outer::current_size;
 use cloo_client::raw_mode::{RawMode, RawModeError};
 use cloo_client::renderer::{Cursor, Grid, RenderError, Renderer};
 use cloo_client::resize::ResizeWatch;
@@ -167,6 +168,9 @@ async fn session(
     let session = Some(spawned.handle);
 
     let mut grid = Grid::new(size);
+    // `detect_caps`, not `detect_attach_caps`: a local pane negotiates with
+    // nobody, so an unresolvable `TERM` claims nothing here rather than
+    // refusing the way an attach does (DECISIONS.md RESOLVED-12).
     let mut renderer = Renderer::new(detect_caps());
     let mut out = io::stdout();
 

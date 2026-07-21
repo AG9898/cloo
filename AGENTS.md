@@ -286,7 +286,8 @@ child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-
 coverage in `src/conn.rs` as of M1-02. `cloo-client` has byte-exact renderer coverage and raw-mode
 restore coverage — normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as
 of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02 and `SIGWINCH` watch
-coverage in `src/resize.rs` as of M1-03. `cloo-proto` gained framed-transport coverage in
+coverage in `src/resize.rs` as of M1-03, and capability negotiation and fallback coverage in
+`src/capabilities.rs` as of M1-06. `cloo-proto` gained framed-transport coverage in
 `src/stream.rs` over a duplex pipe in M1-02. The binary has CLI and one-pane smoke coverage in
 `crates/cloo/tests/cli.rs`, run over a pseudoterminal, as of M0-07 — including the `SIGWINCH`
 chain end to end as of M1-03 — and end-to-end attach/detach coverage in
@@ -482,6 +483,14 @@ would have been a second path to the same state rather than the only one. It now
 everything else, which is what makes "no `Mutex` on session state" mean something. `SessionEvent`
 splits by kind for the same reason: `Output` is a level and coalesces on a depth-one channel,
 while `Exited` carries information a reader cannot recover and must be sent, not dropped.
+
+### 2026-07-21 — Refusing on `TERM` belongs in the client, not on the wire
+The server cannot enforce "an unresolvable `TERM` may not attach" by looking at the reported
+`TermCaps`: an all-false set is exactly what a capable terminal reporting nothing would also send,
+so inferring the refusal there would turn a legitimate attach away. `TERM` is the client's to read,
+so `cloo-client::capabilities::attach_caps` refuses before the socket is touched, and
+`caps_from_env` is the same detection with the refusal replaced by an all-false default for the
+local pane — one function, two policies, which is what keeps the two paths from drifting.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

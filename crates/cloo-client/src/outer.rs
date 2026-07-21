@@ -1,14 +1,8 @@
-//! What the client knows about the *outer* terminal: its size and what it can
-//! draw.
+//! The *outer* terminal's geometry: how large the terminal cloo draws into is.
 //!
-//! Both belong to the client rather than the server. The server never learns
-//! what the user's terminal is capable of beyond the [`TermCaps`] the client
-//! reports at attach, which is what keeps a capability difference between two
-//! attached clients from becoming session state.
-//!
-//! Capability detection is a pure function of the environment
-//! ([`caps_from_env`]) so it is testable without touching the process's real
-//! environment, with [`detect_caps`] as the thin wrapper that reads it.
+//! It belongs to the client rather than the server, as does what that terminal
+//! can draw — see [`capabilities`](crate::capabilities), which owns the other
+//! half of "what the client knows about the terminal it is sitting in".
 //!
 //! ```no_run
 //! use std::io::stdout;
@@ -16,8 +10,7 @@
 //!
 //! # fn example() -> std::io::Result<()> {
 //! let size = cloo_client::outer::window_size(stdout().as_fd())?;
-//! let caps = cloo_client::outer::detect_caps();
-//! # let _ = (size, caps);
+//! # let _ = size;
 //! # Ok(())
 //! # }
 //! ```
@@ -25,7 +18,7 @@
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
 
-use cloo_proto::{Size, TermCaps};
+use cloo_proto::Size;
 
 /// The fallback geometry for a terminal that reports none.
 ///
@@ -80,49 +73,6 @@ fn size_from_winsize(cols: u16, rows: u16) -> Size {
     Size::new(cols, rows)
 }
 
-/// Reads the process environment and decides what the outer terminal can draw.
-#[must_use]
-pub fn detect_caps() -> TermCaps {
-    caps_from_env(
-        std::env::var("TERM").ok().as_deref(),
-        std::env::var("COLORTERM").ok().as_deref(),
-    )
-}
-
-/// The pure form of [`detect_caps`].
-///
-/// Only capabilities that can be established without writing a query sequence
-/// to the terminal and waiting for a reply are decided here. Everything else
-/// stays false: a client must never claim a capability it has not established,
-/// because the documented fallback is always safe and a wrongly claimed
-/// capability corrupts the user's screen.
-#[must_use]
-pub fn caps_from_env(term: Option<&str>, colorterm: Option<&str>) -> TermCaps {
-    let term = term.unwrap_or("");
-    let colorterm = colorterm.unwrap_or("");
-
-    // A terminal that says it is "dumb", or says nothing at all, gets the
-    // most conservative treatment available.
-    if term.is_empty() || term == "dumb" {
-        return TermCaps::default();
-    }
-
-    let truecolor = colorterm.eq_ignore_ascii_case("truecolor")
-        || colorterm.eq_ignore_ascii_case("24bit")
-        || term.contains("truecolor")
-        || term.contains("direct");
-
-    TermCaps {
-        truecolor,
-        // Universal enough among terminals that report a `TERM` at all, and
-        // harmless where unsupported: an unrecognized private mode is ignored.
-        bracketed_paste: true,
-        sgr_mouse: true,
-        focus_events: true,
-        ..TermCaps::default()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,38 +87,5 @@ mod tests {
         assert_eq!(size_from_winsize(0, 40), FALLBACK_SIZE);
         assert_eq!(size_from_winsize(120, 0), FALLBACK_SIZE);
         assert_eq!(size_from_winsize(0, 0), FALLBACK_SIZE);
-    }
-
-    #[test]
-    fn a_dumb_or_absent_terminal_claims_nothing() {
-        assert_eq!(caps_from_env(None, Some("truecolor")), TermCaps::default());
-        assert_eq!(caps_from_env(Some(""), None), TermCaps::default());
-        assert_eq!(
-            caps_from_env(Some("dumb"), Some("truecolor")),
-            TermCaps::default()
-        );
-    }
-
-    #[test]
-    fn colorterm_is_what_establishes_truecolor() {
-        assert!(caps_from_env(Some("xterm-256color"), Some("truecolor")).truecolor);
-        assert!(caps_from_env(Some("xterm-256color"), Some("24bit")).truecolor);
-        assert!(caps_from_env(Some("xterm-256color"), Some("TrueColor")).truecolor);
-        assert!(!caps_from_env(Some("xterm-256color"), None).truecolor);
-        assert!(!caps_from_env(Some("xterm-256color"), Some("")).truecolor);
-    }
-
-    #[test]
-    fn a_direct_color_term_entry_also_establishes_truecolor() {
-        assert!(caps_from_env(Some("xterm-direct"), None).truecolor);
-    }
-
-    #[test]
-    fn unestablished_capabilities_stay_false() {
-        let caps = caps_from_env(Some("xterm-256color"), Some("truecolor"));
-        assert!(!caps.extended_keys, "needs a query and a reply");
-        assert!(!caps.clipboard_osc52);
-        assert!(!caps.hyperlinks);
-        assert!(!caps.graphics);
     }
 }
