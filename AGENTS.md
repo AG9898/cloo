@@ -251,7 +251,8 @@ Stop and report (do not continue) when:
 - **A panic in a client can leave the terminal in raw mode**, which makes the shell appear
   broken afterward. `reset` restores it. Fix the exit path rather than living with it.
 - **`cargo test` does not clean up stray daemons.** If integration tests fail oddly, check for
-  leftover sockets in `$XDG_RUNTIME_DIR/cloo/`.
+  leftover sockets in `$XDG_RUNTIME_DIR/cloo/`. The socket tests themselves bind under `$TMPDIR`
+  and never touch that directory, so anything there came from a real run.
 - **The npm package is `clooterminal`, not `cloo`.** npm's similarity filter rejects `cloo` at
   publish time even though the name shows as available on a registry lookup. See
   [`docs/DECISIONS.md`](docs/DECISIONS.md) RESOLVED-05.
@@ -280,7 +281,7 @@ cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && ca
 table-driven layout tree coverage as of M0-03, plus the emulator-to-wire cell conversion as of
 M0-07. `cloo-term` has grid coverage — SGR, alternate screen, cursor, resize, scrollback — as of
 M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a scripted `sh -c`
-child as of M0-05. `cloo-client` has byte-exact renderer coverage and raw-mode restore coverage —
+child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01. `cloo-client` has byte-exact renderer coverage and raw-mode restore coverage —
 normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as of M0-06. The
 binary has CLI and one-pane smoke coverage in `crates/cloo/tests/cli.rs`, run over a
 pseudoterminal, as of M0-07. Keymap resolution and config parsing are the next things that must
@@ -418,6 +419,20 @@ downward freely, never sideways between `cloo-server` and `cloo-client`, never u
 signals itself kills the test runner. Signal the *binary* as a child instead: `crates/cloo/tests/
 cli.rs` spawns `cloo` on a pseudoterminal and asserts the terminal came back cooked. When adding
 an exit path, check the assertion is not vacuous by breaking the restore and watching it fail.
+
+### 2026-07-21 — A socket file is not proof a daemon is alive
+Daemon ownership is an advisory `flock` on `<socket>.lock`, never the existence of the socket:
+a `SIGKILL`ed daemon leaves a socket behind and a live one has the same file, so the file cannot
+distinguish them, while the kernel drops a `flock` however the holder dies. Holding the lock is
+also what makes stale cleanup safe — the unlink is only reachable once no other daemon can exist.
+
+### 2026-07-21 — Stat a socket path with `symlink_metadata` before unlinking it
+`fs::metadata` follows symlinks, so a symlink at the socket path reports the *target's* file type
+and a "it's a socket, remove it" check passes on something that lives elsewhere. `cloo-server::
+socket` uses `symlink_metadata` and refuses anything that is not itself a socket; `Drop` also
+compares the `(device, inode)` recorded at bind, so a departing daemon cannot unlink a successor
+that already claimed the path. Both cases have tests, and both pass vacuously if you use the
+wrong stat call.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

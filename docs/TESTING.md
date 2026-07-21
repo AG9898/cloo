@@ -108,7 +108,28 @@ only tests in the workspace that fork a process:
 - A dropped `Pty` leaving no process behind — not even a zombie.
 
 The `cloo-server` unit tests in `src/pty.rs` are pure by rule: config defaults, the `winsize`
-conversion, and error conversion. Nothing that spawns.
+conversion, and error conversion. Nothing that spawns. The same rule applies to `src/socket.rs`,
+whose unit tests cover only path resolution and name validation — `resolve_socket_path` takes the
+environment as arguments precisely so no test has to mutate the process's own, which would race
+across the test harness's threads.
+
+Socket lifecycle behaviour needs a real filesystem, so it lives in `tests/socket.rs`. Each test
+binds inside its own uniquely named directory under `$TMPDIR`, so nothing depends on
+`XDG_RUNTIME_DIR` and no two tests collide:
+
+- A fresh path binding, creating its directory at `0700`, and accepting a connection.
+- A second `bind` on a held socket refused with `AlreadyRunning`, leaving the first daemon's
+  socket connectable.
+- `Drop` unlinking the socket and freeing the name, while leaving the lock file in place.
+- A stale socket from a `SIGKILL`ed daemon — a socket file plus a leftover lock file, with
+  nothing listening — cleared and replaced.
+- A regular file at the socket path refused as `NotASocket` with its contents intact, which is
+  the test that would catch a cleanup that deletes whatever it finds.
+- A **symlink** at the socket path refused too, with its target left alone. Following the link
+  would report the target's type and the unlink could then reach outside the socket directory.
+- A departing daemon leaving a successor's socket at the same path alone, which is what the
+  `(device, inode)` check in `Drop` exists for.
+- A path with no parent directory refused rather than bound relative to the cwd.
 
 Covered today in `cloo-client`. The renderer is a pure function into a byte buffer, so every
 frame is asserted against an exact expected string rather than eyeballed — all unit tests:
@@ -181,8 +202,8 @@ The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
   pure and testable without a terminal.
-- **`cloo-server`** — socket-level integration tests join the PTY ones at M1. Slower; keep the
-  count deliberate.
+- **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01. Handshake and attach
+  coverage arrives at M1-02 and the session task at M1-03. Slower; keep the count deliberate.
 - **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06, and the
   signal restore path joined them from the binary's own tests once M0-07 gave it a child process
   to signal. Incremental diffing against previous frames arrives with damage coalescing at M1-04.
@@ -219,6 +240,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
+| `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
+| `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | Capability detection from `TERM`/`COLORTERM` and the degenerate-`winsize` fallback |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |

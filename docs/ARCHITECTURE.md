@@ -35,7 +35,8 @@ work client-side.
 ```
 
 There is no network tier, no database, and no external service. Both processes are local, and
-the socket lives at `$XDG_RUNTIME_DIR/cloo/<session>.sock`.
+the socket lives at `$XDG_RUNTIME_DIR/cloo/<session>.sock` — see [Socket lifecycle](#socket-lifecycle)
+for the full resolution order and the ownership rules around that path.
 
 ---
 
@@ -144,6 +145,46 @@ crate that sees both vocabularies — and a full capture per frame is the M0 sha
 caller's frame timer rather than by output volume. M1-04 replaces the capture with coalesced
 per-row damage; the type a client applies does not change.
 
+#### Socket lifecycle
+
+`cloo-server::socket` decides where a session's socket lives, guarantees exactly one daemon owns
+it, and clears the one a dead daemon left behind. Path resolution is a pure function of its
+inputs — `resolve_socket_path(session, CLOO_SOCKET, XDG_RUNTIME_DIR, uid)` — with
+`session_socket_path` as the thin wrapper that reads the process environment, matching
+`cloo-client::outer`. Precedence is `CLOO_SOCKET` verbatim, then
+`$XDG_RUNTIME_DIR/cloo/<session>.sock`, then `/tmp/cloo-<uid>/<session>.sock`. `CLOO_SOCKET`
+names a socket rather than a directory and ignores the session name entirely, because its purpose
+is standing a development daemon beside a live one. The `/tmp` form is per-uid so two users never
+collide, and it is a fallback rather than the default because `/tmp` outlives a login session.
+
+A session name reaches the filesystem, so `/`, `\`, control characters, `.`, `..`, and the empty
+string are refused rather than sanitized — silently renaming a session produces a socket the user
+cannot find.
+
+**Ownership is an advisory `flock` on a companion `<socket>.lock`, not the presence of the socket
+file.** A socket file proves nothing: a daemon killed with `SIGKILL` leaves one behind, and a live
+daemon has one too. The kernel releases a `flock` however the holder dies, so the lock answers
+"is a daemon running" exactly, and a second daemon gets `SocketError::AlreadyRunning` instead of a
+race. Holding the lock is also what makes cleanup safe — the unlink is reachable only after it has
+been established that no other daemon exists. The lock file itself is never removed; unlinking it
+would race a daemon that has already opened it and is about to lock it.
+
+Cleanup is deliberately narrow. It touches only the one path it holds the lock for, and only when
+`symlink_metadata` says that path is a socket. A regular file, a directory, or a **symlink** there
+is a `SocketError::NotASocket` refusal — following the link would report the target's type and the
+unlink could then remove something outside the socket directory. `CLOO_SOCKET` is user-supplied,
+and a typo must not cost anyone a file.
+
+`Listener` restores by ownership, like `Pty` and `RawMode`: its `Drop` unlinks the socket, so a
+daemon that exits normally leaves nothing behind. The unlink is guarded by the `(device, inode)`
+pair recorded at bind, so a departing daemon cannot remove a successor that already claimed the
+same path. The directory is created and narrowed to `0700` on every bind — `create_dir_all`
+applies the umask, and a session socket is a channel into the user's shell.
+
+The listener is bound non-blocking as `std::os::unix::net::UnixListener`, which keeps `bind` free
+of a runtime requirement; M1-02 hands `try_clone_std` to `tokio::net::UnixListener::from_std` so
+the guard and its unlink stay alive alongside the async half.
+
 ### Client
 
 Holds a copy of the visible cell grid, diffs against incoming damage, and emits escape
@@ -237,8 +278,9 @@ Stdin is read on a dedicated thread rather than through an async descriptor: mak
 non-blocking would change a file description the user's shell shares, and a shell left
 non-blocking after cloo exits is a worse bug than a parked thread.
 
-M1-01 turns this loop into the daemon's session task with a real client on the other end of a
-socket, and `cloo attach` / `cloo new` join the CLI surface there.
+M1-01 added the socket lifecycle beneath this loop but did not change it: the binary still runs
+one pane in-process. M1-02 puts a real client on the other end of that socket and M1-03 turns the
+loop into the daemon's session task; `cloo attach` / `cloo new` join the CLI surface with them.
 
 ### Agent pane metadata and attention
 

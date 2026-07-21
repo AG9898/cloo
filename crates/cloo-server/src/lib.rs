@@ -7,13 +7,17 @@
 //! All session mutation funnels through a single session task over
 //! `mpsc<Command>`. There is no `Mutex` on session state.
 //!
-//! One module today:
+//! Two modules today:
 //!
 //! - [`pty`] — the single-pane PTY reactor: pseudoterminal allocation, the
 //!   child process, and the read loop that feeds a `cloo-term` grid.
+//! - [`socket`] — the session socket lifecycle: path resolution, exclusive
+//!   ownership, stale-socket cleanup, and unlink on drop.
 //!
-//! The socket lifecycle and the session task land in M1.
+//! The handshake over that socket lands in M1-02 and the session task in M1-03.
 
 pub mod pty;
+pub mod socket;
 
 pub use pty::{PaneSnapshot, Pty, PtyConfig, PtyError, PtyReactor, Pump};
+pub use socket::{Listener, NameRejection, SocketError};
