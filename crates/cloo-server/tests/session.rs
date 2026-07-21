@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use cloo_core::LayoutError;
+use cloo_core::{LayoutError, Side};
 use cloo_proto::{Direction, PaneId, Size};
 use cloo_server::pty::PtyConfig;
 use cloo_server::session::{PaneError, Session, SessionHandle, SessionSnapshot};
@@ -35,6 +35,13 @@ const DEADLINE: Duration = Duration::from_secs(20);
 /// On demand rather than on a loop, so a report on the grid is always evidence
 /// of something that happened after the last thing the test did.
 const REPORT_ON_DEMAND: &str = "while read _; do stty size; done";
+
+/// The same reporter, prefixed by the child's own process id.
+///
+/// That first line is the evidence a zoom did not restart anything: a pane whose
+/// PTY had been torn down and spawned again would answer with a different pid on
+/// a freshly cleared grid.
+const PID_THEN_REPORT: &str = "echo pid=$$; while read _; do stty size; done";
 
 /// A config running `script` under `sh`, at `cols` x `rows`.
 fn scripted(script: &str, cols: u16, rows: u16) -> PtyConfig {
@@ -98,10 +105,37 @@ fn rect_of(snapshot: &SessionSnapshot, pane: PaneId) -> Size {
 
 /// A session of one pane running [`REPORT_ON_DEMAND`] at `cols` x `rows`.
 fn session(cols: u16, rows: u16) -> (PaneId, cloo_server::session::SpawnedSession) {
+    session_running(REPORT_ON_DEMAND, cols, rows)
+}
+
+/// A session of one pane running `script` at `cols` x `rows`.
+fn session_running(
+    script: &str,
+    cols: u16,
+    rows: u16,
+) -> (PaneId, cloo_server::session::SpawnedSession) {
     let root = PaneId::new(0);
-    let spawned = Session::spawn(&scripted(REPORT_ON_DEMAND, cols, rows), root)
+    let spawned = Session::spawn(&scripted(script, cols, rows), root)
         .expect("a pty and an sh child must be available");
     (root, spawned)
+}
+
+/// Waits for the focused pane's grid to show a line starting with `prefix`, and
+/// returns it. The identity a later assertion compares against.
+async fn wait_for_line(handle: &SessionHandle, prefix: &str) -> String {
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let lines = text(&snapshot);
+        if let Some(line) = lines.iter().find(|line| line.starts_with(prefix)) {
+            return line.clone();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no line starting with {prefix:?} appeared; the pane shows {lines:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
@@ -243,6 +277,169 @@ async fn closing_an_unknown_pane_is_refused() {
             .len(),
         1
     );
+}
+
+#[tokio::test]
+async fn focus_moves_between_panes_and_input_follows_it() {
+    // An uneven split, so the two panes have different sizes and a report can
+    // only have come from one of them.
+    let (root, session) = session(120, 40);
+    let right = session
+        .handle
+        .split(Direction::Horizontal, 0.25)
+        .await
+        .expect("30 and 90 columns both clear the minimum");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .focused,
+        right,
+        "focus follows a split"
+    );
+
+    session
+        .handle
+        .move_focus(Side::Left)
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.focused, root);
+    // The keystroke that asks for a report goes to whichever pane is focused,
+    // so this answer is the whole proof that the move took effect.
+    ask_size(&session.handle, "40 30").await;
+
+    // Nothing is left of the leftmost pane. Asking to go there is not an error
+    // and must not wrap around to the far side.
+    session
+        .handle
+        .move_focus(Side::Left)
+        .await
+        .expect("session is alive");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .focused,
+        root,
+        "an edge pane stays put rather than wrapping"
+    );
+
+    session
+        .handle
+        .move_focus(Side::Right)
+        .await
+        .expect("session is alive");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .focused,
+        right
+    );
+    ask_size(&session.handle, "40 90").await;
+}
+
+#[tokio::test]
+async fn zoom_fills_the_area_and_unzoom_restores_the_split_without_a_restart() {
+    let (root, session) = session_running(PID_THEN_REPORT, 120, 40);
+    session
+        .handle
+        .split_even(Direction::Horizontal)
+        .await
+        .expect("the split must fit");
+    session
+        .handle
+        .move_focus(Side::Left)
+        .await
+        .expect("session is alive");
+    ask_size(&session.handle, "40 60").await;
+    let pid = wait_for_line(&session.handle, "pid=").await;
+
+    session
+        .handle
+        .toggle_zoom()
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.zoomed, Some(root));
+    assert_eq!(
+        snapshot.panes.len(),
+        1,
+        "a zoomed session draws the focused pane and nothing else"
+    );
+    assert_eq!(rect_of(&snapshot, root), Size::new(120, 40));
+    // The child was resized, not replaced: it is the same process, and it says
+    // so on the same grid it has been writing to all along.
+    ask_size(&session.handle, "40 120").await;
+    assert_eq!(
+        wait_for_line(&session.handle, "pid=").await,
+        pid,
+        "zoom must never restart a pane's child"
+    );
+
+    session
+        .handle
+        .toggle_zoom()
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.zoomed, None);
+    assert_eq!(
+        snapshot.panes.len(),
+        2,
+        "unzoom restores the split that was there the whole time"
+    );
+    assert_eq!(
+        rect_of(&snapshot, root),
+        Size::new(60, 40),
+        "the ratio survived the zoom untouched"
+    );
+    ask_size(&session.handle, "40 60").await;
+    assert_eq!(
+        wait_for_line(&session.handle, "pid=").await,
+        pid,
+        "unzoom must never restart a pane's child either"
+    );
+}
+
+#[tokio::test]
+async fn a_split_while_zoomed_shows_the_pane_it_created() {
+    let (root, session) = session(120, 40);
+    session
+        .handle
+        .toggle_zoom()
+        .await
+        .expect("session is alive");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .zoomed,
+        Some(root)
+    );
+
+    let new_pane = session
+        .handle
+        .split_even(Direction::Horizontal)
+        .await
+        .expect("the split must fit");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(
+        snapshot.zoomed, None,
+        "a split unzooms, or the pane it just made is invisible"
+    );
+    assert_eq!(snapshot.focused, new_pane);
+    assert_eq!(snapshot.panes.len(), 2);
+    ask_size(&session.handle, "40 60").await;
 }
 
 #[tokio::test]

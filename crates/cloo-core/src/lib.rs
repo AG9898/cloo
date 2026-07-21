@@ -7,7 +7,8 @@
 //!
 //! Four modules today:
 //!
-//! - [`layout`] — the ratio-based binary layout tree and its single layout pass.
+//! - [`layout`] — the ratio-based binary layout tree, its single layout pass,
+//!   geometric directional focus, and zoom as a view flag over an untouched tree.
 //! - [`grid`] — the emulator-cell to wire-cell conversion, the only place the
 //!   `cloo-term` and `cloo-proto` vocabularies meet.
 //! - [`id`] — monotonic allocators for the `cloo-proto` newtype IDs.
@@ -30,4 +31,4 @@ pub use grid::{
     wire_size,
 };
 pub use id::{PaneIdAllocator, SessionIdAllocator, TabIdAllocator};
-pub use layout::{Layout, MIN_PANE_SIZE, Node};
+pub use layout::{Layout, MIN_PANE_SIZE, Node, Side};

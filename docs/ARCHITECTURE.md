@@ -298,7 +298,39 @@ layout and not in the PTY set, or the reverse. Both commands then run the same g
 resize does, so a split shrinks its neighbour's child and a close regrows the survivor's.
 
 Focus follows a split. Closing the focused pane moves focus to the first surviving pane in
-traversal order; directional focus and zoom are M2-02.
+traversal order — directional movement needs a pane to start from, and the closed one is gone.
+
+##### Directional focus and zoom
+
+As of M2-02, `Command::MoveFocus` and `Command::ToggleZoom` sit on top of that without disturbing
+it. Neither can fail in a way a user needs to hear about, so neither carries a reply channel.
+
+`Layout::neighbor` is **geometric, not structural**: it reads one layout pass and picks the pane a
+user actually sees in a direction, rather than whichever sibling the tree holds. A candidate must
+lie wholly on the named side and share some extent on the perpendicular axis — a pane diagonally
+across the tab is not what anyone means by *left*. Among those the nearest wins, ties going to the
+one nearest the origin's own leading edge and then to traversal order. Moving past the edge of the
+layout is not an error and does nothing: wrapping around would move attention somewhere nobody was
+looking. `Side` lives in `cloo-core` and is not a wire type — the client sends `Action::FocusLeft`
+and the server turns it into one, so adding a direction is never a protocol change.
+
+**Zoom is a view flag, not a shape.** `Layout::zoom` records a pane id and changes nothing else;
+`Layout::resolve` then answers with that pane alone, filling the area. Three properties follow, and
+they are the reason it is modelled this way:
+
+- **Ratios are preserved by construction.** Unzoom restores the previous picture exactly, because
+  no split and no ratio was ever touched.
+- **No PTY is restarted.** Zoom's only effect on a child is a `TIOCSWINSZ` from the same geometry
+  pass a resize runs, and a *hidden* pane's child is not even told that — it keeps the `winsize` it
+  had until it is visible again.
+- **Zoom follows focus.** A zoom always names the focused pane: moving focus while zoomed re-aims
+  it, since the alternative leaves a user typing into something they cannot see. A split unzooms,
+  or the pane it just created would be invisible; a spawn failure puts the zoom back along with the
+  tree, since a rollback restores everything or nothing. Closing the zoomed pane unzooms, and
+  closing any other leaves it alone.
+
+`SessionSnapshot::zoomed` carries the state out, and it reaches clients as `LayoutSnapshot::zoomed`
+on both the attach resync and any frame in which it changed. Chrome for it is M2-03.
 
 Reading N PTYs is a hand-rolled `select_all` over the unended panes rather than a dependency:
 `PtyReactor::pump` is cancel-safe, so the futures that lose are dropped and cost a wakeup, never a

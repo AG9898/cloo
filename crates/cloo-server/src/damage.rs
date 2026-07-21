@@ -80,6 +80,7 @@ impl DamageTracker {
             before.area != current.area
                 || before.panes != current.panes
                 || before.focused != current.focused
+                || before.zoomed != current.zoomed
         });
         let replace_all_rows = previous.is_none_or(|before| {
             before.focused != current.focused || before.pane.size != current.pane.size
@@ -121,7 +122,7 @@ impl DamageTracker {
                 tab,
                 panes: current.panes.clone(),
                 focused: Some(current.focused),
-                zoomed: None,
+                zoomed: current.zoomed,
             }));
         }
         if !rows.is_empty() {
@@ -182,6 +183,7 @@ mod tests {
                 size,
             }],
             focused: pane,
+            zoomed: None,
             pane: PaneSnapshot {
                 size,
                 rows: rows

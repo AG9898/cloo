@@ -13,6 +13,13 @@
 //! Nothing in this module performs I/O or knows a PTY exists. [`Layout::resolve`]
 //! is the single layout pass: it flattens the tree into one [`PaneRect`] per
 //! leaf, which is what the server hands to `TIOCSWINSZ` and puts on the wire.
+//!
+//! Two things sit on top of that tree without changing it. Directional focus —
+//! [`Layout::neighbor`] — is a pure query over one layout pass, so "the pane to
+//! the left" means what a user sees rather than wherever the tree happens to put
+//! a sibling. Zoom is a *view* flag, [`Layout::zoom`]: it makes [`Layout::resolve`]
+//! answer with the zoomed pane alone at the full area, and it touches no split
+//! and no ratio, which is what makes unzoom exact rather than approximate.
 
 use cloo_proto::{Direction, PaneId, PaneRect, Size};
 
@@ -24,6 +31,34 @@ use crate::error::LayoutError;
 /// client-side and costs nothing here — these are grid cells the child program
 /// actually gets.
 pub const MIN_PANE_SIZE: Size = Size::new(20, 3);
+
+/// One of the four directions focus moves in.
+///
+/// Not `cloo_proto::Direction`, which names a split *axis* and has two variants.
+/// Nor a wire type: the client sends `Action::FocusLeft` and the server turns it
+/// into one of these, so adding a direction is never a protocol change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Side {
+    /// Toward smaller columns.
+    Left,
+    /// Toward larger columns.
+    Right,
+    /// Toward smaller rows.
+    Up,
+    /// Toward larger rows.
+    Down,
+}
+
+impl Side {
+    /// The axis this side moves along.
+    #[must_use]
+    pub const fn axis(self) -> Direction {
+        match self {
+            Self::Left | Self::Right => Direction::Horizontal,
+            Self::Up | Self::Down => Direction::Vertical,
+        }
+    }
+}
 
 /// A node in the layout tree: either a pane or a split of two children.
 #[derive(Debug, Clone, PartialEq)]
@@ -60,9 +95,14 @@ impl Node {
 ///
 /// A layout always holds at least one pane — there is no empty layout, and
 /// closing the last pane is an error rather than a way to reach one.
+///
+/// Zoom rides along as a view flag rather than as a shape: the tree of a zoomed
+/// layout is the tree of the same layout unzoomed, cell for cell.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Layout {
     root: Node,
+    /// The pane shown alone at the full area, if any. Never part of the tree.
+    zoomed: Option<PaneId>,
 }
 
 impl Layout {
@@ -71,6 +111,7 @@ impl Layout {
     pub fn new(pane: PaneId) -> Self {
         Self {
             root: Node::Leaf(pane),
+            zoomed: None,
         }
     }
 
@@ -116,17 +157,115 @@ impl Layout {
     /// that shrank after the splits were made — panes are squeezed rather than
     /// dropped, down to a floor of one cell per axis. Rejection happens at
     /// [`Layout::split`] time; a resize must still produce a drawable answer.
+    ///
+    /// While a pane is [zoomed](Layout::zoom) this answers with that pane alone,
+    /// filling `area`. Everything else is hidden, not resized: a hidden pane's
+    /// child keeps the `winsize` it already had, which is why unzoom costs a
+    /// geometry pass and never a restart.
     #[must_use]
     pub fn resolve(&self, area: Size) -> Vec<PaneRect> {
+        if let Some(pane) = self.zoomed {
+            return vec![PaneRect {
+                pane,
+                x: 0,
+                y: 0,
+                size: area,
+            }];
+        }
+        self.tree_rects(area)
+    }
+
+    /// The resolved rectangle of a single pane as drawn, or `None` if it is not
+    /// visible. A pane hidden behind a zoom has no rectangle.
+    #[must_use]
+    pub fn rect_of(&self, pane: PaneId, area: Size) -> Option<PaneRect> {
+        self.resolve(area).into_iter().find(|r| r.pane == pane)
+    }
+
+    /// One layout pass over the tree, ignoring zoom.
+    ///
+    /// The geometry the panes *would* have, which is what a split checks against
+    /// and what directional focus reads. Private, because a caller who wanted
+    /// this when they meant [`Layout::resolve`] would be drawing hidden panes.
+    fn tree_rects(&self, area: Size) -> Vec<PaneRect> {
         let mut out = Vec::new();
         assign(&self.root, 0, 0, area, &mut out);
         out
     }
 
-    /// The resolved rectangle of a single pane, or `None` if it is not present.
+    /// The pane immediately `side` of `pane`, or `None` if there is none.
+    ///
+    /// Geometric, not structural: the answer comes from one layout pass, so it
+    /// is the pane a user sees in that direction rather than whichever sibling
+    /// the tree happens to hold. A candidate must lie wholly on that side and
+    /// share some extent on the perpendicular axis; among those, the nearest
+    /// wins, ties going to the one nearest the origin's own leading edge and
+    /// then to traversal order. That last tie-break is what makes the answer
+    /// deterministic, and it is why moving right and then left can land on a
+    /// different pane than it started from — a property tmux shares.
+    ///
+    /// Zoom is deliberately ignored. Focus is a property of the layout and zoom
+    /// is a property of the view, so moving focus while zoomed is meaningful;
+    /// what the view does with the new focus is the caller's policy.
     #[must_use]
-    pub fn rect_of(&self, pane: PaneId, area: Size) -> Option<PaneRect> {
-        self.resolve(area).into_iter().find(|r| r.pane == pane)
+    pub fn neighbor(&self, pane: PaneId, side: Side, area: Size) -> Option<PaneId> {
+        let rects = self.tree_rects(area);
+        let origin = *rects.iter().find(|r| r.pane == pane)?;
+        rects
+            .iter()
+            .filter(|r| r.pane != pane)
+            .filter_map(|r| {
+                distance(&origin, r, side).map(|d| (d, offset(&origin, r, side), r.pane))
+            })
+            .min_by_key(|&(distance, offset, _)| (distance, offset))
+            .map(|(_, _, pane)| pane)
+    }
+
+    /// The pane shown alone at the full area, if any.
+    #[must_use]
+    pub const fn zoomed(&self) -> Option<PaneId> {
+        self.zoomed
+    }
+
+    /// Shows `pane` alone at the full area.
+    ///
+    /// Idempotent, and free: no split is touched and no ratio is recomputed, so
+    /// [`Layout::unzoom`] restores the previous picture exactly rather than
+    /// approximately.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::UnknownPane`] if `pane` is not in the layout. The zoom
+    /// state is unchanged.
+    pub fn zoom(&mut self, pane: PaneId) -> Result<(), LayoutError> {
+        if !self.contains(pane) {
+            return Err(LayoutError::UnknownPane(pane));
+        }
+        self.zoomed = Some(pane);
+        Ok(())
+    }
+
+    /// Shows every pane again. Idempotent.
+    pub const fn unzoom(&mut self) {
+        self.zoomed = None;
+    }
+
+    /// Zooms `pane`, or unzooms if anything is zoomed already.
+    ///
+    /// Returns whether a pane is zoomed afterwards. Toggling off does not
+    /// require the zoomed pane to be the one named: a keybinding means "undo
+    /// the zoom", whichever pane it was on.
+    ///
+    /// # Errors
+    ///
+    /// As [`Layout::zoom`], and only when there was nothing to unzoom.
+    pub fn toggle_zoom(&mut self, pane: PaneId) -> Result<bool, LayoutError> {
+        if self.zoomed.is_some() {
+            self.unzoom();
+            return Ok(false);
+        }
+        self.zoom(pane)?;
+        Ok(true)
     }
 
     /// Splits `target` along `dir`, giving `ratio` of its area to `target` and
@@ -140,6 +279,11 @@ impl Layout {
     ///   `(0.0, 1.0)`.
     /// - [`LayoutError::TooSmall`] if either resulting pane would fall below
     ///   [`MIN_PANE_SIZE`]. The layout is unchanged in every error case.
+    ///
+    /// A successful split unzooms. The area it is checked against is the target
+    /// pane's real geometry, never the whole area a zoom lends it — accepting a
+    /// split at the zoomed size would produce panes that do not fit the moment
+    /// the zoom ends.
     pub fn split(
         &mut self,
         target: PaneId,
@@ -155,7 +299,9 @@ impl Layout {
             return Err(LayoutError::DuplicatePane(new_pane));
         }
         let rect = self
-            .rect_of(target, area)
+            .tree_rects(area)
+            .into_iter()
+            .find(|r| r.pane == target)
             .ok_or(LayoutError::UnknownPane(target))?;
 
         let (first, second) = halves(rect.size, dir, ratio);
@@ -169,6 +315,7 @@ impl Layout {
 
         let replaced = replace_leaf(&mut self.root, target, dir, ratio, new_pane);
         debug_assert!(replaced, "target was resolved, so it must be a leaf");
+        self.unzoom();
         Ok(())
     }
 
@@ -195,6 +342,9 @@ impl Layout {
     /// - [`LayoutError::UnknownPane`] if `pane` is not in the layout.
     /// - [`LayoutError::LastPane`] if it is the only pane. A tab with no panes
     ///   is closed by the caller, not represented as an empty layout.
+    ///
+    /// Closing the zoomed pane unzooms; closing any other leaves the zoom where
+    /// it was, since the pane it names is still there.
     pub fn close(&mut self, pane: PaneId) -> Result<(), LayoutError> {
         if let Node::Leaf(only) = self.root {
             return if only == pane {
@@ -204,6 +354,9 @@ impl Layout {
             };
         }
         if collapse(&mut self.root, pane) {
+            if self.zoomed == Some(pane) {
+                self.unzoom();
+            }
             Ok(())
         } else {
             Err(LayoutError::UnknownPane(pane))
@@ -276,6 +429,52 @@ fn halves(size: Size, dir: Direction, ratio: f32) -> (Size, Size) {
             (Size::new(size.cols, a), Size::new(size.cols, b))
         }
     }
+}
+
+/// The `(start, end)` of a rectangle on the axis `side` moves along, and on the
+/// axis it does not.
+fn spans(rect: &PaneRect, side: Side) -> ((u16, u16), (u16, u16)) {
+    let along = match side.axis() {
+        Direction::Horizontal => (rect.x, rect.x.saturating_add(rect.size.cols)),
+        Direction::Vertical => (rect.y, rect.y.saturating_add(rect.size.rows)),
+    };
+    let across = match side.axis() {
+        Direction::Horizontal => (rect.y, rect.y.saturating_add(rect.size.rows)),
+        Direction::Vertical => (rect.x, rect.x.saturating_add(rect.size.cols)),
+    };
+    (along, across)
+}
+
+/// How far `candidate` sits `side` of `origin`, or `None` if it does not.
+///
+/// `None` covers both "it is not on that side at all" and "it is, but shares no
+/// row or column with the origin" — a pane diagonally across the tab is not what
+/// a user means by *left*, and answering with one would make focus jump.
+fn distance(origin: &PaneRect, candidate: &PaneRect, side: Side) -> Option<u16> {
+    let (origin_along, origin_across) = spans(origin, side);
+    let (candidate_along, candidate_across) = spans(candidate, side);
+
+    // A half-open span touching the origin's edge overlaps nothing, so a zero
+    // extent on the perpendicular axis never matches. That is the same
+    // degenerate case `resolve` squeezes, and silence beats a wrong neighbor.
+    if origin_across.0 >= candidate_across.1 || candidate_across.0 >= origin_across.1 {
+        return None;
+    }
+
+    match side {
+        Side::Left | Side::Up => (candidate_along.1 <= origin_along.0)
+            .then(|| origin_along.0.saturating_sub(candidate_along.1)),
+        Side::Right | Side::Down => (candidate_along.0 >= origin_along.1)
+            .then(|| candidate_along.0.saturating_sub(origin_along.1)),
+    }
+}
+
+/// How far `candidate`'s leading edge is from `origin`'s on the perpendicular
+/// axis. The tie-break between two equally near neighbors.
+fn offset(origin: &PaneRect, candidate: &PaneRect, side: Side) -> u16 {
+    let (_, origin_across) = spans(origin, side);
+    let (_, candidate_across) = spans(candidate, side);
+    origin_across.0.abs_diff(candidate_across.0)
 }
 
 /// Walks the tree assigning each leaf a concrete rectangle.
@@ -853,5 +1052,290 @@ mod tests {
         let layout = build(&[(0, Direction::Horizontal, 1)]);
         assert_eq!(layout.rect_of(pane(1), AREA), Some(rect(1, 60, 0, 60, 40)));
         assert_eq!(layout.rect_of(pane(9), AREA), None);
+    }
+
+    // -- directional focus --------------------------------------------------
+
+    /// The quad every traversal case below is stated against:
+    ///
+    /// ```text
+    ///     0 | 1
+    ///     --+--
+    ///     2 | 3
+    /// ```
+    fn quad() -> Layout {
+        build(&[
+            (0, Direction::Horizontal, 1),
+            (0, Direction::Vertical, 2),
+            (1, Direction::Vertical, 3),
+        ])
+    }
+
+    #[test]
+    fn focus_moves_to_the_pane_a_user_sees_in_that_direction() {
+        struct Case {
+            from: u64,
+            side: Side,
+            expected: Option<u64>,
+        }
+
+        let cases = [
+            Case {
+                from: 0,
+                side: Side::Right,
+                expected: Some(1),
+            },
+            Case {
+                from: 0,
+                side: Side::Down,
+                expected: Some(2),
+            },
+            Case {
+                from: 0,
+                side: Side::Left,
+                expected: None,
+            },
+            Case {
+                from: 0,
+                side: Side::Up,
+                expected: None,
+            },
+            Case {
+                from: 3,
+                side: Side::Left,
+                expected: Some(2),
+            },
+            Case {
+                from: 3,
+                side: Side::Up,
+                expected: Some(1),
+            },
+            Case {
+                from: 3,
+                side: Side::Right,
+                expected: None,
+            },
+            Case {
+                from: 3,
+                side: Side::Down,
+                expected: None,
+            },
+        ];
+
+        let layout = quad();
+        for case in cases {
+            assert_eq!(
+                layout.neighbor(pane(case.from), case.side, AREA),
+                case.expected.map(pane),
+                "from {} going {:?}",
+                case.from,
+                case.side
+            );
+        }
+    }
+
+    /// The case a structural traversal gets wrong: pane 1's sibling in the tree
+    /// is the *subtree* holding 2 and 3, and only geometry says which of them is
+    /// actually below it.
+    #[test]
+    fn traversal_is_geometric_rather_than_structural() {
+        // 0 on the left; 1 above 2 above 3 on the right.
+        let layout = build(&[
+            (0, Direction::Horizontal, 1),
+            (1, Direction::Vertical, 2),
+            (2, Direction::Vertical, 3),
+        ]);
+        assert_eq!(layout.neighbor(pane(1), Side::Down, AREA), Some(pane(2)));
+        assert_eq!(layout.neighbor(pane(3), Side::Up, AREA), Some(pane(2)));
+        assert_eq!(
+            layout.neighbor(pane(2), Side::Left, AREA),
+            Some(pane(0)),
+            "the pane on the left spans all three, so every one of them reaches it"
+        );
+        assert_eq!(
+            layout.neighbor(pane(0), Side::Right, AREA),
+            Some(pane(1)),
+            "three panes are equally near; the one nearest the origin's own top \
+             edge wins"
+        );
+    }
+
+    #[test]
+    fn a_single_pane_has_no_neighbor_in_any_direction() {
+        let layout = Layout::new(pane(0));
+        for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+            assert_eq!(layout.neighbor(pane(0), side, AREA), None, "{side:?}");
+        }
+    }
+
+    #[test]
+    fn an_unknown_pane_has_no_neighbors() {
+        assert_eq!(quad().neighbor(pane(9), Side::Left, AREA), None);
+    }
+
+    #[test]
+    fn a_diagonal_pane_is_never_a_neighbor() {
+        // Pane 3 is diagonally across from pane 0, and shares neither a row nor
+        // a column with it. Going right must find 1, going down must find 2, and
+        // neither may find 3.
+        let layout = quad();
+        for side in [Side::Right, Side::Down] {
+            assert_ne!(
+                layout.neighbor(pane(0), side, AREA),
+                Some(pane(3)),
+                "{side:?} must not jump the diagonal"
+            );
+        }
+    }
+
+    #[test]
+    fn traversal_never_answers_with_the_pane_it_started_from() {
+        let layout = quad();
+        for from in [0, 1, 2, 3] {
+            for side in [Side::Left, Side::Right, Side::Up, Side::Down] {
+                assert_ne!(layout.neighbor(pane(from), side, AREA), Some(pane(from)));
+            }
+        }
+    }
+
+    #[test]
+    fn sides_name_the_axis_they_move_along() {
+        assert_eq!(Side::Left.axis(), Direction::Horizontal);
+        assert_eq!(Side::Right.axis(), Direction::Horizontal);
+        assert_eq!(Side::Up.axis(), Direction::Vertical);
+        assert_eq!(Side::Down.axis(), Direction::Vertical);
+    }
+
+    // -- zoom ---------------------------------------------------------------
+
+    #[test]
+    fn zoom_shows_one_pane_at_the_full_area() {
+        let mut layout = quad();
+        layout.zoom(pane(3)).expect("pane 3 is in the layout");
+        assert_eq!(layout.zoomed(), Some(pane(3)));
+        assert_eq!(layout.resolve(AREA), vec![rect(3, 0, 0, 120, 40)]);
+        assert_eq!(
+            layout.rect_of(pane(0), AREA),
+            None,
+            "a hidden pane has no rectangle to draw"
+        );
+        assert_eq!(
+            layout.panes().len(),
+            4,
+            "zoom hides panes from the view, never from the layout"
+        );
+    }
+
+    /// The property the whole feature rests on: zoom is a view flag, so undoing
+    /// it restores the tree — ratios included — rather than rebuilding it.
+    #[test]
+    fn zoom_and_unzoom_preserve_every_split_ratio() {
+        let mut layout = quad();
+        layout
+            .set_ratio(pane(0), Direction::Horizontal, 0.3)
+            .expect("pane 0 has a horizontal ancestor");
+        layout
+            .set_ratio(pane(3), Direction::Vertical, 0.8)
+            .expect("pane 3 has a vertical parent");
+        let before = layout.clone();
+        let geometry = layout.resolve(AREA);
+
+        for target in [0, 1, 2, 3] {
+            layout.zoom(pane(target)).expect("every pane is zoomable");
+            assert_ne!(layout.resolve(AREA), geometry, "zoom must change the view");
+            layout.unzoom();
+            assert_eq!(
+                layout, before,
+                "unzoom must restore the tree exactly, ratios included"
+            );
+            assert_eq!(layout.resolve(AREA), geometry);
+        }
+    }
+
+    #[test]
+    fn zoom_is_idempotent_and_unzoom_is_too() {
+        let mut layout = quad();
+        layout.zoom(pane(1)).expect("pane 1 exists");
+        let zoomed = layout.clone();
+        layout.zoom(pane(1)).expect("pane 1 exists");
+        assert_eq!(layout, zoomed);
+
+        layout.unzoom();
+        let plain = layout.clone();
+        layout.unzoom();
+        assert_eq!(layout, plain);
+    }
+
+    #[test]
+    fn toggling_zoom_off_does_not_care_which_pane_asked() {
+        let mut layout = quad();
+        assert!(
+            layout.toggle_zoom(pane(0)).expect("pane 0 exists"),
+            "the first toggle zooms"
+        );
+        assert_eq!(layout.zoomed(), Some(pane(0)));
+        assert!(
+            !layout.toggle_zoom(pane(3)).expect("pane 3 exists"),
+            "a toggle means undo the zoom, whichever pane it was on"
+        );
+        assert_eq!(layout.zoomed(), None);
+    }
+
+    #[test]
+    fn zooming_an_unknown_pane_is_refused_and_changes_nothing() {
+        let mut layout = quad();
+        let before = layout.clone();
+        assert_eq!(
+            layout.zoom(pane(9)).expect_err("pane 9 does not exist"),
+            LayoutError::UnknownPane(pane(9))
+        );
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn closing_the_zoomed_pane_unzooms_and_closing_another_does_not() {
+        let mut layout = quad();
+        layout.zoom(pane(3)).expect("pane 3 exists");
+        layout.close(pane(3)).expect("pane 3 is not the last one");
+        assert_eq!(layout.zoomed(), None, "the zoomed pane is gone");
+
+        let mut layout = quad();
+        layout.zoom(pane(3)).expect("pane 3 exists");
+        layout.close(pane(0)).expect("pane 0 is not the last one");
+        assert_eq!(
+            layout.zoomed(),
+            Some(pane(3)),
+            "closing some other pane leaves the zoom where it was"
+        );
+    }
+
+    #[test]
+    fn a_split_unzooms_and_is_measured_against_the_real_geometry() {
+        // Two 60-column panes; a zoom lends pane 0 all 120. Splitting it must be
+        // judged on the 60 it actually has.
+        let mut layout = build(&[(0, Direction::Horizontal, 1)]);
+        layout.zoom(pane(0)).expect("pane 0 exists");
+
+        let err = layout
+            .split_even(pane(0), Direction::Horizontal, pane(2), Size::new(60, 40))
+            .expect_err("30 columns is below the 20-column minimum twice over");
+        assert!(
+            matches!(err, LayoutError::TooSmall { .. }),
+            "unexpected error: {err:?}"
+        );
+        assert_eq!(
+            layout.zoomed(),
+            Some(pane(0)),
+            "a refused split changes nothing at all, zoom included"
+        );
+
+        layout
+            .split_even(pane(0), Direction::Horizontal, pane(2), AREA)
+            .expect("30 columns each fits at the full area");
+        assert_eq!(
+            layout.zoomed(),
+            None,
+            "a split that changed the shape must show it"
+        );
     }
 }

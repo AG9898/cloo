@@ -92,5 +92,11 @@ identity. Minimum pane dimensions are profile-configurable; a split that violate
 rejected. The user can disable dimming and motion, use the minimal status bar, and select a
 16-color-safe theme.
 
+Zoom exists as of M2-02 and is always a temporary, reversible view: the zoomed pane fills the tab
+and the rest are hidden, never closed or resized away. Because a hidden pane is still running and
+still accumulating output, the chrome must say so rather than let a zoom read as a single-pane
+session — the tab shows a zoom indicator, and the pane count stays visible. The state reaches the
+client as `LayoutSnapshot::zoomed`; rendering it is M2-03.
+
 See [`DECISIONS.md`](DECISIONS.md) RESOLVED-06 through RESOLVED-09 for the decisions behind this
 guide.

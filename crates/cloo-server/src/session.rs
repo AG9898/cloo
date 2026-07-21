@@ -32,6 +32,13 @@
 //! reactor — which kills and reaps its child — in the same turn that collapses
 //! its parent. There is no intermediate state in which a pane exists in one and
 //! not the other, because nothing else runs between them.
+//!
+//! Focus and zoom sit on top of that without disturbing it.
+//! [`Command::MoveFocus`] asks the layout which pane a user sees in a
+//! direction, and [`Command::ToggleZoom`] sets a view flag the layout tree
+//! never sees. Both then run the same geometry pass a resize does — which is
+//! the reason zoom cannot restart a PTY: the only thing it can do to a child is
+//! change its `winsize`, and a hidden pane's child is not even told that.
 
 use std::fmt;
 use std::future::Future;
@@ -40,7 +47,7 @@ use std::process::ExitStatus;
 use std::task::Poll;
 
 use cloo_core::error::LayoutError;
-use cloo_core::layout::Layout;
+use cloo_core::layout::{Layout, Side};
 use cloo_proto::{
     ClipboardTarget, Direction, GraphicsEffect, MouseButton, MouseEvent, MouseKind, MouseTracking,
     OuterTerminalEffect, PaneId, PaneModes, PaneRect, ProgressState, Size,
@@ -67,7 +74,7 @@ pub const EVEN_SPLIT: f32 = 0.5;
 /// Everything that mutates a session.
 ///
 /// Deliberately the whole vocabulary: if it is not here, it does not change
-/// session state. Directional focus and zoom join it in M2-02.
+/// session state.
 #[derive(Debug)]
 pub enum Command {
     /// Keyboard bytes for the focused pane's child, already encoded.
@@ -99,6 +106,15 @@ pub enum Command {
         /// Whether the pane was closed, or why it was not.
         reply: oneshot::Sender<Result<(), PaneError>>,
     },
+    /// Moves focus to the pane on one side of the focused one.
+    ///
+    /// No reply: there is nothing to refuse. An edge pane asked to move past
+    /// the edge simply stays where it is, because the alternative — wrapping
+    /// around to the far side — moves a user's attention somewhere they were
+    /// not looking.
+    MoveFocus(Side),
+    /// Shows the focused pane alone at the full area, or undoes that.
+    ToggleZoom,
     /// Asks for the current picture. The reply channel is how a reader gets
     /// state out without holding a reference to it.
     Snapshot(oneshot::Sender<SessionSnapshot>),
@@ -198,6 +214,9 @@ pub struct SessionSnapshot {
     pub panes: Vec<PaneRect>,
     /// The focused pane, which is the one [`pane`](Self::pane) describes.
     pub focused: PaneId,
+    /// The pane shown alone at the full area, if any. Always the focused pane
+    /// while it is set: zoom follows focus rather than pinning it.
+    pub zoomed: Option<PaneId>,
     /// The focused pane's contents.
     pub pane: PaneSnapshot,
     /// The input modes the focused pane's application has negotiated. A client
@@ -298,6 +317,31 @@ impl SessionHandle {
         let (reply, answer) = oneshot::channel();
         self.send(Command::Close { pane, reply }).await?;
         answer.await.map_err(|_| PaneError::Gone)?
+    }
+
+    /// Moves focus one pane in a direction, if there is a pane there.
+    ///
+    /// Asking to move past the edge of the layout is not an error and does
+    /// nothing. Ordering is the channel's: a [`snapshot`](Self::snapshot) sent
+    /// afterwards sees the move.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn move_focus(&self, side: Side) -> Result<(), SessionGone> {
+        self.send(Command::MoveFocus(side)).await
+    }
+
+    /// Shows the focused pane alone at the full area, or undoes that.
+    ///
+    /// No PTY is created or destroyed either way, and no split ratio changes —
+    /// zoom is a view over the same tree.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn toggle_zoom(&self) -> Result<(), SessionGone> {
+        self.send(Command::ToggleZoom).await
     }
 
     /// Asks for the current picture.
@@ -515,6 +559,14 @@ impl Session {
                 let _ = reply.send(outcome);
                 self.settle(changed)
             }
+            Command::MoveFocus(side) => {
+                let changed = self.move_focus(side);
+                self.settle(changed)
+            }
+            Command::ToggleZoom => {
+                self.toggle_zoom();
+                self.settle(true)
+            }
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
                 Ok(())
@@ -534,6 +586,10 @@ impl Session {
     fn split(&mut self, dir: Direction, ratio: f32) -> Result<PaneId, PaneError> {
         let target = self.focused;
         let new_pane = self.ids.peek();
+        // A successful split unzooms — the new pane is what the user is about
+        // to type into, and it cannot be seen behind a zoom. A failed one must
+        // put the zoom back, since a rollback restores everything or nothing.
+        let zoomed = self.layout.zoomed();
         self.layout
             .split(target, dir, ratio, new_pane, self.area)
             .map_err(PaneError::Layout)?;
@@ -551,6 +607,9 @@ impl Session {
                 // Roll back. Collapsing a split whose second child is a fresh
                 // leaf promotes the first one, which restores the tree exactly.
                 let _ = self.layout.close(new_pane);
+                if let Some(pane) = zoomed {
+                    let _ = self.layout.zoom(pane);
+                }
                 Err(PaneError::Spawn(err))
             }
         }
@@ -584,13 +643,56 @@ impl Session {
         self.layout.close(pane).map_err(PaneError::Layout)?;
         self.panes.retain(|held| held.id != pane);
         if self.focused == pane {
-            // Directional focus is M2-02. Until then the survivor first in
-            // traversal order is the least surprising answer.
+            // The survivor first in traversal order. Directional focus needs a
+            // pane to start from, and the one that was just closed is gone.
             if let Some(next) = self.layout.panes().first() {
                 self.focused = *next;
             }
+            // `Layout::close` already unzoomed if the closed pane was the
+            // zoomed one; this keeps the invariant that a zoom always names the
+            // focused pane when focus moved for any other reason.
+            self.follow_zoom();
         }
         Ok(())
+    }
+
+    /// Moves focus one pane in a direction, reporting whether it moved.
+    ///
+    /// Geometric, from [`Layout::neighbor`]: "left" means the pane a user sees
+    /// to the left, not whichever sibling the tree holds. Asking to move past
+    /// the edge is not an error and does nothing — wrapping around would move
+    /// attention somewhere nobody was looking.
+    fn move_focus(&mut self, side: Side) -> bool {
+        let Some(next) = self.layout.neighbor(self.focused, side, self.area) else {
+            return false;
+        };
+        if next == self.focused {
+            return false;
+        }
+        self.focused = next;
+        // Zoom follows focus. The alternative — moving focus to a pane the zoom
+        // is hiding — leaves a user typing into something they cannot see.
+        self.follow_zoom();
+        true
+    }
+
+    /// Shows the focused pane alone at the full area, or undoes that.
+    ///
+    /// No PTY is spawned, killed, or restarted: the geometry pass that follows
+    /// resizes the zoomed pane's child to the full area and leaves every hidden
+    /// pane's child exactly as it was, holding the winsize it last had. Unzoom
+    /// gives all of them the ratios that were there the whole time.
+    fn toggle_zoom(&mut self) {
+        // Unreachable failure: focus always names a pane in the layout.
+        let _ = self.layout.toggle_zoom(self.focused);
+    }
+
+    /// Retargets an active zoom at the focused pane. A no-op when nothing is
+    /// zoomed, which is why moving focus in an ordinary layout costs nothing.
+    fn follow_zoom(&mut self) {
+        if self.layout.zoomed().is_some() {
+            let _ = self.layout.zoom(self.focused);
+        }
     }
 
     /// Runs the geometry pass and repaints after a split or close changed the
@@ -650,6 +752,7 @@ impl Session {
             area: self.area,
             panes: self.layout.resolve(self.area),
             focused: self.focused,
+            zoomed: self.layout.zoomed(),
             pane: self
                 .focused_pane()
                 .map_or_else(PaneSnapshot::default, |pane| pane.reactor.snapshot()),

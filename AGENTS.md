@@ -115,7 +115,8 @@ The constraints that matter most day to day:
   cross the wire as what happened, never as bytes for a child — how they are encoded depends on
   modes the *child* set, which only the emulator sees. A mouse event the chrome owns never reaches
   the wire at all.
-- **Layout stores ratios, not cell counts** — that is what survives a terminal resize.
+- **Layout stores ratios, not cell counts** — that is what survives a terminal resize. Zoom is a
+  view flag over that same tree, never a reshaping of it.
 - **Damage is coalesced and render rate capped (~60fps).** Architectural, not a later
   optimization. A large `cat` is the classic multiplexer killer.
 - **The wire handshake is versioned.** Bump it on every protocol change.
@@ -288,7 +289,8 @@ table-driven layout tree coverage as of M0-03, plus the emulator-to-wire cell co
 M0-07. `cloo-term` has grid coverage — SGR, alternate screen, cursor, resize, scrollback — as of
 M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a scripted `sh -c`
 child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01, handshake
-coverage in `src/conn.rs` as of M1-02, and split/close coverage in `tests/session.rs` as of M2-01. `cloo-client` has byte-exact renderer coverage and raw-mode
+coverage in `src/conn.rs` as of M1-02, and split/close coverage in `tests/session.rs` as of M2-01,
+extended at M2-02 with directional focus and a zoom cycle proved not to restart a child. `cloo-client` has byte-exact renderer coverage and raw-mode
 restore coverage — normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as
 of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02 and `SIGWINCH` watch
 coverage in `src/resize.rs` as of M1-03, and capability negotiation and fallback coverage in
@@ -573,6 +575,27 @@ receiver created first could replay an older layout or row after the snapshot an
 (that event is used for configuration reload). `cloo-term` normalizes it to `ResetTitle`; its
 effect listener also drops backend reply events, so no PTY reply or arbitrary control string can
 be mistaken for an outer-terminal effect.
+
+### 2026-07-21 — Zoom is a flag, and that is what makes unzoom exact
+Modelling zoom as a reshaping of the tree — promote the pane, remember the old tree, restore it —
+gets the ratios back only if the copy is perfect. Storing a `zoomed: Option<PaneId>` that only
+`Layout::resolve` reads makes "unzoom preserves every ratio" true by construction rather than by
+test, and it is also why zoom cannot restart a PTY: the only thing it can do to a child is a
+`TIOCSWINSZ` from the ordinary geometry pass, and a hidden pane's child is not even sent that.
+
+### 2026-07-21 — Directional focus must be geometric, not structural
+Walking the tree for "the pane to the left" answers with a *subtree* as often as a pane, and picks
+the wrong leaf whenever the sibling is itself a split. `Layout::neighbor` reads one layout pass
+instead and requires the candidate to overlap on the perpendicular axis, which is what stops focus
+from jumping diagonally. The test that catches a structural implementation is the asymmetric tree —
+a quad passes either way.
+
+### 2026-07-21 — Prove "no restart" with a pid the child prints once
+Nothing above the PTY layer exposes a per-pane child id, so a test that a zoom did not respawn
+anything has no direct handle to assert on. A child that runs `echo pid=$$` once at startup and
+reports on demand afterwards leaves that line on its grid: comparing it before and after the zoom
+cycle fails the moment a pane is torn down and spawned again, since both the pid and the cleared
+grid would change.
 
 ### 2026-07-21 — The terminal effect queue must stay `Send` and suppressible
 The session's rotating PTY pump boxes `Send` futures, so an emulator listener cannot use

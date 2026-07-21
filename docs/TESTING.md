@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 200 unit tests
-across six crates, 56 integration tests, and eight doctests. This section grows as M1 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 224 unit tests
+across six crates, 60 integration tests, and eight doctests. This section grows as M2 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -55,6 +55,17 @@ Covered today in `cloo-core`, all as unit tests:
   unknown panes, duplicate panes, and closing the last pane.
 - A shrunken area squeezing panes to a one-cell floor rather than dropping them, and a zero-size
   area resolving without a panic.
+- Directional focus over a quad and over an asymmetric tree, table-driven: every side from every
+  pane, an edge answering `None` rather than wrapping, a diagonal pane never being a neighbour, an
+  unknown pane having none, traversal never answering with the pane it started from, and the case a
+  structural walk gets wrong — a pane whose tree sibling is a subtree, where only geometry says
+  which leaf is actually below it.
+- Zoom as a view flag: one pane resolving at the full area with the rest hidden but still in the
+  layout, zoom and unzoom leaving the tree equal ratio for ratio at every pane in turn, both
+  operations idempotent, a toggle undoing a zoom whichever pane asked, an unknown pane refused with
+  nothing changed, closing the zoomed pane unzooming while closing another does not, and a split
+  unzooming after being measured against the pane's real geometry rather than the area the zoom
+  lent it.
 - ID allocators being monotonic, non-reusing, resumable, and saturating at `u64::MAX`.
 - The emulator-cell to wire-cell conversion in `grid.rs`: every colour form and rendition flag
   crossing intact, an invisible cursor becoming "nothing to draw" rather than a hidden shape, and
@@ -128,6 +139,19 @@ assertion is on the *last* non-blank line for the same reason.
   still resizable afterwards.
 - A resize divided between both panes, each child driven from the same layout pass the client's
   rectangles came from.
+
+M2-02 adds focus and zoom to that file, against the same on-demand reporters:
+
+- Focus moving left and right across an **uneven** split, so the size a child reports names which
+  pane received the keystroke; an edge pane staying put rather than wrapping.
+- Zoom giving the focused pane the whole area, its child hearing about it, and unzoom restoring the
+  split at the ratio it always had.
+- Neither direction restarting a child. That child prints `pid=$$` once at startup and reports on
+  demand after, so a pane whose PTY had been torn down and respawned would answer with a different
+  pid on a freshly cleared grid. Comparing the line before and after the zoom cycle is the whole
+  assertion, and it is the only direct evidence available — the layout knows nothing about
+  processes and the session exposes no per-pane child id.
+- A split while zoomed unzooming, so the pane it created is visible.
 
 Both geometry halves were confirmed non-vacuous the way `AGENTS.md` prescribes: breaking the
 post-split layout pass fails three of these tests, and the survivor's regrowth has no second path
@@ -354,14 +378,14 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, including typed outer-terminal effects and unavailable graphics, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
-| `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, and closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on |
+| `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on — geometric directional focus in every direction from every pane, and zoom as a view flag that preserves every ratio |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, typed title/clipboard effects with backend replies suppressed, and one fixture per negotiated input mode — set, read back, and cleared |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
-| `crates/cloo-server/tests/session.rs` | Session task | Split and close against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, and a resize divided between every pane |
+| `crates/cloo-server/tests/session.rs` | Session task | Split, close, focus, and zoom against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, a resize divided between every pane, focus moving across an uneven split with input following it, and a zoom cycle that fills the area, restores the ratio, and leaves both children's pids unchanged |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |

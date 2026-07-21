@@ -151,7 +151,7 @@ pub fn session_snapshot(tab: TabId, snapshot: &SessionSnapshot) -> Vec<ServerMes
             tab,
             panes: snapshot.panes.clone(),
             focused: Some(pane),
-            zoomed: None,
+            zoomed: snapshot.zoomed,
         }),
         ServerMessage::Damage {
             pane,
@@ -212,6 +212,7 @@ mod tests {
                 size: Size::new(2, 1),
             }],
             focused: pane,
+            zoomed: None,
             pane: PaneSnapshot {
                 size: Size::new(2, 1),
                 rows: vec![RowUpdate {
