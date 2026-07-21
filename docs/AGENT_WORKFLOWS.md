@@ -22,6 +22,20 @@ not require a vendor account, call a cloud API, or make cloo depend on a vendor 
 The user controls the pane name, task label, and working directory at launch. cloo does not guess
 a task from process names or transcript text.
 
+As of M2-04 the model is `cloo-core::profile::Profile` — `id`, `command`, `default_name`,
+`min_size`, and an optional `adapter`. The three built-ins are values of that struct rather than
+code paths, so adding a harness is configuration and never a patch; the test that would fail if a
+vendor ever earned a special case asserts `codex` is reconstructible field for field. A profile's
+command is an argv (`LoginShell` or `Program { program, args }`), never a shell string. No built-in
+names an adapter: shipping one wired up by default would make an advisory signal look
+authoritative.
+
+Validation is pure and vendor-free. It checks that an ID is in a narrow alphabet, that a default
+name is printable and bounded, that a command carries no control character or NUL, and that a
+recommended minimum is not below cloo's layout floor — a recommendation a split could never honor
+would silently mean nothing. It never asks the filesystem whether the program exists; that is a
+launch-time failure the server reports.
+
 ## Attention Contract
 
 The server stores a state and its provenance. Generic sources are child lifecycle, terminal bell,
@@ -32,6 +46,16 @@ reliable signal remains `unknown`, not falsely marked working.
 The attention queue is a navigation surface, not a notification firehose. It lists the newest
 unacknowledged event per pane, coalesces repeats, and supports keyboard focus/acknowledge. The
 always-on status bar displays a compact count.
+
+M2-04 models this as `cloo-core::pane::Attention` — a state, its source, and whether the user has
+acknowledged it. `AttentionSource` is `None`, `Bell`, `Lifecycle`, `User`, or `Adapter(AdapterId)`,
+and only the adapter variant reports `is_advisory()`, which is what lets the chrome attribute a
+claim instead of presenting it as fact. Only `needs_input`, `ready`, and `failed` enter the queue:
+progress and absence of news are not things a human is being asked to act on. Coalescing lives in
+`Attention::set` — acknowledgment is cleared when the state *changes* and kept when the same state
+is re-reported, so a harness announcing `needs_input` every second cannot refill a queue the user
+just cleared. Pane identity (`PaneName`, `TaskLabel`, `WorkingDir`) is validated user text, never
+inferred.
 
 ## Compatibility Tiers
 

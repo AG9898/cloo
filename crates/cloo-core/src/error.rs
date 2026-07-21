@@ -1,4 +1,4 @@
-//! The crate-local error type for session model operations.
+//! The crate-local error types for session model operations.
 
 use core::fmt;
 
@@ -72,6 +72,74 @@ impl fmt::Display for LayoutError {
 
 impl std::error::Error for LayoutError {}
 
+/// Everything pane metadata or a profile definition can be rejected for.
+///
+/// Like [`LayoutError`], every variant is a *rejection* of a proposed value:
+/// nothing is partially applied and the caller keeps whatever it had. Checking
+/// is entirely pure — `cloo-core` performs no I/O, so a working directory is
+/// validated as a *path*, never by asking the filesystem whether it exists, and
+/// a command template is validated as a *shape*, never by looking for the
+/// executable on `PATH`. Both of those are the launching server's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MetadataError {
+    /// A name, label, or profile ID with nothing in it. An empty pane name would
+    /// render as a blank header rather than as an identity.
+    Empty(&'static str),
+    /// A value longer than the field allows.
+    TooLong {
+        /// Which field was rejected.
+        field: &'static str,
+        /// How many characters were supplied.
+        len: usize,
+        /// The most the field accepts.
+        max: usize,
+    },
+    /// A character that cannot appear in this field. Control characters are
+    /// rejected everywhere: they are what would let a pane name repaint the
+    /// chrome that draws it.
+    BadChar {
+        /// Which field was rejected.
+        field: &'static str,
+        /// The offending character.
+        ch: char,
+    },
+    /// A working directory that is not absolute. A relative path means something
+    /// different to the daemon than it did to whoever typed it.
+    RelativeCwd(String),
+    /// A profile's recommended minimum is below the size cloo will ever create,
+    /// so it could never be honored.
+    MinSizeTooSmall {
+        /// The recommendation that was rejected.
+        recommended: Size,
+        /// The floor it fell below.
+        floor: Size,
+    },
+}
+
+impl fmt::Display for MetadataError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty(field) => write!(f, "{field} cannot be empty"),
+            Self::TooLong { field, len, max } => {
+                write!(f, "{field} is {len} characters; the maximum is {max}")
+            }
+            Self::BadChar { field, ch } => {
+                write!(f, "{field} cannot contain {ch:?}")
+            }
+            Self::RelativeCwd(path) => {
+                write!(f, "working directory {path:?} must be an absolute path")
+            }
+            Self::MinSizeTooSmall { recommended, floor } => write!(
+                f,
+                "recommended minimum {}x{} is below cloo's {}x{} floor",
+                recommended.cols, recommended.rows, floor.cols, floor.rows
+            ),
+        }
+    }
+}
+
+impl std::error::Error for MetadataError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +171,30 @@ mod tests {
         }
         .to_string();
         assert!(msg.contains("vertical"), "{msg}");
+    }
+
+    #[test]
+    fn metadata_errors_name_the_field_they_refused() {
+        let msg = MetadataError::TooLong {
+            field: "pane name",
+            len: 99,
+            max: 64,
+        }
+        .to_string();
+        assert!(msg.contains("pane name"), "{msg}");
+        assert!(msg.contains("64"), "{msg}");
+    }
+
+    #[test]
+    fn a_rejected_character_is_shown_escaped() {
+        // A bare control character in the message would do to the terminal
+        // exactly what rejecting it prevents.
+        let msg = MetadataError::BadChar {
+            field: "task label",
+            ch: '\u{1b}',
+        }
+        .to_string();
+        assert!(!msg.contains('\u{1b}'), "{msg}");
+        assert!(msg.contains("task label"), "{msg}");
     }
 }

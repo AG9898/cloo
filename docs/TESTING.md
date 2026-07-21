@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 224 unit tests
-across six crates, 60 integration tests, and eight doctests. This section grows as M2 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 281 unit tests
+across six crates, 60 integration tests, and eleven doctests. This section grows as M2 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -67,6 +67,19 @@ Covered today in `cloo-core`, all as unit tests:
   unzooming after being measured against the pane's real geometry rather than the area the zoom
   lent it.
 - ID allocators being monotonic, non-reusing, resumable, and saturating at `u64::MAX`.
+- Profiles as data: the three built-ins in launcher order, each validating, none carrying an
+  adapter, and `codex` reconstructible field for field from the public constructor — the assertion
+  that fails the moment a vendor earns a special case. Plus every validation rejection: a profile
+  ID outside its alphabet, an over-long or unprintable default name, a command with a NUL or a
+  control character, and a recommended minimum below the layout floor.
+- Pane metadata: names and labels rejecting control characters and bounded by *characters* rather
+  than bytes, a working directory refusing a relative path (including an unexpanded `~`) and a NUL
+  while validating a path that certainly does not exist — the assertion that pins validation to
+  being pure.
+- Attention as state plus provenance: an uninstrumented pane defaulting to `unknown` with no
+  source, only `needs_input`/`ready`/`failed` entering the queue, acknowledgment cleared by a
+  changed state but *kept* when the same state is re-reported, and only an adapter source reporting
+  as advisory.
 - The emulator-cell to wire-cell conversion in `grid.rs`: every colour form and rendition flag
   crossing intact, an invisible cursor becoming "nothing to draw" rather than a hidden shape, and
   `HollowBlock` degrading to a block. One assertion compares the two crates' attribute bit values
@@ -362,8 +375,9 @@ tested in `src/local.rs`.
 
 The intended shape for the rest, in the order it becomes testable:
 
-- **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
-  pure and testable without a terminal.
+- **`cloo-core`** — profile and pane-metadata models joined layout at M2-04; keymap resolution and
+  config parsing are still to come. Like layout, all of them are pure and testable without a
+  terminal.
 - **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01, handshake and attach
   coverage at M1-02, the session task at M1-03, and split and close at M2-01. Slower; keep the
   count deliberate.
@@ -402,7 +416,9 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on — geometric directional focus in every direction from every pane, and zoom as a view flag that preserves every ratio |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
-| `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
+| `crates/cloo-core/src/profile.rs` | Profiles | The three built-ins as data — launcher order, each validating, none carrying an adapter, `codex` reconstructible field for field — plus every shape rejection: ID alphabet and bound, default name, command NUL or control character, and a recommendation below the layout floor |
+| `crates/cloo-core/src/pane.rs` | Pane metadata | Validated names, labels, and an absolute-only working directory (a path that does not exist still validating, which is what pins validation to being pure), and attention as state plus provenance: `unknown` by default, only three states queueing, acknowledgment cleared on change but kept on a repeat, only an adapter advisory |
+| `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused, and `MetadataError` naming its field and escaping a rejected control character rather than printing it |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, typed title/clipboard effects with backend replies suppressed, and one fixture per negotiated input mode — set, read back, and cleared |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |

@@ -583,6 +583,29 @@ that a harness is working, so the default for an uninstrumented child is `unknow
 scraping a Codex or Claude transcript is prohibited: it is brittle, locale/theme dependent, and
 would make the rendered grid a second source of truth.
 
+M2-04 lands the model for both halves in `cloo-core`, as pure data with no I/O and no vendor
+dependency:
+
+- `cloo-core::profile` — `Profile { id, command, default_name, min_size, adapter }`. The built-in
+  `generic`, `codex`, and `claude` are three *values* of that struct, not three code paths, and a
+  configured local profile is built by the same constructor and checked by the same
+  `Profile::validate`. `ProfileCommand` is `LoginShell` or an explicit `Program { program, args }`
+  — an argv, never a shell string, so no metadata can be word-split on the way to `execvp`.
+  Resolving `$SHELL` and finding the executable on `PATH` are launch-time answers the server owns.
+- `cloo-core::pane` — `PaneMeta { profile, name, task, cwd, min_size, attention }`, with
+  `PaneName`, `TaskLabel`, and `WorkingDir` as validated newtypes. A working directory must be
+  absolute (a relative one means the *daemon's* cwd, not the user's) and control characters are
+  rejected in every user-supplied field.
+- `Attention { state, source, acknowledged }` keeps `AttentionState` — the six states of
+  [STYLEGUIDE.md](STYLEGUIDE.md#agent-workspace-states) — beside an `AttentionSource` of `None`,
+  `Bell`, `Lifecycle`, `User`, or `Adapter(AdapterId)`. Only the adapter variant is advisory.
+  `Attention::set` clears acknowledgment when the state *changes* and keeps it when the same state
+  is re-reported, which is the queue's coalescing rule stated once rather than in every source.
+
+Validation is entirely pure: it checks shape, never the filesystem or `PATH`. Rejections are
+`MetadataError`, the sibling of `LayoutError` — nothing is partially applied. M2-05 loads profiles
+from configuration, M2-06 launches from them, and M2-07 puts attention state in the session actor.
+
 ---
 
 ## Concurrency

@@ -311,7 +311,10 @@ coverage in `cloo-client/src/renderer.rs`, and attach integration coverage that 
 burst frames, lagged-client recovery, and concurrent-client fan-out. M2-03 adds pane-chrome
 coverage in `cloo-client/src/chrome.rs` — focus and attention as independent signals, the fixed
 width-degradation ladder at every width, and dimming with its no-dim fallback — plus positioned
-chrome spans in `cloo-client/src/renderer.rs`.
+chrome spans in `cloo-client/src/renderer.rs`. M2-04 adds the profile and pane-metadata models in
+`cloo-core/src/profile.rs` and `cloo-core/src/pane.rs` — the built-ins proved to be data, pure
+validation of names, labels, and an absolute-only cwd, and attention as state plus provenance with
+its coalescing rule.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -612,6 +615,28 @@ effects never change the grid or authoritative session state.
 palette looks like, so `chrome::dim_cell` falls back to the `DIM` attribute rather than inventing a
 colour. Blending is what keeps a dimmed amber `needs input` distinguishable from a dimmed grey
 `quiet` — the test that catches a lazy "just set DIM everywhere" implementation.
+
+### 2026-07-21 — Prove "the built-ins are data" by reconstructing one
+"No vendor special case" is a property no ordinary test asserts, because a profile with a hidden
+branch still validates and still launches. `profile.rs` instead rebuilds `codex` from the public
+constructor and compares it field for field to `Profile::codex()` — that fails the moment a
+built-in gains anything a user's configured profile could not also express, which is the actual
+rule. `min_size` is validated against `MIN_PANE_SIZE` for the same reason: a recommendation a split
+could never honor would silently mean nothing.
+
+### 2026-07-21 — Coalesce attention in the model, not in each source
+`Attention::set` clears acknowledgment only when the state actually *changes*, so a harness
+re-announcing `needs_input` every second cannot refill a queue the user just cleared. Putting that
+rule in one place is what stops the bell path, the lifecycle path, and the adapter path from each
+inventing their own; provenance is kept beside the state rather than folded into it, so an
+adapter's advisory claim can be attributed instead of presented as fact.
+
+### 2026-07-21 — A pure validator is proved by the path that does not exist
+`cloo-core` performs no I/O, so `WorkingDir::new` checks a path's *shape* and nothing else — the
+test that keeps it honest validates `/definitely/not/here/at/all` successfully. Existence and
+`PATH` resolution are launch-time answers the server owns, and a directory that exists at
+validation time may be gone by launch anyway. Same reasoning bars `~`, which is the shell's and
+unexpanded means a directory literally named `~`.
 
 ### 2026-07-21 — Fix the header's degradation order, or two panes disagree on one screen
 A header that decides per situation which field to drop renders differently in two equally narrow
