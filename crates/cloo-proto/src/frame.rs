@@ -20,7 +20,7 @@ use crate::error::ProtoError;
 /// **Bump this on every change to a type in [`crate::message`].** A stale client
 /// attached to a rebuilt server is a routine occurrence, and a clean "version
 /// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 2;
+pub const PROTOCOL_VERSION: u16 = 3;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -125,8 +125,9 @@ mod tests {
     use super::*;
     use crate::ids::{PaneId, SessionId, TabId};
     use crate::message::{
-        Action, Cell, CellAttrs, ClientMessage, Color, CursorShape, LayoutSnapshot, MouseButton,
-        MouseEvent, MouseKind, MouseMods, MouseTracking, PaneModes, PaneRect, Point, RowUpdate,
+        Action, Cell, CellAttrs, ClientMessage, ClipboardTarget, Color, CursorShape,
+        GraphicsEffect, LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods,
+        MouseTracking, OuterTerminalEffect, PaneModes, PaneRect, Point, ProgressState, RowUpdate,
         ServerMessage, Size, TabSummary, TermCaps,
     };
 
@@ -303,6 +304,13 @@ mod tests {
                     extended_keys: true,
                 },
             },
+            ServerMessage::Effect {
+                pane: PaneId::new(4),
+                effect: OuterTerminalEffect::ClipboardStore {
+                    target: ClipboardTarget::Clipboard,
+                    text: "copied text".into(),
+                },
+            },
             ServerMessage::Layout(LayoutSnapshot {
                 tab: TabId::new(1),
                 panes: vec![PaneRect {
@@ -359,6 +367,34 @@ mod tests {
         round_trip(&PaneId::new(11));
         round_trip(&TabId::new(11));
         round_trip(&SessionId::new(11));
+    }
+
+    #[test]
+    fn every_outer_terminal_effect_round_trips_without_raw_passthrough() {
+        let effects = [
+            OuterTerminalEffect::SetTitle("agent task".into()),
+            OuterTerminalEffect::ResetTitle,
+            OuterTerminalEffect::ClipboardStore {
+                target: ClipboardTarget::PrimarySelection,
+                text: "copied text".into(),
+            },
+            OuterTerminalEffect::Hyperlink {
+                uri: "https://example.invalid/task".into(),
+            },
+            OuterTerminalEffect::Notification {
+                title: "needs input".into(),
+                body: "review the diff".into(),
+            },
+            OuterTerminalEffect::Progress(ProgressState::Clear),
+            OuterTerminalEffect::Progress(ProgressState::Indeterminate),
+            OuterTerminalEffect::Progress(ProgressState::Value(75)),
+            OuterTerminalEffect::Progress(ProgressState::Error),
+            OuterTerminalEffect::Graphics(GraphicsEffect::Unavailable),
+        ];
+
+        for effect in effects {
+            round_trip(&effect);
+        }
     }
 
     #[test]

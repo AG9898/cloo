@@ -5,20 +5,27 @@
 //! plus the exact version pin in the root manifest, is the whole mitigation for
 //! upstream API churn. See `docs/DECISIONS.md` RESOLVED-02.
 
-use alacritty_terminal::event::VoidListener;
+use std::sync::mpsc::{self, Receiver, SyncSender};
+
+use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::term::{ClipboardType, Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color as VteColor, CursorShape as VteCursorShape, NamedColor, Processor,
 };
 
 use crate::cell::{Cell, CellAttrs, Color, CursorShape, CursorState, TermSize};
+use crate::effects::{ClipboardTarget, OuterTerminalEffect};
 use crate::modes::{MouseTracking, PaneModes};
 
 /// Default scrollback depth, in lines, for a newly created pane.
 pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+/// Client-local effects are suppressible, so their queue never waits on a
+/// session actor or a renderer.
+const EFFECT_QUEUE_CAPACITY: usize = 64;
 
 /// A single pane's terminal emulator: bytes in, cells out.
 ///
@@ -26,9 +33,10 @@ pub const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 /// synchronous and does no I/O of its own; the PTY reactor reads bytes and
 /// hands them to [`feed`](Self::feed).
 pub struct Emulator {
-    term: Term<VoidListener>,
+    term: Term<EffectListener>,
     parser: Processor,
     size: TermSize,
+    effects: Receiver<OuterTerminalEffect>,
 }
 
 /// Bridges a [`TermSize`] to the backend's dimensions trait.
@@ -63,6 +71,52 @@ impl Dimensions for Dims {
     }
 }
 
+/// Collects only the terminal effects cloo has an explicit type for.
+///
+/// The bounded, non-blocking channel keeps the `Emulator` `Send`, which the
+/// session's multi-PTY pump requires. Effects are always safe to suppress, so
+/// a full queue drops only a client-local request. Backend events that request
+/// a PTY reply or carry arbitrary terminal output are intentionally ignored.
+#[derive(Clone)]
+struct EffectListener {
+    sender: SyncSender<OuterTerminalEffect>,
+}
+
+impl EventListener for EffectListener {
+    fn send_event(&self, event: Event) {
+        let effect = match event {
+            // OSC 0/1/2 with an empty payload is the conventional title reset.
+            // The backend reports it as `Title("")`, while its separate reset
+            // event is used when configuration is reloaded.
+            Event::Title(title) if title.is_empty() => Some(OuterTerminalEffect::ResetTitle),
+            Event::Title(title) => Some(OuterTerminalEffect::SetTitle(title)),
+            Event::ResetTitle => Some(OuterTerminalEffect::ResetTitle),
+            Event::ClipboardStore(ClipboardType::Clipboard, text) => {
+                Some(OuterTerminalEffect::ClipboardStore {
+                    target: ClipboardTarget::Clipboard,
+                    text,
+                })
+            }
+            Event::ClipboardStore(ClipboardType::Selection, text) => {
+                Some(OuterTerminalEffect::ClipboardStore {
+                    target: ClipboardTarget::PrimarySelection,
+                    text,
+                })
+            }
+            // In particular, `PtyWrite`, `ClipboardLoad`, and `ColorRequest`
+            // can contain backend-produced control strings. They have no typed
+            // cloo effect, so forwarding them is impossible at this boundary.
+            _ => None,
+        };
+
+        if let Some(effect) = effect {
+            // Suppression is a safe fallback for effects, unlike grid damage
+            // or a lifecycle event, so a full bounded queue needs no await.
+            let _ = self.sender.try_send(effect);
+        }
+    }
+}
+
 impl Emulator {
     /// Creates an emulator over a grid of `size` with `scrollback` lines of
     /// history retained above the viewport.
@@ -77,10 +131,13 @@ impl Emulator {
             kitty_keyboard: true,
             ..Config::default()
         };
+        let (sender, effects) = mpsc::sync_channel(EFFECT_QUEUE_CAPACITY);
+        let listener = EffectListener { sender };
         Self {
-            term: Term::new(config, &Dims::from(size), VoidListener),
+            term: Term::new(config, &Dims::from(size), listener),
             parser: Processor::new(),
             size,
+            effects,
         }
     }
 
@@ -98,6 +155,16 @@ impl Emulator {
     /// problem to absorb, not the caller's to handle.
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// Drains typed outer-terminal effects observed since the last call.
+    ///
+    /// The returned values are intent, not raw terminal bytes. The server and
+    /// client policy layers decide whether a capable attached terminal may
+    /// apply any of them; ignored backend events never appear here.
+    #[must_use]
+    pub fn drain_effects(&mut self) -> Vec<OuterTerminalEffect> {
+        self.effects.try_iter().collect()
     }
 
     /// The current grid size.
@@ -336,6 +403,7 @@ fn convert_cursor_shape(shape: VteCursorShape) -> CursorShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::effects::{GraphicsEffect, ProgressState};
     use crate::error::TermError;
 
     fn size(cols: u16, rows: u16) -> TermSize {
@@ -737,6 +805,82 @@ mod tests {
         assert!(
             !modes.focus_events && !modes.sgr_mouse && modes.mouse == MouseTracking::Off,
             "one mode must not imply another, got {modes:?}"
+        );
+    }
+
+    // -- outer-terminal effects --------------------------------------------
+
+    #[test]
+    fn allowlisted_outer_terminal_effects_are_typed_and_drained_once() {
+        let mut term = emulator(20, 3);
+        term.feed(b"\x1b]2;agent task\x07");
+        term.feed(b"\x1b]52;c;Y2xpcGJvYXJk\x07");
+        term.feed(b"\x1b]52;p;cHJpbWFyeQ==\x07");
+        term.feed(b"\x1b]2;\x07");
+
+        assert_eq!(
+            term.drain_effects(),
+            vec![
+                OuterTerminalEffect::SetTitle("agent task".into()),
+                OuterTerminalEffect::ClipboardStore {
+                    target: ClipboardTarget::Clipboard,
+                    text: "clipboard".into(),
+                },
+                OuterTerminalEffect::ClipboardStore {
+                    target: ClipboardTarget::PrimarySelection,
+                    text: "primary".into(),
+                },
+                OuterTerminalEffect::ResetTitle,
+            ]
+        );
+        assert!(
+            term.drain_effects().is_empty(),
+            "effects must be drained once"
+        );
+    }
+
+    #[test]
+    fn backend_reply_events_cannot_become_raw_outer_terminal_effects() {
+        let mut term = emulator(20, 3);
+
+        // Device attributes asks the backend to write a reply to the PTY. It
+        // must never turn into an effect for the user's terminal.
+        term.feed(b"\x1b[c");
+        assert!(term.drain_effects().is_empty());
+
+        // Graphics are deliberately representable only as unavailable, never
+        // as an opaque DCS/OSC payload that a renderer could forward.
+        let unavailable = OuterTerminalEffect::Graphics(GraphicsEffect::Unavailable);
+        assert!(matches!(
+            unavailable,
+            OuterTerminalEffect::Graphics(GraphicsEffect::Unavailable)
+        ));
+        let complete = OuterTerminalEffect::Progress(ProgressState::Value(100));
+        assert!(matches!(
+            complete,
+            OuterTerminalEffect::Progress(ProgressState::Value(100))
+        ));
+    }
+
+    #[test]
+    fn a_full_effect_queue_suppresses_without_blocking_the_emulator() {
+        let mut term = emulator(20, 3);
+        for title in 0..=EFFECT_QUEUE_CAPACITY {
+            term.feed(format!("\x1b]2;task {title}\x07").as_bytes());
+        }
+
+        let effects = term.drain_effects();
+        assert_eq!(effects.len(), EFFECT_QUEUE_CAPACITY);
+        assert_eq!(
+            effects.first(),
+            Some(&OuterTerminalEffect::SetTitle("task 0".into()))
+        );
+        assert_eq!(
+            effects.last(),
+            Some(&OuterTerminalEffect::SetTitle(format!(
+                "task {}",
+                EFFECT_QUEUE_CAPACITY - 1
+            )))
         );
     }
 }

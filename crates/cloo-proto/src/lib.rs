@@ -34,8 +34,9 @@ pub use frame::{
 };
 pub use ids::{ClientId, PaneId, SessionId, TabId};
 pub use message::{
-    Action, Cell, CellAttrs, ClientMessage, Color, CursorShape, Direction, LayoutSnapshot,
-    MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, PaneModes, PaneRect, Point,
-    RowUpdate, ServerMessage, Size, TabSummary, TermCaps,
+    Action, Cell, CellAttrs, ClientMessage, ClipboardTarget, Color, CursorShape, Direction,
+    GraphicsEffect, LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
+    OuterTerminalEffect, PaneModes, PaneRect, Point, ProgressState, RowUpdate, ServerMessage, Size,
+    TabSummary, TermCaps,
 };
 pub use stream::{FrameStream, StreamError};

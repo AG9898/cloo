@@ -142,8 +142,10 @@ crates/
   Never emit a rendition as a delta from whatever the previous frame left behind.
 - Never emit a sequence for a capability the client did not report. Pick the documented fallback
   instead — a `Color::Rgb` without `truecolor` downsamples to the 256-colour palette.
-- Outer-terminal effects use typed, capability-gated renderer APIs. Do not forward arbitrary
-  OSC/DCS bytes from a pane to the user's terminal.
+- Outer-terminal effects use typed, capability-gated renderer APIs. The effect vocabulary names
+  title, clipboard, hyperlink, notification, progress, and explicitly unavailable graphics; it
+  has no raw OSC, DCS, or graphics-payload variant. Every change to that wire type bumps the
+  handshake version. Do not forward arbitrary control bytes from a pane to the user's terminal.
 - Pane attention changes come from explicit commands, lifecycle events, bells, or opt-in adapters.
   Never infer agent state by matching text in a rendered grid or transcript.
 

@@ -567,3 +567,15 @@ attributes, a keyboard-mode report) is dropped — see DECISIONS.md OPEN-02.
 The daemon is the only broadcaster, so it can capture a snapshot and create a new `broadcast`
 receiver without an await between them; the receiver then starts strictly after the snapshot. A
 receiver created first could replay an older layout or row after the snapshot and undo the resync.
+
+### 2026-07-21 — Empty OSC titles are reset effects in the wrapper
+`alacritty_terminal` reports an empty OSC 0/1/2 title as `Event::Title("")`, not `ResetTitle`
+(that event is used for configuration reload). `cloo-term` normalizes it to `ResetTitle`; its
+effect listener also drops backend reply events, so no PTY reply or arbitrary control string can
+be mistaken for an outer-terminal effect.
+
+### 2026-07-21 — The terminal effect queue must stay `Send` and suppressible
+The session's rotating PTY pump boxes `Send` futures, so an emulator listener cannot use
+`Rc<RefCell>` even though the session actor is the sole logical owner. `cloo-term` uses a bounded
+non-blocking channel instead; a full queue drops a typed client-local effect, which is safe because
+effects never change the grid or authoritative session state.

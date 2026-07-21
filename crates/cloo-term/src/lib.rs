@@ -26,6 +26,8 @@
 //!   without depending on them.
 //! - [`modes`] — the input modes the child application has negotiated, which is
 //!   what decides how an input event is encoded for it.
+//! - [`effects`] — typed, allowlisted outer-terminal effects observed from pane
+//!   output; raw control-string passthrough is intentionally absent.
 //! - [`error`] — the crate-local [`TermError`].
 //!
 //! `cloo-term` has no intra-workspace dependencies, by design. It sits at the
@@ -35,11 +37,13 @@
 #![forbid(unsafe_code)]
 
 pub mod cell;
+pub mod effects;
 pub mod emulator;
 pub mod error;
 pub mod modes;
 
 pub use cell::{Cell, CellAttrs, Color, CursorShape, CursorState, TermSize};
+pub use effects::{ClipboardTarget, GraphicsEffect, OuterTerminalEffect, ProgressState};
 pub use emulator::{DEFAULT_SCROLLBACK_LINES, Emulator};
 pub use error::TermError;
 pub use modes::{MouseTracking, PaneModes};

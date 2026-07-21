@@ -62,6 +62,13 @@ client cannot establish it without a terminal query, so both ends stay on the le
 the mismatch case is [DECISIONS.md](DECISIONS.md) OPEN-02. See
 [ARCHITECTURE.md](ARCHITECTURE.md#input-routing).
 
+M1-08 gives negotiated outer-terminal features a typed wire vocabulary before any client is
+allowed to render one. The emulator recognizes title and OSC 52 clipboard-store requests, while
+the vocabulary also names hyperlinks, notifications, progress, and `Graphics(Unavailable)` with
+no raw OSC, DCS, or graphics-payload escape hatch. M1-09 is the policy and application half: until
+then these values stay inside the server boundary, so a harness cannot alter the outer terminal by
+emitting a control string.
+
 Claude Code documents that tmux needs extended keys and passthrough for some of its terminal
 features; cloo's required and negotiated tiers cover the equivalent responsibilities. Codex
 documents that its terminal pets need graphics support and are unavailable inside tmux and Zellij;

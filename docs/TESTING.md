@@ -71,10 +71,12 @@ Covered today in `cloo-proto`, all as unit tests:
   error rather than a panic.
 - Handshake version match and mismatch, including that the mismatch error names both versions
   and tells the user to reattach — the acceptance criterion, asserted on the rendered string.
+- Every allowlisted outer-terminal effect, including unavailable graphics, round-tripping without
+  any raw OSC/DCS payload type, and the `ServerMessage::Effect` envelope carrying one by pane.
 
 Covered today in `cloo-term`, all as unit tests, all by feeding known byte sequences and
-asserting grid state. This is the seam where an `alacritty_terminal` upgrade will break things,
-so this coverage is what makes the pinned dependency safe to bump:
+asserting grid or typed-effect state. This is the seam where an `alacritty_terminal` upgrade will
+break things, so this coverage is what makes the pinned dependency safe to bump:
 
 - Every SGR rendition flag, and named, indexed, and RGB colour. A role name (default foreground
   or background) staying `Color::Default` rather than collapsing to a palette index, since the
@@ -90,6 +92,8 @@ so this coverage is what makes the pinned dependency safe to bump:
   nothing, scrolling clamping at both ends, and the cursor reporting itself invisible once
   scrolled out of the viewport.
 - Cursor position under output and absolute positioning, DECTCEM visibility, and DECSCUSR shape.
+- OSC title and OSC 52 clipboard-store sequences turning into typed queued effects, an empty title
+  normalizing to a reset, and a backend device-attribute reply producing no outer-terminal effect.
 - Zero grid dimensions rejected at `TermSize::new` with the offending dimensions named.
 
 Covered today in `cloo-server`, as integration tests in `tests/pty.rs` driving a real
@@ -340,14 +344,14 @@ compatibility beyond the deterministic fixture suite is verified through the man
 
 | File | Domain | What It Covers |
 |---|---|---|
-| `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
+| `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, including typed outer-terminal effects and unavailable graphics, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, and closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
-| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, and one fixture per negotiated input mode — set, read back, and cleared |
+| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, typed title/clipboard effects with backend replies suppressed, and one fixture per negotiated input mode — set, read back, and cleared |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 | `crates/cloo-server/tests/session.rs` | Session task | Split and close against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, and a resize divided between every pane |

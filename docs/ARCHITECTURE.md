@@ -122,6 +122,16 @@ the `cloo-proto` shapes without depending on them, because `cloo-term` sits at t
 dependency graph next to `cloo-proto` and depends on nothing in the workspace. `cloo-core` owns
 the conversion; the `CellAttrs` bit layouts match so it stays a field copy.
 
+`Emulator::drain_effects` is the analogous boundary for pane requests aimed at the outer terminal.
+M1-08 replaced the backend's `VoidListener` with a bounded, non-blocking typed queue: it
+recognizes title changes and OSC 52 clipboard stores, but drops backend replies, a full queue, and
+every event cloo has no allowlisted type for. `OuterTerminalEffect` deliberately offers intent
+such as title, clipboard, hyperlink, notification, and progress changes, plus
+`Graphics(Unavailable)`; it contains no raw OSC, DCS, or graphics payload. `cloo-proto` mirrors
+that vocabulary in `ServerMessage::Effect { pane, effect }` and the handshake is v3 as a result.
+M1-09 will map and fan out these queued values through the server and apply per-client policy; no
+drained effect changes session state or reaches a terminal yet.
+
 ### Server
 
 Owns all PTYs, grids, scrollback, and layout state. Fans damage out to every attached client.
@@ -552,7 +562,7 @@ Server → Client:  Hello { protocol_version, session, tabs, size }
                   Refused { reason }
                   Damage { pane, rows: Vec<RowUpdate> }
                   CursorMoved { pane, pos, shape, visible }
-                  Modes { pane, modes: PaneModes }
+                  Modes { pane, modes: PaneModes }  Effect { pane, effect }
                   Layout(LayoutSnapshot)  Bell(pane)  Tabs(Vec<TabSummary>)
                   Detached  Exit(code)
 ```
@@ -630,10 +640,13 @@ into, and the routing built on them, are [Input routing](#input-routing) as of M
 
 Some child programs emit sequences intended for the *outer* terminal: notifications, titles,
 clipboard writes, hyperlinks, or graphics. These are not raw bytes to relay around the grid.
-cloo parses them into narrowly typed, versioned effects and each client applies only effects its
-capabilities and local policy permit. Effects must be safe to suppress and must never alter
-authoritative session state. Arbitrary OSC/DCS passthrough is forbidden because clients can differ
-and because it can bypass cloo chrome, damage accounting, and terminal-state restoration.
+M1-08 parses backend title and OSC 52 store events into narrowly typed, versioned effects and
+models the remaining allowlisted requests as title reset, hyperlink, notification, progress, and
+explicitly unavailable graphics. Its type model has no raw OSC/DCS or graphics-payload variant.
+M1-09 will make each client apply only effects its capabilities and local policy permit. Effects
+must be safe to suppress and must never alter authoritative session state; arbitrary passthrough
+is forbidden because clients can differ and because it can bypass cloo chrome, damage accounting,
+and terminal-state restoration.
 
 Inline graphics are an optional enhancement, never a compatibility requirement. If a terminal or
 intermediate multiplexer cannot support graphics, the pane remains usable and cloo exposes no
