@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 135 unit tests
-across six crates, 36 integration tests, and seven doctests. This section grows as M1 lands.
+**Every crate in the workspace, including the binary.** The workspace run is 142 unit tests
+across six crates, 39 integration tests, and eight doctests. This section grows as M1 lands.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -158,6 +158,28 @@ bounded by a timeout — never by sleeping:
 - Attaching where nothing is listening, and where a `SIGKILL`ed daemon left a socket file behind,
   both reporting "no cloo daemon is listening".
 
+Resize is covered there too, as of M1-03, and it is the one case where a single assertion would
+be worthless. A resize is two things — the grid reflows and the child is told through
+`TIOCSWINSZ` — and a test that checked only one would pass with the other missing. So both halves
+are asserted from the same client:
+
+- The **grid** half, by waiting for a `Damage` frame whose rows are the new width. Only a
+  reflowed emulator produces those.
+- The **PTY** half, by scripting the child to run `stty size` on demand and asserting on what it
+  prints. Nothing but a `TIOCSWINSZ` on that pty's master can change that answer.
+
+Both were confirmed non-vacuous by breaking each half of `PtyReactor::resize` in turn and watching
+the test fail. A degenerate resize — zero rows, which real terminals report mid-drag — has its own
+test asserting the child is still alive and still at its old geometry.
+
+The `SIGWINCH` end of the same path is covered from `crates/cloo/tests/cli.rs`, because the signal
+has to be delivered to a *process*: the test resizes the outer pseudoterminal, sends the real
+binary a `SIGWINCH`, and asserts the inner child's `stty size` reports the new geometry. That is
+the whole chain — signal, `TIOCGWINSZ`, resize command, layout pass, grid, `TIOCSWINSZ` — in one
+assertion. `read_until` polls with the time actually remaining rather than reading blindly, so a
+terminal that goes quiet (exactly what a broken resize looks like) fails at the timeout instead of
+hanging the suite.
+
 Covered today in `cloo-client`. The renderer is a pure function into a byte buffer, so every
 frame is asserted against an exact expected string rather than eyeballed — all unit tests:
 
@@ -229,11 +251,13 @@ The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — keymap resolution and config parsing still to come. Like layout, both are
   pure and testable without a terminal.
-- **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01. Handshake and attach
-  coverage arrives at M1-02 and the session task at M1-03. Slower; keep the count deliberate.
+- **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01, handshake and attach
+  coverage at M1-02, and the session task at M1-03. Slower; keep the count deliberate.
 - **`cloo-client`** — full-grid rendering and raw-mode restoration landed at M0-06, and the
   signal restore path joined them from the binary's own tests once M0-07 gave it a child process
-  to signal. Incremental diffing against previous frames arrives with damage coalescing at M1-04.
+  to signal. `SIGWINCH` went the same way at M1-03, for the same reason: a library test that
+  signals itself signals the test runner. Incremental diffing against previous frames arrives
+  with damage coalescing at M1-04.
 
 ### Agent-harness compatibility
 
@@ -270,16 +294,18 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
-| `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, and the snapshot batch ordered geometry-first |
+| `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch ordered geometry-first, and the session's layout pass carried through rather than recomputed |
+| `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, and a handle whose task is gone reporting it rather than hanging |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Pure only: the frame-rate cap and the session's fixed IDs |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | Capability detection from `TERM`/`COLORTERM` and the degenerate-`winsize` fallback |
+| `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
 | `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, and a pipe refused |
 | `crates/cloo/src/local.rs` | Binary | The `$SHELL` fallback and the frame-rate cap |
-| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, and signal-path terminal restore |
-| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and a real client over a real socket: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, and no daemon listening |
+| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, and a `SIGWINCH` resizing the pane all the way down to the child's own pty |
+| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and a real client over a real socket: hello and snapshot, detach leaving the child alive and its state intact, a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, and a degenerate resize changing nothing |
 
 ---
 

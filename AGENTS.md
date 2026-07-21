@@ -285,13 +285,15 @@ M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a sc
 child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01 and handshake
 coverage in `src/conn.rs` as of M1-02. `cloo-client` has byte-exact renderer coverage and raw-mode
 restore coverage — normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as
-of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02. `cloo-proto` gained
-framed-transport coverage in `src/stream.rs` over a duplex pipe in the same task. The binary has
-CLI and one-pane smoke coverage in `crates/cloo/tests/cli.rs`, run over a pseudoterminal, as of
-M0-07, and end-to-end attach/detach coverage in `crates/cloo/tests/attach.rs` as of M1-02 — that
-one lives in the binary crate because it needs both halves of the wire and `cloo-server` may never
-name `cloo-client`. Keymap resolution and config parsing are the next things that must get
-coverage as they land.
+of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02 and `SIGWINCH` watch
+coverage in `src/resize.rs` as of M1-03. `cloo-proto` gained framed-transport coverage in
+`src/stream.rs` over a duplex pipe in M1-02. The binary has CLI and one-pane smoke coverage in
+`crates/cloo/tests/cli.rs`, run over a pseudoterminal, as of M0-07 — including the `SIGWINCH`
+chain end to end as of M1-03 — and end-to-end attach/detach coverage in
+`crates/cloo/tests/attach.rs` as of M1-02, extended at M1-03 with a resize asserted on *both*
+halves: the grid reflow and the child's own `stty size`. That file lives in the binary crate
+because it needs both halves of the wire and `cloo-server` may never name `cloo-client`. Keymap
+resolution and config parsing are the next things that must get coverage as they land.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -457,6 +459,29 @@ The property "detach leaves the child running" is not only about not killing the
 that reads the PTY only while a client is connected loses every byte written in between, and a
 reattaching client finds a stale grid. `Daemon::wait_for_client` therefore selects over `accept`
 *and* `pump`, and the reattach test asserts on text the child wrote before anyone connected.
+
+### 2026-07-21 — A resize test that checks one half passes with the other missing
+A resize is two operations — the grid reflows and the child hears about it through `TIOCSWINSZ` —
+so asserting only on the wire's row width, or only on the child's `stty size`, leaves half the
+feature untested. `crates/cloo/tests/attach.rs` asserts both from one client, and each half was
+confirmed non-vacuous by breaking the corresponding line of `PtyReactor::resize` and watching it
+fail. Do the same to any resize assertion you add.
+
+### 2026-07-21 — Signal and input race in a pty test unless the assertion is order-free
+A test that sends `SIGWINCH` and then a keystroke, expecting the child to report the *new* size,
+depends on cloo's `select!` picking the resize branch first — it passes alone and fails under a
+loaded parallel run. Have the child report on a loop (`while :; do stty size; sleep 0.1; done`)
+so no ordering matters. Relatedly, `read_until` in `crates/cloo/tests/cli.rs` now polls with the
+time remaining: a blocking read on a pty that goes quiet ignores the deadline entirely and turns
+a clean 20-second failure into a hung suite.
+
+### 2026-07-21 — An actor handle must be the only way in, including for reads
+`Daemon` used to hold the `PtyReactor` and call `snapshot()` on it directly; the session task
+would have been a second path to the same state rather than the only one. It now holds a
+`SessionHandle` — a sender and nothing else — and asks for snapshots over the channel like
+everything else, which is what makes "no `Mutex` on session state" mean something. `SessionEvent`
+splits by kind for the same reason: `Output` is a level and coalesces on a depth-one channel,
+while `Exited` carries information a reader cannot recover and must be sent, not dropped.
 
 ### 2026-07-20 — DESIGN.md was migrated into docs/
 The root `DESIGN.md` was the original planning document and has been folded into

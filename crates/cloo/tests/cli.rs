@@ -67,6 +67,11 @@ fn open_tty() -> Tty {
 /// Reads from `fd` until `needle` appears or [`TIMEOUT`] elapses.
 ///
 /// Returns everything read, so a failing assertion can show what did arrive.
+///
+/// Readiness is polled with the time actually remaining rather than read
+/// blindly: a terminal that simply goes quiet — which is precisely what a
+/// broken resize or a dropped frame looks like — would otherwise block a
+/// blocking read forever and turn a clean failure into a hung suite.
 fn read_until(fd: &OwnedFd, needle: &str) -> Result<String, String> {
     let mut file = unsafe {
         // SAFETY: the descriptor is owned by the caller and outlives the
@@ -77,6 +82,9 @@ fn read_until(fd: &OwnedFd, needle: &str) -> Result<String, String> {
     let mut seen = Vec::new();
     let mut buf = [0_u8; 4096];
     while Instant::now() < deadline {
+        if !readable_before(fd, deadline) {
+            break;
+        }
         match file.read(&mut buf) {
             // EOF, or the child closed the pty: nothing more will arrive.
             Ok(0) => break,
@@ -91,6 +99,37 @@ fn read_until(fd: &OwnedFd, needle: &str) -> Result<String, String> {
         }
     }
     Err(String::from_utf8_lossy(&seen).into_owned())
+}
+
+/// Waits for `fd` to have something to read, giving up at `deadline`.
+///
+/// An error is reported as readable so the caller's `read` produces the real
+/// reason — an `EIO` from a closed slave is an ordinary end of output here.
+fn readable_before(fd: &OwnedFd, deadline: Instant) -> bool {
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(remaining.as_millis()).unwrap_or(i32::MAX);
+    // SAFETY: the pointer refers to one live `pollfd`, and the count matches.
+    let rc = unsafe { libc::poll(&raw mut poll, 1, millis) };
+    rc != 0
+}
+
+/// Changes `fd`'s terminal geometry, as a window manager would.
+fn set_winsize(fd: &OwnedFd, cols: u16, rows: u16) {
+    let winsize = libc::winsize {
+        ws_row: rows,
+        ws_col: cols,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `fd` is a live descriptor and `TIOCSWINSZ` reads exactly one
+    // `winsize` through the pointer, which refers to a live local.
+    let rc = unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ as _, &winsize) };
+    assert_ne!(rc, -1, "TIOCSWINSZ failed");
 }
 
 /// Is `fd`'s terminal in raw mode?
@@ -226,6 +265,39 @@ fn typed_input_reaches_the_child_and_the_terminal_is_handed_back() {
         !is_raw(&tty.slave),
         "cloo left the terminal raw on the way out"
     );
+}
+
+#[test]
+fn a_sigwinch_resizes_the_pane_all_the_way_down_to_the_child() {
+    let tty = open_tty();
+    // The child asks the *inner* pty what shape it is, which nothing but a
+    // `TIOCSWINSZ` on that pty's master can have changed. It reports on a loop
+    // rather than on demand so the assertion does not depend on a keystroke and
+    // a signal being handled in a particular order.
+    let mut child = spawn_on(
+        &tty,
+        &["sh", "-c", "while :; do stty size; sleep 0.1; done"],
+    );
+
+    // "rows cols" at the size the pane started at, which is also proof the
+    // child is up and reporting.
+    read_until(&tty.master, "24 80")
+        .unwrap_or_else(|seen| panic!("the child never reported its size; saw:\n{seen}"));
+
+    // The outer terminal changes shape, then says so. A window manager does
+    // both; here the geometry has to land first, since the signal carries no
+    // size and cloo answers it with a `TIOCGWINSZ`.
+    set_winsize(&tty.master, 100, 40);
+    // SAFETY: `child` has not been reaped, so its pid is still its own.
+    let rc = unsafe { libc::kill(child.id() as libc::pid_t, libc::SIGWINCH) };
+    assert_ne!(rc, -1, "SIGWINCH could not be delivered");
+
+    let seen = read_until(&tty.master, "40 100")
+        .unwrap_or_else(|seen| panic!("the resize never reached the child's pty; saw:\n{seen}"));
+    assert!(seen.contains("40 100"));
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]

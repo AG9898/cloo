@@ -222,6 +222,96 @@ async fn a_client_that_vanishes_does_not_take_the_session_with_it() {
         .expect("the daemon must not fail");
 }
 
+/// Reads frames until a damage update carries a row exactly `cols` cells wide.
+///
+/// This is the *grid* half of a resize: the emulator reflowed, so the rows the
+/// server puts on the wire are the new width.
+async fn await_row_width(attached: &mut Attached<UnixStream>, cols: usize) {
+    let found = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Damage { rows, .. }) => {
+                    if rows.iter().any(|row| row.cells.len() == cols) {
+                        return true;
+                    }
+                }
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no row ever came back {cols} cells wide"));
+    assert!(found, "the server closed before resizing the grid");
+}
+
+#[tokio::test]
+async fn a_resize_reaches_both_the_grid_and_the_child() {
+    let dir = TempDir::new("resize");
+    let socket = dir.socket();
+    // `stty size` asks the *pty* what shape it is, which is the only thing that
+    // can answer for `TIOCSWINSZ` having been issued. It runs after the read so
+    // the test controls when the answer is produced.
+    let (_pid, daemon) = spawn_daemon(&socket, "printf 'ready\\n'; read _; stty size");
+
+    let mut attached = client(&socket).await;
+    assert_eq!(attached.size(), Size::new(80, 24));
+    await_text(&mut attached, "ready").await;
+
+    attached
+        .send_resize(Size::new(100, 40))
+        .await
+        .expect("the resize must reach the daemon");
+
+    // Half one: the session task reflowed the grid, so rows are 100 wide.
+    await_row_width(&mut attached, 100).await;
+
+    // Half two: the child's own view of its terminal changed, which only
+    // `TIOCSWINSZ` on the pty master can have done. `stty size` prints
+    // "rows cols".
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must reach the child");
+    await_text(&mut attached, "40 100").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn a_degenerate_resize_leaves_the_session_alone() {
+    let dir = TempDir::new("degenerate");
+    let socket = dir.socket();
+    let (pid, daemon) = spawn_daemon(&socket, "printf 'ready\\n'; read _; stty size");
+
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+
+    // A terminal reporting zero rows mid-drag must not become a zero-height pty
+    // and a correspondingly confused shell.
+    attached
+        .send_resize(Size::new(100, 0))
+        .await
+        .expect("the resize must reach the daemon");
+    assert!(alive(pid), "a degenerate resize killed the child");
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must reach the child");
+    await_text(&mut attached, "24 80").await;
+
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
 #[tokio::test]
 async fn a_stale_client_is_refused_with_an_actionable_reason() {
     let dir = TempDir::new("mismatch");

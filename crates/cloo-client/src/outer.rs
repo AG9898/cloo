@@ -57,6 +57,21 @@ pub fn window_size(fd: BorrowedFd<'_>) -> io::Result<Size> {
     Ok(size_from_winsize(winsize.ws_col, winsize.ws_row))
 }
 
+/// The outer terminal's geometry right now.
+///
+/// Stdout is asked first because that is where frames are written, and stdin is
+/// the fallback for the case where output was redirected but the session is
+/// still interactive. A terminal that reports nothing gets [`FALLBACK_SIZE`]
+/// rather than an error: refusing to draw over an unanswered `ioctl` would be a
+/// worse failure than drawing at a conventional 80x24.
+#[must_use]
+pub fn current_size() -> Size {
+    use std::os::fd::AsFd;
+    window_size(io::stdout().as_fd())
+        .or_else(|_| window_size(io::stdin().as_fd()))
+        .unwrap_or(FALLBACK_SIZE)
+}
+
 /// Substitutes [`FALLBACK_SIZE`] for a degenerate report.
 fn size_from_winsize(cols: u16, rows: u16) -> Size {
     if cols == 0 || rows == 0 {

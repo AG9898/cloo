@@ -1,32 +1,38 @@
 //! The one-pane local smoke path.
 //!
-//! This is the M0 end of the roadmap: a single PTY, a single grid, and the
-//! renderer, wired together **in-process**. There is no socket, no daemon, and
-//! no detach — the child dies with the client, and that is the whole point of
-//! the milestone. The socket lifecycle lands in M1-01 and turns this loop into
-//! the daemon's session task with a client on the other end of a wire.
+//! This is the M0 end of the roadmap with M1's session task underneath it: a
+//! single PTY, a single grid, and the renderer, wired together **in-process**.
+//! There is no socket, no daemon, and no detach — the child dies with the
+//! client, and that is the whole point of the milestone.
 //!
 //! The three-way split is already the real one, though, and nothing here
 //! crosses it: `cloo-server` owns the PTY and the authoritative grid,
 //! `cloo-client` owns raw mode and every escape sequence, and this module only
-//! moves snapshots one way and bytes the other.
+//! moves snapshots one way and commands the other. In particular it holds a
+//! [`SessionHandle`] rather than a reactor, so the local path mutates session
+//! state through exactly the same `mpsc<Command>` the daemon does — one
+//! serialized owner, no second path, no `Mutex`.
 //!
-//! Two ordering rules keep the terminal safe. Raw mode is entered *before* the
-//! child is spawned, so a failure that is going to happen happens while the
-//! terminal is still untouched; and the render is driven by a frame timer
+//! Three ordering rules keep the terminal safe and honest. Raw mode is entered
+//! *before* the child is spawned, so a failure that is going to happen happens
+//! while the terminal is still untouched; the render is driven by a frame timer
 //! rather than by PTY readiness, so a fast producer coalesces into at most one
-//! frame per tick instead of one per read.
+//! frame per tick instead of one per read; and a `SIGWINCH` becomes a resize
+//! *command*, so the grid reflow and the child's `TIOCSWINSZ` happen in one
+//! place in one order.
 
 use std::fmt;
 use std::io::{self, Read, Write};
-use std::os::fd::AsFd;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use cloo_client::outer::{detect_caps, window_size};
+use cloo_client::outer::{current_size, detect_caps};
 use cloo_client::raw_mode::{RawMode, RawModeError};
 use cloo_client::renderer::{Cursor, Grid, RenderError, Renderer};
-use cloo_server::pty::{PaneSnapshot, PtyConfig, PtyError, PtyReactor, Pump};
+use cloo_client::resize::ResizeWatch;
+use cloo_proto::PaneId;
+use cloo_server::pty::{PtyConfig, PtyError};
+use cloo_server::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot};
 
 /// The render tick, capping the frame rate at roughly 60fps.
 ///
@@ -37,6 +43,9 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Size of a single stdin read on the input thread.
 const INPUT_BUF_LEN: usize = 1024;
+
+/// The one pane a local session has.
+const THE_PANE: PaneId = PaneId::new(1);
 
 /// Everything the local session can refuse to do.
 #[derive(Debug)]
@@ -51,6 +60,10 @@ pub enum LocalError {
     Output(io::Error),
     /// The Tokio runtime could not be built.
     Runtime(io::Error),
+    /// A `SIGWINCH` handler could not be installed.
+    Signal(io::Error),
+    /// The session task ended before the loop was done with it.
+    Session(SessionGone),
 }
 
 impl fmt::Display for LocalError {
@@ -64,6 +77,8 @@ impl fmt::Display for LocalError {
             Self::Render(e) => write!(f, "render failed: {e}"),
             Self::Output(e) => write!(f, "could not write to the terminal: {e}"),
             Self::Runtime(e) => write!(f, "could not start the runtime: {e}"),
+            Self::Signal(e) => write!(f, "could not watch for terminal resizes: {e}"),
+            Self::Session(e) => write!(f, "{e}"),
         }
     }
 }
@@ -72,10 +87,17 @@ impl std::error::Error for LocalError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::RawMode(e) => Some(e),
-            Self::Output(e) | Self::Runtime(e) => Some(e),
+            Self::Output(e) | Self::Runtime(e) | Self::Signal(e) => Some(e),
             Self::Pty(e) => Some(e),
             Self::Render(e) => Some(e),
+            Self::Session(e) => Some(e),
         }
+    }
+}
+
+impl From<SessionGone> for LocalError {
+    fn from(value: SessionGone) -> Self {
+        Self::Session(value)
     }
 }
 
@@ -105,7 +127,7 @@ pub fn run(program: &str, args: &[String]) -> Result<ExitStatus, LocalError> {
     // the error a misuse should produce, and a failure here leaves nothing to
     // clean up.
     let raw = RawMode::stdin().map_err(LocalError::RawMode)?;
-    let size = outer_size();
+    let size = current_size();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
@@ -123,20 +145,6 @@ pub fn run(program: &str, args: &[String]) -> Result<ExitStatus, LocalError> {
     Ok(status)
 }
 
-/// The outer terminal's geometry.
-///
-/// Stdout is asked first because that is where frames are written, and stdin is
-/// the fallback for the case where output was redirected but the session is
-/// still interactive. A terminal that reports nothing gets
-/// [`outer::FALLBACK_SIZE`](cloo_client::outer::FALLBACK_SIZE) rather than an
-/// error: refusing to start over an unanswered `ioctl` would be a worse
-/// failure than drawing at a conventional 80x24.
-fn outer_size() -> cloo_proto::Size {
-    window_size(io::stdout().as_fd())
-        .or_else(|_| window_size(io::stdin().as_fd()))
-        .unwrap_or(cloo_client::outer::FALLBACK_SIZE)
-}
-
 /// The async body of [`run`], with the terminal already raw.
 async fn session(
     program: &str,
@@ -147,7 +155,16 @@ async fn session(
     for arg in args {
         config = config.arg(arg);
     }
-    let mut reactor = PtyReactor::spawn(&config)?;
+
+    // Installed before the session exists so a `SIGWINCH` between spawning the
+    // child and entering the loop is not the one resize that gets lost.
+    let mut resizes = ResizeWatch::new(size).map_err(LocalError::Signal)?;
+
+    let spawned = Session::spawn(&config, THE_PANE)?;
+    let mut events = spawned.events;
+    // Held for the loop's whole life. Dropping it is what lets the session task
+    // finish, so it happens exactly once, below.
+    let session = Some(spawned.handle);
 
     let mut grid = Grid::new(size);
     let mut renderer = Renderer::new(detect_caps());
@@ -161,46 +178,67 @@ async fn session(
 
     let mut dirty = true;
     loop {
-        // `pump` is cancel-safe: it awaits readiness and only then reads, so
-        // losing this race drops a readiness notification, never bytes.
+        // Every branch is cancel-safe: each awaits readiness and only then
+        // decides anything, so losing this race drops a wakeup, never a byte, a
+        // command, or a resize.
         let step = tokio::select! {
-            pumped = reactor.pump() => Step::Output(pumped?),
+            event = events.recv() => Step::Session(event),
             received = input.recv(), if input_open => match received {
                 Some(bytes) => Step::Input(bytes),
                 None => Step::InputClosed,
             },
+            resized = resizes.changed() => Step::Resized(resized),
             _ = frames.tick() => Step::Frame,
         };
 
         match step {
-            Step::Output(Pump::Bytes(_)) => dirty = true,
-            Step::Output(Pump::Eof) => break,
-            Step::Input(bytes) => reactor.write_all(&bytes)?,
+            Step::Session(Some(SessionEvent::Output)) => dirty = true,
+            Step::Session(Some(SessionEvent::Exited) | None) => break,
+            Step::Input(bytes) => handle(&session)?.input(bytes).await?,
+            // The outer terminal changed shape. The grid reflow and the child's
+            // `TIOCSWINSZ` are the session task's business, in that order.
+            Step::Resized(size) => handle(&session)?.resize(size).await?,
             // Stdin reached end of file. The child keeps running; it simply
             // gets no more input.
             Step::InputClosed => input_open = false,
             Step::Frame => {
                 if dirty {
-                    draw(&mut out, &mut renderer, &mut grid, &reactor.snapshot())?;
+                    let snapshot = handle(&session)?.snapshot().await?;
+                    draw(&mut out, &mut renderer, &mut grid, &snapshot)?;
                     dirty = false;
                 }
             }
         }
     }
 
-    // The child's last output arrived after the final tick more often than not.
+    // The child's last output arrived after the final tick more often than not,
+    // and the session task is still answering until its handle is dropped.
     if dirty {
-        draw(&mut out, &mut renderer, &mut grid, &reactor.snapshot())?;
+        let snapshot = handle(&session)?.snapshot().await?;
+        draw(&mut out, &mut renderer, &mut grid, &snapshot)?;
     }
-    Ok(reactor.wait()?)
+
+    drop(session);
+    spawned
+        .task
+        .await
+        .map_err(|_| LocalError::Session(SessionGone))?
+        .map_err(LocalError::Pty)
+}
+
+/// Borrows the session handle, or reports that the task is gone.
+fn handle(session: &Option<SessionHandle>) -> Result<&SessionHandle, LocalError> {
+    session.as_ref().ok_or(LocalError::Session(SessionGone))
 }
 
 /// What one turn of the loop did.
 enum Step {
-    /// The PTY produced output, or reached end of file.
-    Output(Pump),
+    /// The session reported something, or its task ended.
+    Session(Option<SessionEvent>),
     /// The user typed something.
     Input(Vec<u8>),
+    /// The outer terminal changed size.
+    Resized(cloo_proto::Size),
     /// Stdin reached end of file.
     InputClosed,
     /// The frame timer fired.
@@ -208,19 +246,24 @@ enum Step {
 }
 
 /// Applies a snapshot to the client's cache and paints it.
+///
+/// The cache is resized to whatever the server reports before any row is
+/// applied. A row that disagrees with the cache means a resize crossed a frame
+/// in flight, and the client resyncs rather than drawing a guess.
 fn draw(
     out: &mut io::Stdout,
     renderer: &mut Renderer,
     grid: &mut Grid,
-    snapshot: &PaneSnapshot,
+    snapshot: &SessionSnapshot,
 ) -> Result<(), LocalError> {
-    if grid.size() != snapshot.size {
-        grid.resize(snapshot.size);
+    let pane = &snapshot.pane;
+    if grid.size() != pane.size {
+        grid.resize(pane.size);
     }
-    for row in &snapshot.rows {
+    for row in &pane.rows {
         grid.apply(row)?;
     }
-    let cursor = snapshot.cursor.map(|(pos, shape)| Cursor::new(pos, shape));
+    let cursor = pane.cursor.map(|(pos, shape)| Cursor::new(pos, shape));
     out.write_all(renderer.render_full(grid, cursor))
         .map_err(LocalError::Output)?;
     out.flush().map_err(LocalError::Output)

@@ -53,7 +53,9 @@ There is no admin role, no accounts, and no multi-tenancy. cloo is a single-user
   moves.
 - Daemonize; Unix socket; one full-screen pane.
 - Client raw mode, damage rendering, input forwarding, terminal restore on exit.
-- `SIGWINCH` → `Resize`.
+- `SIGWINCH` → `Resize`. **Done at M1-03.** The signal becomes a command on the session task's
+  single `mpsc<Command>`, which runs one layout pass and issues `TIOCSWINSZ` — one serialized
+  owner for the grid-and-child race, and the same channel the local in-process path uses.
 - Baseline harness compatibility: alternate screen, bracketed paste, extended keys, focus events,
   mouse routing, and a capability contract for terminal-dependent enhancements.
 - **Delivery boundary:** run a shell, kill the client, reattach, find it alive.

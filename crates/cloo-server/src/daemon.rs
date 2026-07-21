@@ -8,28 +8,33 @@
 //! reattaching client finds the session where it left it rather than where it
 //! last drew it.
 //!
+//! The daemon owns no session state. It owns a [`SessionHandle`] — a sender —
+//! and every keystroke and resize it receives becomes a command on that
+//! channel, applied by the session task in arrival order. Snapshots come back
+//! the same way. That is what makes the daemon a *transport*: there is no
+//! second path to the grid or the PTY for a bug to take.
+//!
 //! One client at a time, and a full grid capture per frame tick. Both are
-//! deliberate placeholders with real successors: damage coalescing and fan-out
-//! to several clients are M1-04, and the `mpsc<Command>` session task that
-//! serializes input and resize is M1-03. What is already true is the property
-//! those tasks must not break — the render rate is capped by a timer rather
-//! than driven by PTY readiness, so a fast child cannot turn into one frame per
-//! read.
+//! deliberate placeholders with a real successor: damage coalescing and fan-out
+//! to several clients are M1-04. What is already true is the property that task
+//! must not break — the render rate is capped by a timer rather than driven by
+//! PTY readiness, so a fast child cannot turn into one frame per read.
 
 use std::fmt;
 use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use cloo_core::grid::wire_size;
 use cloo_proto::{
     Action, ClientMessage, PaneId, ServerMessage, SessionId, Size, StreamError, TabId,
 };
-use cloo_term::TermSize;
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::conn::{self, Connection};
-use crate::pty::{PtyConfig, PtyError, PtyReactor, Pump};
+use crate::pty::{PtyConfig, PtyError};
+use crate::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, usable};
 use crate::socket::{Listener, SocketError};
 
 /// The render tick, capping the fan-out rate at roughly 60fps.
@@ -55,6 +60,8 @@ pub enum DaemonError {
     Pty(PtyError),
     /// The listener could not be handed to the runtime, or accepting failed.
     Accept(io::Error),
+    /// The session task ended before the daemon was done with it.
+    Session(SessionGone),
 }
 
 impl fmt::Display for DaemonError {
@@ -63,6 +70,7 @@ impl fmt::Display for DaemonError {
             Self::Socket(e) => write!(f, "{e}"),
             Self::Pty(e) => write!(f, "{e}"),
             Self::Accept(e) => write!(f, "could not accept a client: {e}"),
+            Self::Session(e) => write!(f, "{e}"),
         }
     }
 }
@@ -73,7 +81,14 @@ impl std::error::Error for DaemonError {
             Self::Socket(e) => Some(e),
             Self::Pty(e) => Some(e),
             Self::Accept(e) => Some(e),
+            Self::Session(e) => Some(e),
         }
+    }
+}
+
+impl From<SessionGone> for DaemonError {
+    fn from(value: SessionGone) -> Self {
+        Self::Session(value)
     }
 }
 
@@ -107,8 +122,14 @@ pub struct Daemon {
     /// Owns the socket file and its lock. Dropped last, unlinking the path.
     _listener: Listener,
     accepting: UnixListener,
-    reactor: PtyReactor,
-    /// The session's authoritative size, which is also the pane's.
+    /// The only way into the session. `None` once the daemon has released it so
+    /// the session task can finish and report the child's status.
+    session: Option<SessionHandle>,
+    events: mpsc::Receiver<SessionEvent>,
+    task: Option<JoinHandle<Result<ExitStatus, PtyError>>>,
+    child_id: u32,
+    /// What the daemon last told the session the area was. A cache for the
+    /// hello, not authority: the session owns the real geometry.
     size: Size,
 }
 
@@ -129,13 +150,16 @@ impl Daemon {
             .map_err(DaemonError::Accept)?;
         let accepting = UnixListener::from_std(std_listener).map_err(DaemonError::Accept)?;
 
-        let reactor = PtyReactor::spawn(config)?;
-        let size = wire_size(config.term_size());
+        let spawned = Session::spawn(config, THE_PANE)?;
+        let size = cloo_core::grid::wire_size(config.term_size());
 
         Ok(Self {
             _listener: listener,
             accepting,
-            reactor,
+            session: Some(spawned.handle),
+            events: spawned.events,
+            task: Some(spawned.task),
+            child_id: spawned.child_id,
             size,
         })
     }
@@ -149,8 +173,14 @@ impl Daemon {
     /// The child's process id.
     #[must_use]
     pub fn child_id(&self) -> u32 {
-        // The reactor is the only owner; this is for tests and diagnostics.
-        self.reactor.child_id()
+        self.child_id
+    }
+
+    /// The handle into the session task.
+    fn session(&self) -> Result<&SessionHandle, DaemonError> {
+        self.session
+            .as_ref()
+            .ok_or(DaemonError::Session(SessionGone))
     }
 
     /// Serves clients until the session's child exits, then reaps it.
@@ -171,21 +201,32 @@ impl Daemon {
                 break;
             }
         }
-        Ok(self.reactor.wait()?)
+
+        // Releasing the handle is what tells the session task nobody can reach
+        // it any more; it then reaps the child and returns its status.
+        self.session = None;
+        let Some(task) = self.task.take() else {
+            return Err(DaemonError::Session(SessionGone));
+        };
+        task.await
+            .map_err(|_| DaemonError::Session(SessionGone))?
+            .map_err(DaemonError::Pty)
     }
 
-    /// Pumps the PTY until a client connects.
+    /// Waits for a client, letting the session run in the meantime.
     ///
-    /// Returns `None` if the child exited first. This is the half of "detach
-    /// leaves the child running" that is easy to get wrong: a daemon that only
-    /// pumps while a client is attached loses everything a child wrote between
-    /// connections.
+    /// Returns `None` if the child exited first. The PTY is pumped by the
+    /// session task throughout, attached or not — that is the half of "detach
+    /// leaves the child running" that is easy to get wrong, since a session
+    /// read only while someone is watching loses everything written in between.
     async fn wait_for_client(&mut self) -> Result<Option<UnixStream>, DaemonError> {
         loop {
             tokio::select! {
-                pumped = self.reactor.pump() => {
-                    if pumped? == Pump::Eof {
-                        return Ok(None);
+                event = self.events.recv() => {
+                    match event {
+                        // Output nobody is here to see. The grid keeps it.
+                        Some(SessionEvent::Output) => {}
+                        Some(SessionEvent::Exited) | None => return Ok(None),
                     }
                 }
                 accepted = self.accepting.accept() => {
@@ -211,7 +252,7 @@ impl Daemon {
         // The session renders at what the attached client can draw. With one
         // client this is simply its size; the minimum across several clients
         // arrives with fan-out in M1-04.
-        self.resize(request.size)?;
+        self.resize(request.size).await?;
 
         let hello = ServerMessage::Hello {
             protocol_version: cloo_proto::PROTOCOL_VERSION,
@@ -222,12 +263,10 @@ impl Daemon {
         if conn.send(&hello).await.is_err() {
             return Ok(Served::Gone);
         }
-        if send_all(
-            &mut conn,
-            &conn::session_snapshot(THE_TAB, THE_PANE, &self.reactor.snapshot()),
-        )
-        .await
-        .is_err()
+        let snapshot = self.snapshot().await?;
+        if send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+            .await
+            .is_err()
         {
             return Ok(Served::Gone);
         }
@@ -238,36 +277,35 @@ impl Daemon {
         let mut dirty = false;
 
         loop {
-            // `pump` and `recv` are both cancel-safe: each awaits readiness and
-            // buffers before it decides anything, so losing this race drops a
-            // wakeup and never a byte.
+            // All three are cancel-safe: each awaits readiness and buffers
+            // before it decides anything, so losing this race drops a wakeup and
+            // never a byte, a command, or an event.
             let step = tokio::select! {
-                pumped = self.reactor.pump() => Step::Output(pumped?),
+                event = self.events.recv() => Step::Session(event),
                 received = conn.recv::<ClientMessage>() => Step::From(received),
                 _ = frames.tick() => Step::Frame,
             };
 
             match step {
-                Step::Output(Pump::Bytes(_)) => dirty = true,
-                Step::Output(Pump::Eof) => {
-                    // Draw the child's last words before reporting its death.
-                    let _ = send_all(
-                        &mut conn,
-                        &conn::session_snapshot(THE_TAB, THE_PANE, &self.reactor.snapshot()),
-                    )
-                    .await;
+                Step::Session(Some(SessionEvent::Output)) => dirty = true,
+                Step::Session(Some(SessionEvent::Exited) | None) => {
+                    // The session task is still alive and still answering, so
+                    // the child's last words can be drawn before its death is
+                    // reported.
+                    if let Ok(snapshot) = self.snapshot().await {
+                        let _ =
+                            send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot)).await;
+                    }
                     let _ = conn.send(&ServerMessage::Exit(0)).await;
                     let _ = conn.shutdown().await;
                     return Ok(Served::ChildExited);
                 }
                 Step::Frame => {
                     if dirty {
-                        if send_all(
-                            &mut conn,
-                            &conn::session_snapshot(THE_TAB, THE_PANE, &self.reactor.snapshot()),
-                        )
-                        .await
-                        .is_err()
+                        let snapshot = self.snapshot().await?;
+                        if send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+                            .await
+                            .is_err()
                         {
                             return Ok(Served::Gone);
                         }
@@ -275,10 +313,10 @@ impl Daemon {
                     }
                 }
                 Step::From(Ok(Some(ClientMessage::Input(bytes)))) => {
-                    self.reactor.write_all(&bytes)?;
+                    self.session()?.input(bytes).await?;
                 }
                 Step::From(Ok(Some(ClientMessage::Resize(size)))) => {
-                    self.resize(size)?;
+                    self.resize(size).await?;
                     dirty = true;
                 }
                 Step::From(Ok(Some(
@@ -305,18 +343,22 @@ impl Daemon {
         }
     }
 
-    /// Resizes the grid and the child's `winsize` together.
+    /// Asks the session task for the current picture.
+    async fn snapshot(&self) -> Result<SessionSnapshot, DaemonError> {
+        Ok(self.session()?.snapshot().await?)
+    }
+
+    /// Tells the session its area changed.
     ///
-    /// A zero-sized client is ignored rather than refused: it has no bearing on
-    /// a child that is running fine.
-    fn resize(&mut self, size: Size) -> Result<(), DaemonError> {
-        if size == self.size {
+    /// The grid, the layout pass, and the child's `TIOCSWINSZ` are the session
+    /// task's business; the daemon only forwards, and caches the size for the
+    /// hello it hands the next client. A zero-sized client is ignored rather
+    /// than refused: it has no bearing on a child that is running fine.
+    async fn resize(&mut self, size: Size) -> Result<(), DaemonError> {
+        if size == self.size || !usable(size) {
             return Ok(());
         }
-        let Ok(term_size) = TermSize::new(size.cols, size.rows) else {
-            return Ok(());
-        };
-        self.reactor.resize(term_size)?;
+        self.session()?.resize(size).await?;
         self.size = size;
         Ok(())
     }
@@ -324,8 +366,8 @@ impl Daemon {
 
 /// What one turn of a served connection did.
 enum Step {
-    /// The PTY produced output, or reached end of file.
-    Output(Pump),
+    /// The session reported something, or its task ended.
+    Session(Option<SessionEvent>),
     /// The client sent something, closed, or broke.
     From(Result<Option<ClientMessage>, StreamError>),
     /// The frame timer fired.

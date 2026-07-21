@@ -210,11 +210,41 @@ being pumped *between* connections so a reattaching client finds the session whe
 rather than where it last drew it. `Detach` is acknowledged with `Detached` and the connection
 closed; the child never learns it happened.
 
+The daemon owns *no session state*. It holds a `SessionHandle` — a sender — and every keystroke
+and resize it receives becomes a command on that channel; snapshots come back the same way. That
+is what makes it a transport rather than a second owner: there is no other path to the grid or
+the PTY for a bug to take.
+
 Two things in the daemon are deliberate placeholders. It serves one client at a time and sends a
-full grid capture per frame tick — fan-out and coalesced row damage are M1-04, and the
-`mpsc<Command>` session task that serializes input and resize is M1-03. What is already true is
-the property those tasks must not break: the update rate is capped by a frame timer rather than
-driven by PTY readiness.
+full grid capture per frame tick — fan-out and coalesced row damage are M1-04. What is already
+true is the property that task must not break: the update rate is capped by a frame timer rather
+than driven by PTY readiness.
+
+#### The session task
+
+`cloo-server::session` is the one thing that mutates a session. Everything that changes it — a
+keystroke, a resize, a future split — arrives as a `Command` on a single `mpsc` and is applied in
+arrival order by one task, as of M1-03. There is no `Mutex` on session state and no second path
+to it: a `SessionHandle` is a sender and nothing more, so a caller cannot reach past it. Both the
+daemon and the binary's local loop hold one, which is why the in-process path and the socket path
+cannot drift.
+
+`Session::resize` is why the serialization matters. Resize is a three-way race between the grid,
+the child's `TIOCSWINSZ`, and the application's own `SIGWINCH` handling, and the only way to
+reason about it is for one actor to do the halves in a fixed order. It runs **one layout pass** —
+`Layout::resolve` — and drives every pane's geometry from its output, so the rect a client is told
+about and the `winsize` its child is given cannot come from two different computations. Within a
+pane, `PtyReactor::resize` keeps the grid-then-ioctl order. A degenerate area is ignored rather
+than refused: a client that briefly reports zero rows mid-drag has no bearing on a child that is
+running fine, and refusing would turn a cosmetic glitch into a dead session.
+
+Output flows back as a `SessionEvent`. `Output` is a *level*, not an edge — the channel holds one,
+so a session producing bytes faster than anyone reads them coalesces into a single pending
+notification rather than one per PTY read, and the reader asks for a snapshot when it is ready to
+draw. `Exited` is sent once the PTY reaches end of file; the task stays alive and still answers
+snapshot commands after it, which is what lets a child's last words be drawn before its death is
+reported. The task pumps its PTY for its whole life, attached or not, so nothing written between
+connections is lost.
 
 `cloo-client::attach` is the other end. It connects, sends `Attach`, and interprets nothing until
 the reply is a `Hello` whose version matches — both directions check, because `Attach` catches a
@@ -298,6 +328,21 @@ state, which is what keeps a capability difference between two attached clients 
 something the server has to model. A terminal that reports a zero-width or zero-height `winsize`
 gets a conventional 80x24 rather than an error.
 
+#### Noticing a resize
+
+`cloo-client::resize` turns `SIGWINCH` into an awaitable report of the outer terminal's new
+geometry, as of M1-03. The signal itself carries no size, so it is always paired with a
+`TIOCGWINSZ` afterwards. Two properties let a `ResizeWatch` sit in a `select!`: it is
+**cancel-safe** — the only suspension point is the underlying signal receive, and the size is read
+with no `await` in between, so a watcher dropped mid-`select!` has consumed nothing — and it
+**reports changes, not signals**, swallowing a `SIGWINCH` whose geometry turns out to be
+unchanged. That filter is not cosmetic: a resize costs a layout pass, a grid reflow, and a
+`SIGWINCH` delivered to the child, and a child redrawing for a size it already had is exactly the
+flicker worth avoiding.
+
+The new size becomes a `Command::Resize` on the session channel like anything else. The client
+never resizes a grid or a PTY itself.
+
 ### The binary
 
 `crates/cloo` is the composition root and nothing else: it parses the command line and wires the
@@ -306,23 +351,27 @@ two halves together. It holds no session state and emits no escape sequences of 
 As of M0-07 it runs the M0 smoke path in `local.rs` — one PTY, one grid, one renderer, all
 in-process, with no socket and no detach. The loop is already shaped like the real one: the server
 half owns the PTY and the authoritative grid, the client half owns raw mode and every escape
-sequence, and the binary only moves snapshots one way and input bytes the other. Two ordering
-rules matter. Raw mode is entered *before* the child is spawned, so a failure that is going to
-happen happens while the terminal is still untouched and there is nothing to clean up. And the
-render is driven by a ~60fps frame timer rather than by PTY readiness, so a fast producer
+sequence, and the binary only moves snapshots one way and commands the other. As of M1-03 it holds
+a `SessionHandle` rather than a reactor, so the local path mutates session state through exactly
+the same `mpsc<Command>` the daemon does — one serialized owner, no second path, no `Mutex`.
+
+Three ordering rules matter. Raw mode is entered *before* the child is spawned, so a failure that
+is going to happen happens while the terminal is still untouched and there is nothing to clean up.
+The render is driven by a ~60fps frame timer rather than by PTY readiness, so a fast producer
 coalesces into at most one frame per tick — the render-rate cap is architectural from the first
-line of the loop, not a later optimization.
+line of the loop, not a later optimization. And a `SIGWINCH` becomes a resize *command*, so the
+grid reflow and the child's `TIOCSWINSZ` happen in one place in one order.
 
 Stdin is read on a dedicated thread rather than through an async descriptor: making descriptor 0
 non-blocking would change a file description the user's shell shares, and a shell left
 non-blocking after cloo exits is a worse bug than a parked thread.
 
-M1-01 added the socket lifecycle beneath this loop and M1-02 added a daemon and an attach client
-over it, but neither changed the binary: `cloo` with no arguments still runs one pane in-process,
-because `cloo attach` and `cloo new` are a CLI surface that only makes sense once the session task
-in M1-03 can back it. `crates/cloo/tests/attach.rs` drives the daemon and the client against each
-other in the meantime — that end-to-end coverage has to live in the binary crate, since
-`cloo-server` may never name `cloo-client`, not even as a dev-dependency.
+M1-01 added the socket lifecycle beneath this loop, M1-02 added a daemon and an attach client over
+it, and M1-03 put the session task under both, but none of them changed the CLI surface: `cloo`
+with no arguments still runs one pane in-process. `cloo attach` and `cloo new` land with the
+detach and reattach flow in M1-05. `crates/cloo/tests/attach.rs` drives the daemon and the client
+against each other in the meantime — that end-to-end coverage has to live in the binary crate,
+since `cloo-server` may never name `cloo-client`, not even as a dev-dependency.
 
 ### Agent pane metadata and attention
 
@@ -349,6 +398,11 @@ Tokio, actor-shaped rather than shared mutable state:
 
 Everything reaches the session task through a single `mpsc<Command>`. There is no `Mutex` on
 session state. Expect bugs in PTY/resize *ordering*, not in lock discipline.
+
+The session task is real as of M1-03 — see [The session task](#the-session-task). Today it owns
+its pane's PTY directly rather than talking to a separate per-PTY task; splitting the two is a
+detail of M2-01, and it changes nothing about the rule, since a second PTY task would still reach
+session state only through the same channel.
 
 ---
 
@@ -506,7 +560,9 @@ at `=0.26.0` in `[workspace.dependencies]` and reaches only `cloo-term`, as of M
 (features `macros`, `net`, `rt`) and `libc` land in `cloo-server` with the PTY reactor as of
 M0-05; the `net` feature is what provides `AsyncFd`, not sockets. M0-07 adds the `sync` and
 `time` features for the binary's run loop: `sync` carries stdin bytes from the reader thread, and
-`time` is the frame timer that caps the render rate.
+`time` is the frame timer that caps the render rate. M1-03 adds `signal`, which is what makes
+`SIGWINCH` an awaitable event rather than a global flag a handler has to poke; `sync` also carries
+the session task's `mpsc<Command>` from that milestone on.
 
 `wezterm-term` is the designated fallback emulation backend: more deliberately public API,
 heavier dep tree. Re-evaluate at M2 if the pin hurts. See [`DECISIONS.md`](DECISIONS.md) —

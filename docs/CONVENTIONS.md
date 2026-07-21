@@ -88,6 +88,15 @@ crates/
 - Damage goes out over `broadcast`. Client tasks that lag are dropped and told to resync, never
   allowed to stall the session task.
 - Anything in the render path is frame-budgeted. Coalesce; never emit one update per PTY read.
+- A handle to an actor is a **sender and nothing more**. Never hand out a reference to the state
+  behind it, and never keep a second path to that state "just for reads" — the point of the
+  channel is that arrival order is the only order.
+- A notification a reader acts on by *looking at current state* is a level, not an edge: send it
+  on a depth-one channel with `try_send` and let it coalesce. A notification that carries
+  information the reader cannot recover — the child exited — must be sent, not dropped.
+- Every branch of a `select!` must be cancel-safe, and the reason must be stated in a comment
+  where it is not obvious. The usual proof is that the branch's only suspension point is itself
+  cancel-safe and that nothing is consumed or recorded after it.
 
 ### Terminal and PTY Code
 
@@ -112,6 +121,14 @@ crates/
   zero. Translate that to an ordinary EOF at the PTY boundary; do not make every caller know it.
 - A resize is two operations — grid then `TIOCSWINSZ` — and must be issued in that order behind
   one function. Never expose a path that does only one of them.
+- A resize's geometry comes from **one** `Layout::resolve` per resize. The rect a client is told
+  about and the `winsize` its child is given must be the same computation, not two that agree
+  today.
+- `SIGWINCH` carries no geometry; it is always paired with a `TIOCGWINSZ`. A signal whose new
+  size matches the old one is swallowed rather than turned into a resize — a child redrawing for
+  a size it already had is visible flicker.
+- A degenerate outer size is ignored, never refused. Terminals report zero rows mid-drag, and a
+  session that dies over it is worse than one that keeps its last usable geometry.
 - Raw mode and termios changes must be restored on **every** exit path, including panic and
   signal. A client that leaves the user's terminal in raw mode is a critical bug. Restoration is
   by ownership — an RAII guard whose `Drop` restores — plus a panic hook and signal handlers
