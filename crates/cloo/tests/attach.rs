@@ -219,6 +219,7 @@ async fn detaching_leaves_the_child_running_and_its_state_intact() {
         .expect("the daemon task must not panic")
         .expect("the daemon must not fail");
     assert!(status.success(), "the child exited with {status}");
+    assert!(!alive(pid), "the child outlived its daemon");
 }
 
 #[tokio::test]
