@@ -4,12 +4,14 @@
 //! session state. **All chrome is rendered here**, which is why theming never
 //! touches the server.
 //!
-//! Seven modules today:
+//! Nine modules today:
 //!
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
 //! - [`renderer`] — the client-side [`Grid`] cache and the escape sequences
-//!   that draw it.
+//!   that draw it, including the positioned [`Span`]s chrome is painted from.
+//! - [`chrome`] — pane headers, the focus and attention treatment, and the
+//!   dimming policy, as pure functions into cells.
 //! - [`outer`] — the outer terminal's geometry, which is the client's to know
 //!   and never session state.
 //! - [`capabilities`] — what that terminal can do, the documented fallback for
@@ -27,10 +29,12 @@
 //!
 //! Rendering is a pure function into a byte buffer rather than a write to a
 //! descriptor, which is what makes a fake grid renderable in a unit test with an
-//! exact expected string. Theming lands later in M1.
+//! exact expected string. Named themes land in M4; the chrome palette here is
+//! the reference `storm` theme.
 
 pub mod attach;
 pub mod capabilities;
+pub mod chrome;
 pub mod effects;
 pub mod input;
 pub mod outer;
@@ -43,9 +47,12 @@ pub use capabilities::{
     Capability, CapsError, Degradation, Fallback, attach_caps, caps_from_env, degradations,
     detect_attach_caps, detect_caps,
 };
+pub use chrome::{
+    Attention, ChromeOptions, PaneChrome, dim_cell, dim_cells, header_cells, header_span,
+};
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, mouse_owner};
 pub use outer::{current_size, window_size};
 pub use raw_mode::{RawMode, RawModeError};
-pub use renderer::{Cursor, Grid, RenderError, Renderer};
+pub use renderer::{Cursor, Grid, RenderError, Renderer, Span};
 pub use resize::ResizeWatch;

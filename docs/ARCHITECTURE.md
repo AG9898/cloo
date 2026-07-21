@@ -389,6 +389,29 @@ Escape sequences are emitted only from this module. A pane's bytes reach the out
 re-rendered from parsed cells, never forwarded, so no pane can drive the user's terminal through
 the renderer.
 
+`render_spans` is the third path, added at M2-03 for chrome. A `Span` is a run of cells with its
+own origin, because a header or a status row belongs to the client alone and can sit anywhere,
+while pane *contents* always come from a validated `Grid` at column zero. Keeping chrome on its own
+path is what stops client-composed cells from ever being mistaken for server-owned ones.
+
+#### Chrome
+
+`cloo-client::chrome` turns a pane description — index, title, task label, attention state, focus,
+zoom — into the cells of its header row, and applies the dimming policy to an unfocused pane's
+body. It is a pure function into cells: it emits no bytes, so the renderer remains the only place
+escape sequences are produced, and a narrow header is testable against an exact string.
+
+Two rules from the style guide are structural rather than cosmetic. Width is spent in a fixed
+order, so every pane on a screen degrades identically — the task label goes first, then the state's
+text label, then the title truncates, and the state glyph is the last thing standing. And colour is
+never the only signal: every attention state carries an ASCII glyph and, wherever it fits, its text
+label. Focus is not an attention state; it changes the accent and the marker and never the glyph.
+See [`STYLEGUIDE.md`](STYLEGUIDE.md) and `DECISIONS.md` RESOLVED-14.
+
+The palette here is the reference `storm` theme, as constants. Named themes and terminal-palette
+inheritance land in M4-03; nothing in this module reaches session state, which is what makes that
+a client-local change.
+
 #### Raw mode
 
 `cloo-client::raw_mode::RawMode` is an RAII guard over one terminal descriptor. Restoration is by

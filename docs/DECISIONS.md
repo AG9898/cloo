@@ -374,3 +374,36 @@ thing the client-side-chrome rule exists to prevent.
 **Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md) wire protocol and input routing,
 `crates/cloo-proto/src/message.rs`, `crates/cloo-server/src/session.rs`,
 `crates/cloo-client/src/input.rs`. Implemented in M1-07; `PROTOCOL_VERSION` bumped to 2.
+
+---
+
+### RESOLVED-14 — A pane header spends width in a fixed order, and dims by blending
+
+**Resolved:** 2026-07-21
+
+**Decision:** The pane header is one row that is also the pane's top border: its foreground is the
+theme accent when the pane is focused and the neutral border colour otherwise. Width is spent in a
+fixed order of preference — focus marker, zoom indicator, pane index, title, and state glyph are
+what a header *is*; the task label is dropped first when space runs out, then the state's text
+label, and only then is the title truncated. Below that, the state glyph is the last thing
+standing. Dimming an unfocused pane is an exact blend toward the frame background for a 24-bit
+colour, and the terminal's own `DIM` attribute for a palette index or the terminal default.
+
+**Why:** A degradation order that is decided per situation is a degradation order that differs
+between two panes on one screen. Fixing it makes a narrow pane's header testable against an exact
+string, and it keeps the two signals the style guide requires — identity and state — alive at every
+width. Blending is what "contrast reduction toward the frame background, not alpha" means in cells;
+it is also what keeps a dimmed pane's amber `needs input` distinguishable from a dimmed grey
+`quiet`, which stacking `DIM` on an unknown palette entry would not. A palette index is the *user's*
+colour and cloo cannot know what it looks like, so there it defers to the terminal's own faint
+rendition rather than guessing.
+
+**Alternatives rejected:** Dropping the state label before the task label would have saved the
+longer string, but the style guide requires state text and a glyph together wherever they fit, and
+a task label is the more recoverable of the two — it is also in the attention queue and the pane
+details view. Ellipsizing a truncated title costs a cell that a narrow header does not have, and
+the marker plus index already tell the user which pane they are reading.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md) geometry and chrome, `crates/cloo-client/src/chrome.rs`,
+`crates/cloo-client/src/renderer.rs`. Implemented in M2-03; no wire change, because chrome is
+rendered entirely client-side.

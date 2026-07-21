@@ -279,6 +279,27 @@ frame is asserted against an exact expected string rather than eyeballed — all
 - Resize keeping the overlapping cells and blanking the rest, a zero-sized grid rendering without
   a panic, and multi-byte characters surviving the render intact.
 
+Pane chrome joined the renderer at M2-03 and is tested the same way, because it is also a pure
+function — from a pane description into cells, with no bytes and no descriptor. `src/chrome.rs`
+covers:
+
+- Focus and attention as independent signals: a focused quiet pane and an unfocused pane needing
+  input differ in both axes, and focus restyles the title without touching the state glyph.
+- Every state having a distinct ASCII glyph and a label, and both appearing in a wide header — the
+  assertion that colour is never the only signal.
+- The width ladder, asserted against exact strings: the task label dropped first, then the state's
+  text label, then the title truncated, then the glyph standing alone. A header is exactly the pane
+  width at *every* size from 0 to 60, which is what catches an off-by-one in the gap arithmetic.
+- The no-dim fallback leaving an unfocused header at full contrast while its text is unchanged, a
+  focused header never dimmed, and a dimmed `needs input` still distinguishable from a dimmed
+  `quiet` — the property that fails the moment dimming stops preserving hue.
+- Dimming a 24-bit cell by blending rather than by stacking `DIM`, and a palette index dimming with
+  the attribute rather than a guess at the user's colour.
+
+`src/renderer.rs` gained the positioned `Span` that chrome is painted from: a span drawn at its own
+origin, each span restating its style absolutely so a second one cannot inherit the first's, an
+empty span moving nothing, and spans never clearing the outer terminal.
+
 Typed outer-terminal effects are unit tested in `src/effects.rs`: the policy begins deny-all, a
 permitted title and a capable, permitted OSC 52 store produce their exact terminal bytes once,
 and an unsupported, unsafe, policy-denied, or capability-denied effect leaves the output buffer
@@ -350,7 +371,8 @@ The intended shape for the rest, in the order it becomes testable:
   signal restore path joined them from the binary's own tests once M0-07 gave it a child process
   to signal. `SIGWINCH` went the same way at M1-03, for the same reason: a library test that
   signals itself signals the test runner. Incremental row diffing and its byte-exact renderer
-  coverage landed with damage coalescing at M1-04.
+  coverage landed with damage coalescing at M1-04, and pane chrome — headers, focus, attention, and
+  dimming — at M2-03.
 
 ### Agent-harness compatibility
 
@@ -392,7 +414,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
 | `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, and exit-frame detection |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
-| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
+| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
+| `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, and dimming by blend with a no-dim fallback |
 | `crates/cloo-client/src/effects.rs` | Outer-terminal effects | Default-deny client policy, exact title and OSC 52 rendering, capability checks, safe suppression, and base64 padding |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |

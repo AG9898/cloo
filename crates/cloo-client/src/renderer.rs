@@ -176,6 +176,29 @@ fn cell_count(size: Size) -> usize {
     usize::from(size.rows) * usize::from(size.cols)
 }
 
+/// A run of cells to paint at one place on the outer terminal.
+///
+/// The unit chrome is drawn in. A pane's *contents* arrive as whole rows of a
+/// [`Grid`] and are painted from column zero; a header, a border, or a status
+/// row belongs to the client alone and can sit anywhere, so it carries its own
+/// origin. Building chrome as spans keeps [`crate::chrome`] a pure function
+/// into cells and leaves this module the only place bytes are produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Span {
+    /// Where the run starts, in outer-terminal cells.
+    pub at: Point,
+    /// The cells to paint, left to right.
+    pub cells: Vec<Cell>,
+}
+
+impl Span {
+    /// Builds a span.
+    #[must_use]
+    pub const fn new(at: Point, cells: Vec<Cell>) -> Self {
+        Self { at, cells }
+    }
+}
+
 /// The rendition currently active on the outer terminal.
 ///
 /// Tracked so a run of identically styled cells costs one SGR sequence rather
@@ -274,6 +297,41 @@ impl Renderer {
         self.finish(cursor);
 
         self.output()
+    }
+
+    /// Draws chrome: positioned runs of cells the client composed itself.
+    ///
+    /// Used for pane headers, borders, and any other chrome — never for pane
+    /// contents, which come from a [`Grid`] so a resize can be validated
+    /// against the server's geometry. Each span starts its own rendition from
+    /// an absolute reset for the same reason a damage row does: a dropped frame
+    /// must not leave a header wearing a neighbour's style.
+    pub fn render_spans(&mut self, spans: &[Span], cursor: Option<Cursor>) -> &[u8] {
+        self.out.clear();
+        self.out.push_str("\x1b[?25l");
+        for span in spans {
+            self.paint_span(span);
+        }
+        self.finish(cursor);
+
+        self.output()
+    }
+
+    /// Draws one positioned run of chrome cells.
+    fn paint_span(&mut self, span: &Span) {
+        if span.cells.is_empty() {
+            return;
+        }
+        let mut style = None;
+        move_to(&mut self.out, span.at.row, span.at.col);
+        for cell in &span.cells {
+            let wanted = Style::of(cell);
+            if style != Some(wanted) {
+                push_sgr(&mut self.out, wanted, self.caps);
+                style = Some(wanted);
+            }
+            self.out.push(cell.ch);
+        }
     }
 
     /// Draws one complete damaged row from the cache.
@@ -780,6 +838,59 @@ mod tests {
             String::from_utf8(frame).expect("output is valid utf-8"),
             "\x1b[?25l\x1b[H\x1b[2J\x1b[1;1H\x1b[0m→é\x1b[0m"
         );
+    }
+
+    // -- Spans ------------------------------------------------------------
+
+    #[test]
+    fn a_span_paints_chrome_at_its_own_origin() {
+        let mut renderer = Renderer::new(TermCaps::default());
+        let span = Span::new(
+            Point::new(4, 2),
+            row_of("hi", Color::Indexed(5), CellAttrs::BOLD),
+        );
+        assert_eq!(
+            renderer.render_spans(&[span], None),
+            b"\x1b[?25l\x1b[3;5H\x1b[0;1;38;5;5mhi\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn each_span_restates_its_style_absolutely() {
+        let mut renderer = Renderer::new(TermCaps::default());
+        let spans = [
+            Span::new(
+                Point::new(0, 0),
+                row_of("a", Color::Indexed(1), CellAttrs::NONE),
+            ),
+            Span::new(
+                Point::new(0, 1),
+                row_of("b", Color::Indexed(1), CellAttrs::NONE),
+            ),
+        ];
+        let frame = renderer.render_spans(&spans, None).to_vec();
+        let sgr = frame.windows(4).filter(|bytes| bytes == b"\x1b[0;").count();
+        assert_eq!(sgr, 2, "the second span must not inherit the first's style");
+    }
+
+    #[test]
+    fn an_empty_span_moves_nothing() {
+        let mut renderer = Renderer::new(TermCaps::default());
+        assert_eq!(
+            renderer.render_spans(&[Span::new(Point::new(9, 9), Vec::new())], None),
+            b"\x1b[?25l\x1b[0m"
+        );
+    }
+
+    #[test]
+    fn spans_never_clear_the_outer_terminal() {
+        let mut renderer = Renderer::new(TermCaps::default());
+        let span = Span::new(
+            Point::new(0, 0),
+            row_of("x", Color::Default, CellAttrs::NONE),
+        );
+        let frame = renderer.render_spans(&[span], None).to_vec();
+        assert!(!frame.windows(3).any(|bytes| bytes == b"\x1b[2J"));
     }
 
     #[test]

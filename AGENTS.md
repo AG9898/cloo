@@ -308,7 +308,10 @@ because it needs both halves of the wire and `cloo-server` may never name `cloo-
 resolution and config parsing are the next things that must get coverage as they land. M1-04 adds
 row-damage tracker coverage in `cloo-server/src/damage.rs`, byte-exact incremental renderer
 coverage in `cloo-client/src/renderer.rs`, and attach integration coverage that proves bounded
-burst frames, lagged-client recovery, and concurrent-client fan-out.
+burst frames, lagged-client recovery, and concurrent-client fan-out. M2-03 adds pane-chrome
+coverage in `cloo-client/src/chrome.rs` — focus and attention as independent signals, the fixed
+width-degradation ladder at every width, and dimming with its no-dim fallback — plus positioned
+chrome spans in `cloo-client/src/renderer.rs`.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -602,3 +605,17 @@ The session's rotating PTY pump boxes `Send` futures, so an emulator listener ca
 `Rc<RefCell>` even though the session actor is the sole logical owner. `cloo-term` uses a bounded
 non-blocking channel instead; a full queue drops a typed client-local effect, which is safe because
 effects never change the grid or authoritative session state.
+
+### 2026-07-21 — Dimming a palette colour is a guess; dimming an RGB one is arithmetic
+"Contrast reduction toward the frame background, not alpha" is implementable exactly only for a
+`Color::Rgb`; for a `Color::Indexed` or the terminal default, cloo does not know what the user's
+palette looks like, so `chrome::dim_cell` falls back to the `DIM` attribute rather than inventing a
+colour. Blending is what keeps a dimmed amber `needs input` distinguishable from a dimmed grey
+`quiet` — the test that catches a lazy "just set DIM everywhere" implementation.
+
+### 2026-07-21 — Fix the header's degradation order, or two panes disagree on one screen
+A header that decides per situation which field to drop renders differently in two equally narrow
+panes, and cannot be asserted against an exact string. `chrome::header_cells` spends width in one
+fixed order (task label, then state text, then title truncation, glyph last) and is tested for
+being *exactly* the pane width at every width from 0 to 60 — that loop, not the pretty cases, is
+what catches an off-by-one in the gap arithmetic.

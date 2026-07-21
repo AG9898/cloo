@@ -61,6 +61,33 @@ as the only state signal.
 - Use terminal-safe glyphs with ASCII fallbacks: `>` for selection, `!` for attention, `x` for
   failure, and `*` for working. Powerline separators are optional.
 
+The header row *is* the pane's top border: there is no separate border row, and the accent versus
+neutral colour of that one row is what carries focus. Its shape, implemented in
+`cloo-client`'s `chrome` module as of M2-03, is:
+
+```
+> Z 3 claude - refactor the layout pass          ! needs input
+^ ^ ^ ^        ^                                 ^
+| | | |        task label (muted)                state glyph + label (semantic)
+| | | title (accent + bold when focused, else primary)
+| | pane index (muted)
+| zoom indicator, present only while this pane is zoomed (warning)
+focus marker, a space when unfocused (accent when focused, else border)
+```
+
+Width is spent in a fixed order, so two panes on one screen degrade identically and a narrow
+header is testable against an exact string. The marker, zoom indicator, index, title, and state
+glyph are what a header is. The task label is dropped first, then the state's text label, and only
+then is the title truncated — without an ellipsis, since the marker and index already say which
+pane is being read. Below even that, the state glyph is the last thing standing. See
+[`DECISIONS.md`](DECISIONS.md) RESOLVED-14.
+
+Dimming an unfocused pane — header and body alike — is an exact blend toward the frame background
+for a 24-bit colour, and the terminal's own `DIM` attribute for a palette index or the terminal
+default, which cloo cannot know the appearance of. The blend is what keeps a dimmed amber
+`needs input` distinguishable from a dimmed grey `quiet`. The no-dim configuration turns the whole
+treatment off and leaves focus to the accent and the marker.
+
 ## Agent Workspace States
 
 Pane chrome and the attention queue use the following labels. State text and a glyph are always
@@ -96,7 +123,8 @@ Zoom exists as of M2-02 and is always a temporary, reversible view: the zoomed p
 and the rest are hidden, never closed or resized away. Because a hidden pane is still running and
 still accumulating output, the chrome must say so rather than let a zoom read as a single-pane
 session — the tab shows a zoom indicator, and the pane count stays visible. The state reaches the
-client as `LayoutSnapshot::zoomed`; rendering it is M2-03.
+client as `LayoutSnapshot::zoomed`; as of M2-03 the zoomed pane's own header carries a `Z` marker,
+and the tab row picks it up in M3.
 
 See [`DECISIONS.md`](DECISIONS.md) RESOLVED-06 through RESOLVED-09 for the decisions behind this
 guide.
