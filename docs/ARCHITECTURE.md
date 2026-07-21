@@ -91,6 +91,10 @@ would reduce that crate to a re-export shim. The current edges are:
 | `cloo-client` | `cloo-core`, `cloo-proto` | The grid cache stores wire `Cell`s and applies wire `RowUpdate`s; attach speaks the wire directly |
 | `cloo-core` | `cloo-proto`, `cloo-term` | Owns the conversion between the two cell vocabularies |
 
+`cloo-core` also names `toml` and `serde`, for configuration *parsing* only — the serializer and
+the format-preserving document model are left out, since cloo never writes a config file back.
+Parsing text is not I/O, so the no-I/O rule is intact: the file is read by the server.
+
 The `alacritty_terminal` rule is untouched by any of this: `cloo-server` names only `cloo-term`'s
 own types, and the backend stays behind that wrapper.
 
@@ -603,8 +607,20 @@ dependency:
   is re-reported, which is the queue's coalescing rule stated once rather than in every source.
 
 Validation is entirely pure: it checks shape, never the filesystem or `PATH`. Rejections are
-`MetadataError`, the sibling of `LayoutError` — nothing is partially applied. M2-05 loads profiles
-from configuration, M2-06 launches from them, and M2-07 puts attention state in the session actor.
+`MetadataError`, the sibling of `LayoutError` — nothing is partially applied.
+
+M2-05 adds `cloo-core::config`, which parses the *text* of `config.toml` into a validated `Config`
+and merges local profiles over the built-ins. It takes a string and never a path, because reading
+the file is I/O and therefore the server's; a local profile is built through the same public
+constructors a built-in uses, so configuration can express exactly what a built-in can and no more.
+Two failure modes are kept apart on purpose: a document error — malformed TOML or an unknown key —
+returns `ConfigError` and the caller keeps `Config::defaults`, while a well-formed profile that
+fails `Profile::validate` is dropped alone with a `ConfigWarning` and the rest of the document
+still loads. An unknown key is never ignored, since a silently dropped key is a setting the user
+believes is applied. Overriding a built-in replaces it in place rather than appending, so the
+launcher order a user learned survives their override. The rest of the configuration surface and
+`SIGHUP` reload are M4-01. M2-06 launches from profiles and M2-07 puts attention state in the
+session actor.
 
 ---
 

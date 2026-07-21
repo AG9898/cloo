@@ -36,6 +36,37 @@ recommended minimum is not below cloo's layout floor — a recommendation a spli
 would silently mean nothing. It never asks the filesystem whether the program exists; that is a
 launch-time failure the server reports.
 
+### Local profiles in configuration
+
+As of M2-05, `cloo-core::config::parse` turns the *text* of `config.toml` into a validated
+`Config` and merges local profiles over the built-ins. Reading the file stays with the server —
+`cloo-core` performs no I/O — and the full configuration surface plus `SIGHUP` reload land at M4.
+
+A profile is an array-of-tables entry; `id` is the only required key:
+
+```toml
+[[profile]]
+id = "notes"
+command = ["hx", "notes.md"]   # omit entirely for the user's login shell
+default_name = "notes"         # defaults to the id
+min_size = { cols = 60, rows = 15 }
+adapter = "my-adapter"
+```
+
+`command` is an argv, matching `ProfileCommand`: there is no shell-string form, so an argument
+containing a space is one argument. An omitted `command` asks for the login shell; an explicit
+empty array is a mistake and is refused rather than read as one. Reusing a built-in's `id`
+replaces that built-in **in place**, keeping its position in the launcher, because that position
+is part of what the user learned. A repeated ID within one document keeps the first definition, so
+the result never depends on which duplicate was seen last.
+
+Two kinds of wrongness get two different answers. Syntax is the document's: malformed TOML or an
+unknown key fails the whole parse and the caller keeps the defaults — an ignored typo would be a
+setting the user believes is applied. Semantics are each profile's: a well-formed entry that does
+not validate is dropped alone with a `ConfigWarning` naming it, and its neighbours still load. One
+bad profile must never cost the user the other nine, and nothing is ever silently coerced into
+something the document did not say.
+
 ## Attention Contract
 
 The server stores a state and its provenance. Generic sources are child lifecycle, terminal bell,

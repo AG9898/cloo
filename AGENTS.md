@@ -314,7 +314,9 @@ width-degradation ladder at every width, and dimming with its no-dim fallback �
 chrome spans in `cloo-client/src/renderer.rs`. M2-04 adds the profile and pane-metadata models in
 `cloo-core/src/profile.rs` and `cloo-core/src/pane.rs` — the built-ins proved to be data, pure
 validation of names, labels, and an absolute-only cwd, and attention as state plus provenance with
-its coalescing rule.
+its coalescing rule. M2-05 adds profile-configuration parsing coverage in `cloo-core/src/config.rs`
+— a document error keeping the defaults against one bad profile dropped alone, the merge and
+override rules, and the command and `min_size` surface.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -637,6 +639,14 @@ test that keeps it honest validates `/definitely/not/here/at/all` successfully. 
 `PATH` resolution are launch-time answers the server owns, and a directory that exists at
 validation time may be gone by launch anyway. Same reasoning bars `~`, which is the shell's and
 unexpanded means a directory literally named `~`.
+
+### 2026-07-21 — A config parser takes text, and syntax and semantics fail differently
+`cloo-core::config::parse` takes the *contents* of `config.toml` and never a path, which is the
+only way a config loader can live in a crate that performs no I/O — the server reads the file at
+M4-01. Inside it, a document error (malformed TOML or an unknown key, which `deny_unknown_fields`
+turns into one) rejects everything and the caller keeps the defaults, while a single profile that
+fails `Profile::validate` is dropped alone with a warning; collapsing the two either loses nine
+good profiles to one typo or silently ignores a key the user believes is applied.
 
 ### 2026-07-21 — Fix the header's degradation order, or two panes disagree on one screen
 A header that decides per situation which field to drop renders differently in two equally narrow

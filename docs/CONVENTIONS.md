@@ -154,6 +154,13 @@ crates/
 - TOML at `~/.config/cloo/config.toml`, live-reloaded on `SIGHUP`.
 - Config parsing lives in `cloo-core` and produces a validated struct. Invalid config warns and
   falls back to defaults — it never panics and never silently ignores a bad key.
+- A parser takes configuration *text*, never a path. Reading the file is the server's, which is
+  what keeps `cloo-core` free of I/O.
+- Keep the two failure modes apart. A document error (malformed TOML, unknown key) rejects the
+  whole document and the caller keeps the previous valid configuration; one well-formed entry that
+  fails validation is dropped on its own with a warning naming it, and its neighbours still load.
+  Never coerce a rejected value into a nearby valid one — a clamped setting is a setting the user
+  never wrote.
 
 ---
 

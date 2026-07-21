@@ -5,12 +5,16 @@
 //! belongs in `cloo-server` or `cloo-client` instead. Everything here is pure
 //! and unit-testable without a terminal.
 //!
-//! Six modules today:
+//! Seven modules today:
 //!
 //! - [`layout`] — the ratio-based binary layout tree, its single layout pass,
 //!   geometric directional focus, and zoom as a view flag over an untouched tree.
 //! - [`profile`] — launch profiles: the built-in `generic`, `codex`, and
 //!   `claude` are three values of one struct, not three code paths.
+//! - [`config`] — parsing `config.toml` *text* into a validated [`Config`],
+//!   merging local profiles over the built-ins. Reading the file is the
+//!   server's; a document error falls back to defaults and a single bad profile
+//!   is dropped with a warning rather than costing the rest.
 //! - [`pane`] — pane identity and the provenance-aware attention state.
 //! - [`grid`] — the emulator-cell to wire-cell conversion, the only place the
 //!   `cloo-term` and `cloo-proto` vocabularies meet.
@@ -23,6 +27,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config;
 pub mod error;
 pub mod grid;
 pub mod id;
@@ -30,6 +35,7 @@ pub mod layout;
 pub mod pane;
 pub mod profile;
 
+pub use config::{Config, ConfigError, ConfigWarning};
 pub use error::{LayoutError, MetadataError};
 pub use grid::{
     wire_attrs, wire_cell, wire_color, wire_cursor, wire_modes, wire_mouse_tracking, wire_row,
