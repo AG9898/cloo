@@ -5,6 +5,8 @@
 //! plus the exact version pin in the root manifest, is the whole mitigation for
 //! upstream API churn. See `docs/DECISIONS.md` RESOLVED-02.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use alacritty_terminal::event::{Event, EventListener};
@@ -37,6 +39,11 @@ pub struct Emulator {
     parser: Processor,
     size: TermSize,
     effects: Receiver<OuterTerminalEffect>,
+    /// Set when the child rings the terminal bell. A bell is a server-side
+    /// attention signal, not an outer-terminal effect, so it is recorded here
+    /// rather than in the effect queue and is coalesced to a single flag —
+    /// three bells in one read are one "this pane wants you", not three.
+    bell: Arc<AtomicBool>,
 }
 
 /// Bridges a [`TermSize`] to the backend's dimensions trait.
@@ -80,10 +87,19 @@ impl Dimensions for Dims {
 #[derive(Clone)]
 struct EffectListener {
     sender: SyncSender<OuterTerminalEffect>,
+    bell: Arc<AtomicBool>,
 }
 
 impl EventListener for EffectListener {
     fn send_event(&self, event: Event) {
+        // A bell is not an outer-terminal effect to forward: it is a server-side
+        // attention signal the session maps to `AttentionSource::Bell`. Record
+        // it and return before the effect match, which has no bell variant on
+        // purpose.
+        if matches!(event, Event::Bell) {
+            self.bell.store(true, Ordering::Relaxed);
+            return;
+        }
         let effect = match event {
             // OSC 0/1/2 with an empty payload is the conventional title reset.
             // The backend reports it as `Title("")`, while its separate reset
@@ -132,12 +148,17 @@ impl Emulator {
             ..Config::default()
         };
         let (sender, effects) = mpsc::sync_channel(EFFECT_QUEUE_CAPACITY);
-        let listener = EffectListener { sender };
+        let bell = Arc::new(AtomicBool::new(false));
+        let listener = EffectListener {
+            sender,
+            bell: Arc::clone(&bell),
+        };
         Self {
             term: Term::new(config, &Dims::from(size), listener),
             parser: Processor::new(),
             size,
             effects,
+            bell,
         }
     }
 
@@ -165,6 +186,18 @@ impl Emulator {
     #[must_use]
     pub fn drain_effects(&mut self) -> Vec<OuterTerminalEffect> {
         self.effects.try_iter().collect()
+    }
+
+    /// Reports whether the child rang the terminal bell since the last call, and
+    /// clears the flag.
+    ///
+    /// A bell is an attention signal, not an outer-terminal effect: the session
+    /// maps a `true` here to `AttentionSource::Bell`. It is coalesced to one
+    /// flag, so any number of bells between two calls read as a single bell —
+    /// the queue that consumes it wants "this pane rang", not a count.
+    #[must_use]
+    pub fn take_bell(&self) -> bool {
+        self.bell.swap(false, Ordering::Relaxed)
     }
 
     /// The current grid size.
@@ -837,6 +870,47 @@ mod tests {
             term.drain_effects().is_empty(),
             "effects must be drained once"
         );
+    }
+
+    // -- bells --------------------------------------------------------------
+
+    #[test]
+    fn a_bel_byte_is_taken_once_as_a_bell() {
+        let mut term = emulator(20, 3);
+        assert!(!term.take_bell(), "nothing has rung yet");
+        term.feed(b"\x07");
+        assert!(term.take_bell(), "BEL rings the bell");
+        assert!(!term.take_bell(), "a bell is taken exactly once");
+    }
+
+    #[test]
+    fn several_bells_between_reads_coalesce_to_one() {
+        // The attention queue wants "this pane rang", not a count, so three BELs
+        // in one read are one flag.
+        let mut term = emulator(20, 3);
+        term.feed(b"\x07\x07\x07");
+        assert!(term.take_bell());
+        assert!(!term.take_bell());
+    }
+
+    #[test]
+    fn ordinary_output_never_rings_the_bell() {
+        // The bait is text a screen-scraper might match on; only the BEL byte is
+        // a bell.
+        let mut term = emulator(40, 3);
+        term.feed(b"error: waiting for input... done\r\n");
+        assert!(!term.take_bell());
+    }
+
+    #[test]
+    fn a_bell_is_not_an_outer_terminal_effect() {
+        let mut term = emulator(20, 3);
+        term.feed(b"\x07");
+        assert!(
+            term.drain_effects().is_empty(),
+            "a bell is attention, never a forwarded effect"
+        );
+        assert!(term.take_bell(), "and it is still there to be taken");
     }
 
     #[test]

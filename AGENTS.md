@@ -326,7 +326,11 @@ wire projection and its `ServerMessage::Attention` round-trip in `cloo-proto`, t
 acknowledgment projection in `cloo-core/src/pane.rs`, attention resent only on change in
 `cloo-server/src/damage.rs`, and attention through the actor in `cloo-server/tests/session.rs` —
 a report reaching the next snapshot with its provenance, acknowledgment moving only the seen flag,
-the coalescing rule proved through the channel, and a report for a closed pane dropped.
+the coalescing rule proved through the channel, and a report for a closed pane dropped. M2-08 wires
+the generic sources into that path: a coalesced bell flag in `cloo-term/src/emulator.rs`, a
+non-blocking reap in `cloo-server/src/pty.rs`, and their mapping in `cloo-server/src/session.rs`
+(bell → `needs_input`/`Bell`, exit → `ready`/`failed`/`Lifecycle`), proved against real children in
+`cloo-server/tests/session.rs` including bait text that leaves attention `unknown`.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -691,3 +695,12 @@ drag must not drag every pane's name across the wire. It is sent whole, not per 
 replaces its map and never holds an entry for a pane that closed. `SessionSnapshot::metas` is
 projected from the same `Layout::resolve` pass as the rects, so a client can never be told about a
 pane it has no identity for, or vice versa.
+
+### 2026-07-22 — A PTY EOF races the child becoming reapable
+End of file on a PTY master (the translated `EIO`) fires when the kernel closes the exiting child's
+descriptors, which happens a hair *before* the process becomes a zombie — so a single
+`try_wait` at EOF can return `None` and misreport a crash as a clean exit. `Session::exit_status`
+closes the window with a short bounded spin of `try_wait`, never a blocking `wait`, because a child
+that closed its terminal but kept running (a detach) would wedge the actor forever. The reaped
+status is cached in `Pty` so the shutdown `wait` returns it instead of `waitpid`-ing the same pid
+twice and failing with `ECHILD`.

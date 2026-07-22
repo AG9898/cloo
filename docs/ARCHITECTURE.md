@@ -657,8 +657,17 @@ raced by a chatty source; a report naming a pane that has since closed is droppe
 stale mouse event is. `SessionSnapshot` projects each pane's attention from the same
 `Layout::resolve` pass as its identity, so a client is never told a pane's state without also being
 told who the pane is, and the daemon fans it out as `ServerMessage::Attention` on the attention
-clock. Which generic sources feed `SetAttention` — bells, child exits, explicit marks — is M2-08;
-the opt-in adapter control interface that may also feed it is M2-09.
+clock.
+
+M2-08 wires the generic sources the session observes for itself into that same `SetAttention`
+path. A terminal bell — surfaced by `cloo-term::Emulator::take_bell`, a coalesced flag set from the
+backend's bell event rather than an outer-terminal effect to forward — becomes `needs_input` with
+`Bell` provenance. A child's exit, seen as the PTY reaching end of file, becomes `ready` on a clean
+exit and `failed` on any other status, both with `Lifecycle` provenance; the exit code is read with
+a non-blocking reap (`PtyReactor::try_exit_status`, cached so the shutdown wait agrees) rather than
+guessed. An explicit user mark reaches the same command with `User` provenance. None of the three
+reads the pane's grid — no transcript or process-name matcher exists. The opt-in adapter control
+interface that may also feed `SetAttention` is M2-09.
 
 ---
 

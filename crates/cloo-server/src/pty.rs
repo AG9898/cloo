@@ -283,7 +283,10 @@ impl PtyConfig {
 pub struct Pty {
     master: OwnedFd,
     child: Child,
-    reaped: bool,
+    /// The child's exit status once it has been reaped, cached so that a
+    /// non-blocking reap at end of file and the blocking one at shutdown agree
+    /// and never `waitpid` a pid twice.
+    status: Option<ExitStatus>,
 }
 
 impl Pty {
@@ -348,7 +351,7 @@ impl Pty {
         Ok(Self {
             master,
             child,
-            reaped: false,
+            status: None,
         })
     }
 
@@ -437,12 +440,39 @@ impl Pty {
 
     /// Waits for the child to exit and reaps it.
     ///
+    /// Idempotent: a status observed by an earlier [`wait`](Self::wait) or
+    /// [`try_wait`](Self::try_wait) is cached and returned rather than reaped
+    /// again, which would fail with `ECHILD`.
+    ///
     /// # Errors
     ///
     /// Returns [`PtyError::Wait`] if the wait failed.
     pub fn wait(&mut self) -> Result<ExitStatus, PtyError> {
+        if let Some(status) = self.status {
+            return Ok(status);
+        }
         let status = self.child.wait().map_err(PtyError::Wait)?;
-        self.reaped = true;
+        self.status = Some(status);
+        Ok(status)
+    }
+
+    /// Reaps the child if it has already exited, without blocking.
+    ///
+    /// Returns `Ok(None)` while the child is still running. A status, once
+    /// observed, is cached so the shutdown [`wait`](Self::wait) returns it
+    /// rather than reaping the same pid twice. This is what lets the session
+    /// tell a clean exit from a crash at end of file without ever blocking on a
+    /// child that closed its terminal but kept running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtyError::Wait`] if the wait failed.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        if let Some(status) = self.status {
+            return Ok(Some(status));
+        }
+        let status = self.child.try_wait().map_err(PtyError::Wait)?;
+        self.status = status;
         Ok(status)
     }
 
@@ -467,7 +497,7 @@ impl AsFd for Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        if self.reaped {
+        if self.status.is_some() {
             return;
         }
         // Closing the master sends the child a `SIGHUP` in most cases, but a
@@ -647,6 +677,28 @@ impl PtyReactor {
                 .collect(),
             cursor: wire_cursor(self.emulator.cursor()),
         }
+    }
+
+    /// Reaps the pane's child if it has already exited, without blocking.
+    ///
+    /// Called when the PTY reaches end of file, to tell a clean exit from a
+    /// crash for the pane's lifecycle attention. The status is cached, so the
+    /// shutdown [`wait`](Self::wait) still returns it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PtyError::Wait`] if the wait failed.
+    pub fn try_exit_status(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        self.pty.get_mut().try_wait()
+    }
+
+    /// Whether the pane's child rang the terminal bell since the last check.
+    ///
+    /// A bell is a server-side attention signal — the session maps it to
+    /// `AttentionSource::Bell` — not an outer-terminal effect to forward.
+    #[must_use]
+    pub fn take_bell(&self) -> bool {
+        self.emulator.take_bell()
     }
 
     /// The pane's grid.

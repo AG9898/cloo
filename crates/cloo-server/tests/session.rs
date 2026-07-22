@@ -689,6 +689,29 @@ fn attention_of(snapshot: &SessionSnapshot, pane: PaneId) -> cloo_proto::PaneAtt
         .clone()
 }
 
+/// Polls until `pane`'s attention reaches `state`, returning the whole record.
+///
+/// A failure deadline, not a delay: it returns the instant the state holds.
+async fn wait_for_attention(
+    handle: &SessionHandle,
+    pane: PaneId,
+    state: cloo_proto::AttentionState,
+) -> cloo_proto::PaneAttention {
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let att = attention_of(&snapshot, pane);
+        if att.state == state {
+            return att;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "pane {pane:?} never reached {state:?}; it is {att:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
 #[tokio::test]
 async fn attention_updates_are_serialized_through_the_session_task() {
     use cloo_core::pane::{AttentionSource, AttentionState};
@@ -792,4 +815,81 @@ async fn a_report_for_a_closed_pane_is_dropped_without_disturbing_the_survivor()
         cloo_proto::AttentionState::Unknown,
         "the survivor is untouched by a report aimed at a pane that is gone"
     );
+}
+
+// --- Generic attention sources (M2-08) --------------------------------------
+//
+// The generic sources cloo observes for itself — a bell, a child's exit — reach
+// the same serialized `SetAttention` path a user mark does, carrying `Bell` and
+// `Lifecycle` provenance. None of them reads the pane's grid: the negative test
+// below feeds text a screen-scraper would match on and proves the state does
+// not move.
+
+#[tokio::test]
+async fn a_terminal_bell_marks_the_pane_needing_input() {
+    // The child rings the bell once, then blocks reading so the pane stays open
+    // long enough for the bell to be observed as attention.
+    let (root, session) = session_running("printf '\\a'; while read _; do :; done", 80, 24);
+
+    let att = wait_for_attention(
+        &session.handle,
+        root,
+        cloo_proto::AttentionState::NeedsInput,
+    )
+    .await;
+    assert_eq!(
+        att.source,
+        cloo_proto::AttentionSource::Bell,
+        "a bell's provenance is the bell, not a guess"
+    );
+    assert!(!att.acknowledged, "a fresh bell is unseen");
+}
+
+#[tokio::test]
+async fn a_child_that_exits_cleanly_marks_the_pane_ready_from_its_lifecycle() {
+    let (root, session) = session_running("exit 0", 80, 24);
+
+    let att = wait_for_attention(&session.handle, root, cloo_proto::AttentionState::Ready).await;
+    assert_eq!(
+        att.source,
+        cloo_proto::AttentionSource::Lifecycle,
+        "a clean exit is a lifecycle event, not a bell or a mark"
+    );
+    assert!(!att.acknowledged);
+}
+
+#[tokio::test]
+async fn a_child_that_exits_with_an_error_marks_the_pane_failed() {
+    let (root, session) = session_running("exit 7", 80, 24);
+
+    let att = wait_for_attention(&session.handle, root, cloo_proto::AttentionState::Failed).await;
+    assert_eq!(
+        att.source,
+        cloo_proto::AttentionSource::Lifecycle,
+        "a non-zero exit is a lifecycle failure, distinguished by the exit code"
+    );
+}
+
+#[tokio::test]
+async fn ordinary_output_is_never_a_source() {
+    // The bait is exactly what a transcript matcher would key on. cloo must not
+    // react to any of it — only a bell, an exit, or an explicit mark is a
+    // source, which is the "no screen scraping" rule made concrete.
+    let (root, session) = session_running(
+        "printf 'error: waiting for input... done\\n'; while read _; do stty size; done",
+        80,
+        24,
+    );
+
+    // Make sure the bait is actually on the grid before checking attention.
+    wait_for_line(&session.handle, "error").await;
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let att = attention_of(&snapshot, root);
+    assert_eq!(
+        att.state,
+        cloo_proto::AttentionState::Unknown,
+        "text on the grid is never a source"
+    );
+    assert_eq!(att.source, cloo_proto::AttentionSource::None);
 }

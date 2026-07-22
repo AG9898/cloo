@@ -107,8 +107,15 @@ is enforced by the single writer rather than raced between sources; `Acknowledge
 own command and moves only the seen flag. A report for a pane that has closed is dropped. Each
 pane's state and provenance cross to the client as `PaneAttention` in a `ServerMessage::Attention`,
 resent only when some pane's attention changes, and an uninstrumented pane is carried as `unknown`
-rather than omitted. The generic sources that feed `SetAttention` land in M2-08 and the opt-in
-adapter interface in M2-09; M2-07 is the plumbing they both target.
+rather than omitted.
+
+M2-08 connects the generic sources to that plumbing. A terminal bell maps to `needs_input` with
+`Bell` provenance; a child's exit maps to `ready` on a clean exit and `failed` on any other status,
+both with `Lifecycle` provenance and the status read by a non-blocking reap rather than inferred;
+an explicit user mark carries `User` provenance. Every one of them is something cloo observes
+directly — a control byte, an end-of-file, a command — and never text read out of the rendered
+grid, so the no-screen-scraping rule is a property of what a source *is*, not a check bolted on
+after. The opt-in adapter interface, the only advisory source, lands in M2-09.
 
 ## Compatibility Tiers
 

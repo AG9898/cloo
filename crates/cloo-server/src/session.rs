@@ -73,6 +73,17 @@ const COMMAND_QUEUE: usize = 64;
 /// wants another ratio passes one.
 pub const EVEN_SPLIT: f32 = 0.5;
 
+/// How many times a pane's child is polled for a status at end of file before
+/// giving up.
+///
+/// End of file means the child closed the slave, which for an ordinary process
+/// is part of exiting — but the kernel closes the descriptors a hair before the
+/// process becomes reapable, so a single non-blocking check can lose the race.
+/// A short bounded spin closes that window; the common case reaps on the first
+/// try, and a child that closed its terminal and kept running falls through
+/// after a trivial delay rather than blocking the actor forever.
+const EXIT_REAP_TRIES: usize = 256;
+
 /// Everything that mutates a session.
 ///
 /// Deliberately the whole vocabulary: if it is not here, it does not change
@@ -611,9 +622,16 @@ impl Session {
             match step {
                 Step::Pumped(Some((pane, Ok(Pump::Bytes(_))))) => {
                     self.report_effects(pane).await;
+                    // A bell rings in the bytes just fed. It is an attention
+                    // source, not something read out of the grid.
+                    self.note_bell(pane);
                     self.notify(SessionEvent::Output);
                 }
                 Step::Pumped(Some((pane, Ok(Pump::Eof)))) => {
+                    // The child's exit is the lifecycle source: a clean exit is
+                    // `Ready`, a crash is `Failed`, both with `Lifecycle`
+                    // provenance. Read before the grid is touched.
+                    self.note_exit(pane);
                     if let Some(pane) = self.pane_mut(pane) {
                         pane.ended = true;
                     }
@@ -883,6 +901,60 @@ impl Session {
         let before = pane.meta.attention.clone();
         pane.meta.attention.set(state, source);
         pane.meta.attention != before
+    }
+
+    /// Maps a terminal bell to a pane's attention.
+    ///
+    /// A bell is the one thing every application means the same way: this pane
+    /// wants a human. It becomes [`AttentionState::NeedsInput`] with
+    /// [`AttentionSource::Bell`] provenance, coalesced by
+    /// [`Attention::set`](cloo_core::pane::Attention::set) like every other
+    /// source — a pane that bells while already flagged is not flagged twice.
+    /// This is the whole of "a bell is a source": there is no reading of what
+    /// the child printed.
+    fn note_bell(&mut self, pane: PaneId) {
+        if self
+            .pane_mut(pane)
+            .is_some_and(|pane| pane.reactor.take_bell())
+        {
+            self.set_attention(pane, AttentionState::NeedsInput, AttentionSource::Bell);
+        }
+    }
+
+    /// Maps a child's exit to a pane's attention.
+    ///
+    /// End of file is the lifecycle event cloo observes directly. A clean exit
+    /// becomes [`AttentionState::Ready`] — finished, nobody has looked — and any
+    /// other status becomes [`AttentionState::Failed`], both with
+    /// [`AttentionSource::Lifecycle`] provenance. A child that closed its
+    /// terminal without a reapable status is treated as finished rather than as
+    /// a failure invented from a missing one. No exit code is ever guessed from
+    /// the grid.
+    fn note_exit(&mut self, pane: PaneId) {
+        let state = match self.exit_status(pane) {
+            Some(status) if status.success() => AttentionState::Ready,
+            Some(_) => AttentionState::Failed,
+            None => AttentionState::Ready,
+        };
+        self.set_attention(pane, state, AttentionSource::Lifecycle);
+    }
+
+    /// The child's exit status once its PTY has reached end of file, or `None`
+    /// if it cannot be reaped without blocking.
+    ///
+    /// The bounded spin is [`EXIT_REAP_TRIES`]: end of file all but guarantees
+    /// the child is exiting, so a status appears within a few tries, while a
+    /// child that detached and kept running falls through rather than wedging
+    /// the session on a blocking wait.
+    fn exit_status(&mut self, pane: PaneId) -> Option<ExitStatus> {
+        for _ in 0..EXIT_REAP_TRIES {
+            match self.pane_mut(pane)?.reactor.try_exit_status() {
+                Ok(Some(status)) => return Some(status),
+                Ok(None) => std::thread::yield_now(),
+                Err(_) => return None,
+            }
+        }
+        None
     }
 
     /// Marks a pane's current attention as seen, reporting whether that changed
