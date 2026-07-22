@@ -101,6 +101,22 @@ the `>` or its index do; at the smallest widths the marker is what remains. `tab
 `tab_row_span` in `cloo-client::chrome` are pure cell functions, so this ladder is byte-for-byte
 testable like the pane header.
 
+### Status bar
+
+The always-on bottom row is a minimal flat line, not a powerline segment. Its full form is
+`session:7 >2 build 2! 1x C-b ?`: session identity, active one-based tab and title, the actionable
+attention tally, then the prefix-and-help hint. The active tab's `>` and every attention glyph are
+textual signals; colour supplements them but never carries the meaning alone. An empty attention
+queue is rendered as `0!` in this row, so the count remains explicit.
+
+Width yields in one fixed order: drop the active tab title, shorten `session:7` to `s7`, collapse a
+per-state tally to its total (`3!`), then drop `?` from the `C-b ?` hint. At the narrowest useful
+width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and the
+`C-b` prefix. Below four cells no renderer can preserve all four fields, so the row is truncated
+from that compact form rather than making up a different layout. `status_bar_cells` and
+`status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
+non-truecolor fallback down-samples colours while leaving these ASCII signals intact.
+
 ## Agent Workspace States
 
 Pane chrome and the attention queue use the following labels. State text and a glyph are always
@@ -131,7 +147,8 @@ contract concrete:
 - **Summary.** The status bar's attention count is `summary_cells`: a `<count><glyph>` group per
   actionable state that has waiting panes, coloured by state, in the fixed urgency order
   `needs_input`, `failed`, `ready`. The count is text and the glyph is a shape, so the tally never
-  rests on colour alone; an empty queue renders nothing.
+  rests on colour alone; the standalone helper renders nothing for an empty queue while the
+  always-on status row supplies its explicit `0!` fallback.
 - **Queue.** `AttentionQueue` holds the newest unacknowledged actionable event per pane —
   `needs_input`, `ready`, or `failed`; progress and the absence of news never enter. Its order is
   deterministic: newest first, a repeat of the same live state coalesces in place, a changed state

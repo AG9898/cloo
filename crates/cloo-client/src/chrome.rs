@@ -33,7 +33,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use cloo_proto::{Cell, CellAttrs, Color, Point, TabSummary};
+use cloo_proto::{Cell, CellAttrs, Color, Point, SessionId, TabSummary};
 
 use crate::renderer::Span;
 
@@ -772,6 +772,199 @@ pub fn summary_span(at: Point, queue: &AttentionQueue) -> Span {
     Span::new(at, summary_cells(queue))
 }
 
+// ---------------------------------------------------------------------------
+// Status bar
+// ---------------------------------------------------------------------------
+
+/// The hard-coded prefix hint until keymap configuration lands.
+///
+/// The prefix is a chrome concern, not session state: a client may render the
+/// same attached session with a different local keymap once configuration is
+/// available. For now M2's fixed `C-b` binding makes this a constant.
+pub const DEFAULT_PREFIX_HINT: &str = "C-b ?";
+
+/// Builds the always-on minimal status row, exactly `width` cells wide.
+///
+/// The flat row carries the session, active tab, attention summary, and prefix
+/// hint without depending on colour or non-ASCII glyphs. Its fixed degradation
+/// ladder first drops the active tab title, then shortens the session and
+/// attention summary, then drops the help suffix from the prefix. At very
+/// narrow widths it condenses to `s>!b`: session, tab, attention, and the
+/// `C-b` prefix, in that order. A terminal narrower than four cells is the
+/// unavoidable physical limit and receives the leading part of that form.
+#[must_use]
+pub fn status_bar_cells(
+    session: SessionId,
+    tabs: &[TabSummary],
+    queue: &AttentionQueue,
+    width: u16,
+) -> Vec<Cell> {
+    let width = usize::from(width);
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let session_full = text_cells(
+        &format!("session:{}", session.get()),
+        PRIMARY,
+        CellAttrs::BOLD,
+    );
+    let session_short = text_cells(&format!("s{}", session.get()), PRIMARY, CellAttrs::BOLD);
+    let session_mark = text_cells("s", PRIMARY, CellAttrs::BOLD);
+
+    let (tab_index, tab_title) = tabs
+        .iter()
+        .enumerate()
+        .find(|(_, tab)| tab.active)
+        .map(|(index, tab)| (index + 1, tab.title.as_str()))
+        .unwrap_or((0, ""));
+    let tab_short_text = if tab_index == 0 {
+        ">?".to_owned()
+    } else {
+        format!(">{tab_index}")
+    };
+    let tab_full_text = if tab_title.is_empty() {
+        tab_short_text.clone()
+    } else {
+        format!("{tab_short_text} {tab_title}")
+    };
+    let tab_full = text_cells(&tab_full_text, ACCENT, CellAttrs::BOLD);
+    let tab_short = text_cells(&tab_short_text, ACCENT, CellAttrs::BOLD);
+    let tab_mark = text_cells(">", ACCENT, CellAttrs::BOLD);
+
+    let attention_full = status_attention_cells(queue);
+    let attention_count = text_cells(
+        &format!("{}!", queue.count()),
+        if queue.is_empty() { MUTED } else { WARNING },
+        CellAttrs::BOLD,
+    );
+    let attention_mark = text_cells("!", WARNING, CellAttrs::BOLD);
+
+    let prefix_full = text_cells(DEFAULT_PREFIX_HINT, PRIMARY, CellAttrs::NONE);
+    let prefix_short = text_cells("C-b", PRIMARY, CellAttrs::NONE);
+
+    // The order here is the documented yield order. Keeping the complete
+    // candidate rows explicit makes a narrow status bar deterministic and
+    // byte-for-byte testable, like pane headers and tab rows.
+    for parts in [
+        [
+            session_full.as_slice(),
+            tab_full.as_slice(),
+            attention_full.as_slice(),
+            prefix_full.as_slice(),
+        ],
+        [
+            session_full.as_slice(),
+            tab_short.as_slice(),
+            attention_full.as_slice(),
+            prefix_full.as_slice(),
+        ],
+        [
+            session_short.as_slice(),
+            tab_short.as_slice(),
+            attention_full.as_slice(),
+            prefix_full.as_slice(),
+        ],
+        [
+            session_short.as_slice(),
+            tab_short.as_slice(),
+            attention_count.as_slice(),
+            prefix_full.as_slice(),
+        ],
+        [
+            session_short.as_slice(),
+            tab_short.as_slice(),
+            attention_count.as_slice(),
+            prefix_short.as_slice(),
+        ],
+        [
+            session_short.as_slice(),
+            tab_mark.as_slice(),
+            attention_count.as_slice(),
+            prefix_short.as_slice(),
+        ],
+        [
+            session_mark.as_slice(),
+            tab_mark.as_slice(),
+            attention_mark.as_slice(),
+            prefix_short.as_slice(),
+        ],
+    ] {
+        if status_row_len(&parts) <= width {
+            return status_row(&parts, width);
+        }
+    }
+
+    // Four ASCII markers retain every required field down to four cells. The
+    // final `b` is the compact spelling of the configured `C-b` prefix.
+    let mut cells = Vec::with_capacity(width);
+    cells.extend_from_slice(&session_mark);
+    cells.extend_from_slice(&tab_mark);
+    cells.extend_from_slice(&attention_mark);
+    push_str(&mut cells, "b", PRIMARY, CellAttrs::NONE);
+    cells.truncate(width);
+    pad_status_row(&mut cells, width);
+    cells
+}
+
+/// Positions the always-on status row for the chrome renderer.
+#[must_use]
+pub fn status_bar_span(
+    at: Point,
+    session: SessionId,
+    tabs: &[TabSummary],
+    queue: &AttentionQueue,
+    width: u16,
+) -> Span {
+    Span::new(at, status_bar_cells(session, tabs, queue, width))
+}
+
+/// Turns text into cells for one flat status-bar field.
+fn text_cells(text: &str, fg: Color, attrs: CellAttrs) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(len(text));
+    push_str(&mut cells, text, fg, attrs);
+    cells
+}
+
+/// The detailed attention field for a status row.
+///
+/// `summary_cells` intentionally answers with nothing when no pane needs
+/// attention. The always-on row still needs to say that its count is zero, so
+/// it supplies that one explicit, text-and-glyph fallback.
+fn status_attention_cells(queue: &AttentionQueue) -> Vec<Cell> {
+    let summary = summary_cells(queue);
+    if summary.is_empty() {
+        text_cells("0!", MUTED, CellAttrs::BOLD)
+    } else {
+        summary
+    }
+}
+
+/// The number of cells in a status row, including field gaps.
+fn status_row_len(parts: &[&[Cell]; 4]) -> usize {
+    parts.iter().map(|part| part.len()).sum::<usize>() + parts.len().saturating_sub(1)
+}
+
+/// Joins already-fitted fields into one padded status row.
+fn status_row(parts: &[&[Cell]; 4], width: usize) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(width);
+    for (index, part) in parts.iter().enumerate() {
+        if index > 0 {
+            push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+        }
+        cells.extend_from_slice(part);
+    }
+    pad_status_row(&mut cells, width);
+    cells
+}
+
+/// Pads a status row with chrome-surface cells.
+fn pad_status_row(cells: &mut Vec<Cell>, width: usize) {
+    while cells.len() < width {
+        push_str(cells, " ", Color::Default, CellAttrs::NONE);
+    }
+}
+
 /// One row of the attention queue overlay, exactly `width` cells wide.
 ///
 /// A queue row is the pane header's layout applied to an entry: the same fixed
@@ -1442,6 +1635,89 @@ mod tests {
         let span = summary_span(Point::new(3, 0), &queue);
         assert_eq!(span.at, Point::new(3, 0));
         assert!(!span.cells.is_empty());
+    }
+
+    // -- Status bar ------------------------------------------------------
+
+    fn status_tabs() -> Vec<TabSummary> {
+        vec![
+            TabSummary {
+                tab: cloo_proto::TabId::new(3),
+                title: "shell".into(),
+                active: false,
+            },
+            TabSummary {
+                tab: cloo_proto::TabId::new(8),
+                title: "build".into(),
+                active: true,
+            },
+        ]
+    }
+
+    fn status_queue() -> AttentionQueue {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "lint", Attention::NeedsInput);
+        queue.record(2, "test", Attention::NeedsInput);
+        queue.record(3, "build", Attention::Failed);
+        queue
+    }
+
+    #[test]
+    fn a_wide_status_bar_has_every_required_field() {
+        let queue = status_queue();
+        let row = status_bar_cells(SessionId::new(7), &status_tabs(), &queue, 30);
+        assert_eq!(text_of(&row), "session:7 >2 build 2! 1x C-b ?");
+        assert_eq!(fg_of(&row, '>'), ACCENT, "the active tab stays visible");
+        assert_eq!(fg_of(&row, '!'), Attention::NeedsInput.color());
+    }
+
+    #[test]
+    fn a_narrow_status_bar_yields_detail_before_required_fields() {
+        let queue = status_queue();
+        assert_eq!(
+            text_of(&status_bar_cells(
+                SessionId::new(7),
+                &status_tabs(),
+                &queue,
+                12
+            )),
+            "s7 >2 3! C-b",
+            "the tab title, state split, and help suffix yield first"
+        );
+        assert_eq!(
+            text_of(&status_bar_cells(
+                SessionId::new(7),
+                &status_tabs(),
+                &queue,
+                6
+            )),
+            "s>!b  ",
+            "four ASCII markers keep every field at the narrowest useful size"
+        );
+    }
+
+    #[test]
+    fn a_status_bar_uses_ascii_tokens_and_a_zero_attention_count() {
+        let queue = AttentionQueue::new();
+        let row = status_bar_cells(SessionId::new(1), &status_tabs(), &queue, 40);
+        let text = text_of(&row);
+        assert!(row.iter().all(|cell| cell.ch.is_ascii()));
+        assert!(text.contains("0!"), "zero is an explicit attention count");
+        assert!(text.contains(DEFAULT_PREFIX_HINT));
+    }
+
+    #[test]
+    fn a_status_bar_span_keeps_its_origin_and_width() {
+        let queue = AttentionQueue::new();
+        let span = status_bar_span(
+            Point::new(4, 23),
+            SessionId::new(1),
+            &status_tabs(),
+            &queue,
+            20,
+        );
+        assert_eq!(span.at, Point::new(4, 23));
+        assert_eq!(span.cells.len(), 20);
     }
 
     // -- Queue row rendering ----------------------------------------------

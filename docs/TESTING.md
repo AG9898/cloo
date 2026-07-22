@@ -370,6 +370,17 @@ into cells and into deterministic model state:
 origin, each span restating its style absolutely so a second one cannot inherit the first's, an
 empty span moving nothing, and spans never clearing the outer terminal.
 
+M3-03 adds the always-on minimal status row through the same pure chrome-and-renderer seam:
+
+- A wide row carries its session, active one-based tab and title, per-state actionable tally, and
+  `C-b ?` hint; the active marker and tally glyphs are asserted as text as well as colour.
+- Narrow rows follow the fixed yield order rather than dropping fields opportunistically: a
+  12-cell row keeps `s7 >2 3! C-b`, and the four-cell `s>!b` form retains one ASCII marker for
+  every required field. An empty queue explicitly says `0!`.
+- A renderer with `truecolor` disabled paints the same status row without any 24-bit SGR while its
+  session, active-tab, attention, and prefix strings remain visible, covering the terminal-safe
+  colour and ASCII fallback together.
+
 Typed outer-terminal effects are unit tested in `src/effects.rs`: the policy begins deny-all, a
 permitted title and a capable, permitted OSC 52 store produce their exact terminal bytes once,
 and an unsupported, unsafe, policy-denied, or capability-denied effect leaves the output buffer
@@ -493,8 +504,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
 | `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, exit-frame detection, and pane identity, attention, and tab selection each resent only when they change rather than on every damaged row |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
-| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
-| `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck |
+| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, and grid apply/resize rejections |
+| `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck; plus the always-on status row's session, active tab, attention, and prefix forms yielding to ASCII markers |
 | `crates/cloo-client/src/effects.rs` | Outer-terminal effects | Default-deny client policy, exact title and OSC 52 rendering, capability checks, safe suppression, and base64 padding |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |

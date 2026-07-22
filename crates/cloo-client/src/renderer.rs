@@ -894,6 +894,38 @@ mod tests {
     }
 
     #[test]
+    fn a_status_bar_keeps_its_ascii_signals_without_truecolor() {
+        let mut queue = crate::chrome::AttentionQueue::new();
+        queue.record(1, "build", crate::chrome::Attention::NeedsInput);
+        let tabs = [cloo_proto::TabSummary {
+            tab: cloo_proto::TabId::new(4),
+            title: "build".into(),
+            active: true,
+        }];
+        let span = crate::chrome::status_bar_span(
+            Point::new(0, 23),
+            cloo_proto::SessionId::new(1),
+            &tabs,
+            &queue,
+            40,
+        );
+
+        let mut renderer = Renderer::new(TermCaps::default());
+        let frame = renderer.render_spans(&[span], None).to_vec();
+        assert!(
+            !frame.windows(3).any(|bytes| bytes == b";2;"),
+            "a terminal without truecolor must not receive 24-bit SGR"
+        );
+        for token in [b"session:1".as_slice(), b">1 build", b"!", b"C-b ?"] {
+            assert!(
+                frame.windows(token.len()).any(|bytes| bytes == token),
+                "missing ASCII status token {:?}",
+                std::str::from_utf8(token).expect("test tokens are UTF-8")
+            );
+        }
+    }
+
+    #[test]
     fn output_matches_the_last_frame() {
         let grid = Grid::new(Size::new(1, 1));
         let mut renderer = Renderer::new(TermCaps::default());

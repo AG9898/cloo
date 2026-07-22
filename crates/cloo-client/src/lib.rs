@@ -50,9 +50,10 @@ pub use capabilities::{
     detect_attach_caps, detect_caps,
 };
 pub use chrome::{
-    Attention, AttentionQueue, ChromeOptions, PaneChrome, QueueEntry, Toast, ToastDeck, dim_cell,
-    dim_cells, header_cells, header_span, queue_row_cells, queue_row_span, summary_cells,
-    summary_span, tab_row_cells, tab_row_span, toast_cells, toast_span,
+    Attention, AttentionQueue, ChromeOptions, DEFAULT_PREFIX_HINT, PaneChrome, QueueEntry, Toast,
+    ToastDeck, dim_cell, dim_cells, header_cells, header_span, queue_row_cells, queue_row_span,
+    status_bar_cells, status_bar_span, summary_cells, summary_span, tab_row_cells, tab_row_span,
+    toast_cells, toast_span,
 };
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{

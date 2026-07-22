@@ -239,7 +239,9 @@ predictable row is a worthwhile density cost and avoids a contextual UI that app
 **Alternatives rejected:** A contextual bar hides the information most useful when coordinating
 many panes. A permanently heavy powerline bar wastes cells and depends too much on font glyphs.
 
-**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), `cloo-client`, M3 status-bar scope.
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), `cloo-client`, M3 status-bar scope. Implemented in
+M3-03 as a pure `status_bar_cells`/`status_bar_span` row: session, active tab, actionable tally,
+and `C-b ?` yield through documented ASCII forms rather than relying on a powerline font or colour.
 
 ---
 
