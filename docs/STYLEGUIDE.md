@@ -50,6 +50,27 @@ The named theme set is `storm`, `night`, `gruvbox`, and `nord`. On a 16-color te
 accent, success, warning, error, and info to their nearest ANSI semantic colors. Never use color
 as the only state signal.
 
+### Token resolution and palette inheritance
+
+The named palettes are complete tables for the twelve roles above. A terminal that negotiated
+truecolor receives those exact RGB values; otherwise the client resolves tokens *before*
+rendering to this fixed 16-color-safe table, rather than asking a 256-colour quantizer to guess:
+
+| Token roles | ANSI fallback |
+|---|---|
+| frame, surface | black (`0`) |
+| raised surface, border, muted | bright black (`8`) |
+| accent | bright magenta (`13`) |
+| primary | bright white (`15`) |
+| default text | white (`7`) |
+| success, warning, error, info | bright green (`10`), bright yellow (`11`), bright red (`9`), bright cyan (`14`) |
+
+`terminal` palette inheritance instead leaves frame, surface, raised surface, primary, and default
+text at the outer terminal's defaults while retaining the same ANSI semantic colours for borders,
+focus, and attention. It therefore honours a user's terminal palette without losing the focused
+`>` marker or an attention glyph such as `!`; those text signals remain mandatory in every theme.
+The client resolves the choice locally, so it never becomes server or session state.
+
 ## Geometry and Chrome
 
 - Render a one-cell gutter between panes. Do not imitate the mock's rounded corners or shadows.

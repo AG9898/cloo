@@ -31,8 +31,8 @@
 //!
 //! Rendering is a pure function into a byte buffer rather than a write to a
 //! descriptor, which is what makes a fake grid renderable in a unit test with an
-//! exact expected string. Named themes land in M4; the chrome palette here is
-//! the reference `storm` theme.
+//! exact expected string. Named themes resolve into client-local tokens, so an
+//! attached terminal can inherit its palette or use a deliberate ANSI fallback.
 
 pub mod attach;
 pub mod capabilities;
@@ -43,6 +43,7 @@ pub mod outer;
 pub mod raw_mode;
 pub mod renderer;
 pub mod resize;
+pub mod theme;
 
 pub use attach::{AttachError, Attached, attach, handshake};
 pub use capabilities::{
@@ -51,9 +52,9 @@ pub use capabilities::{
 };
 pub use chrome::{
     Attention, AttentionQueue, ChromeOptions, DEFAULT_PREFIX_HINT, PaneChrome, QueueEntry, Toast,
-    ToastDeck, dim_cell, dim_cells, header_cells, header_span, queue_row_cells, queue_row_span,
-    status_bar_cells, status_bar_span, summary_cells, summary_span, tab_row_cells, tab_row_span,
-    toast_cells, toast_span,
+    ToastDeck, dim_cell, dim_cell_with_theme, dim_cells, header_cells, header_span,
+    queue_row_cells, queue_row_span, status_bar_cells, status_bar_span, summary_cells,
+    summary_span, tab_row_cells, tab_row_span, toast_cells, toast_span,
 };
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{
@@ -64,3 +65,4 @@ pub use outer::{current_size, window_size};
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, Grid, RenderError, Renderer, Span};
 pub use resize::ResizeWatch;
+pub use theme::{Theme, ThemeToken};

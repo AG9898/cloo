@@ -409,12 +409,7 @@ fn push_sgr(out: &mut String, style: Style, caps: TermCaps) {
 fn push_color(out: &mut String, color: Color, selector: u32, caps: TermCaps) {
     match color {
         Color::Default => {}
-        Color::Indexed(index) => {
-            out.push(';');
-            push_num(out, selector);
-            out.push_str(";5;");
-            push_num(out, u32::from(index));
-        }
+        Color::Indexed(index) => push_indexed_color(out, index, selector),
         Color::Rgb(r, g, b) if caps.truecolor => {
             out.push(';');
             push_num(out, selector);
@@ -428,13 +423,33 @@ fn push_color(out: &mut String, color: Color, selector: u32, caps: TermCaps) {
         // The documented fallback for a terminal without 24-bit colour: the
         // nearest 256-palette entry. Never emit a sequence the client said it
         // could not display and hope for the best.
-        Color::Rgb(r, g, b) => {
-            out.push(';');
-            push_num(out, selector);
-            out.push_str(";5;");
-            push_num(out, u32::from(downsample_rgb(r, g, b)));
-        }
+        Color::Rgb(r, g, b) => push_indexed_color(out, downsample_rgb(r, g, b), selector),
     }
+}
+
+/// Emits one palette colour with the narrowest standard SGR spelling.
+///
+/// Indices 0 through 15 are the ANSI palette, not merely the first sixteen
+/// slots of a 256-colour terminal. Rendering them as `30..=37`/`90..=97` (and
+/// their background counterparts) is what makes the theme resolver's
+/// 16-colour fallback work on a terminal that does not understand `38;5` at
+/// all. Higher indices retain the 256-colour form.
+fn push_indexed_color(out: &mut String, index: u8, selector: u32) {
+    out.push(';');
+    if index < 16 {
+        let background = selector == 48;
+        let base = match (background, index < 8) {
+            (false, true) => 30,
+            (false, false) => 90,
+            (true, true) => 40,
+            (true, false) => 100,
+        };
+        push_num(out, base + u32::from(index % 8));
+        return;
+    }
+    push_num(out, selector);
+    out.push_str(";5;");
+    push_num(out, u32::from(index));
 }
 
 /// Maps a 24-bit colour onto the xterm 256-colour palette.
@@ -676,7 +691,7 @@ mod tests {
                 &[1],
                 Some(Cursor::new(Point::new(1, 1), CursorShape::Block)),
             ),
-            b"\x1b[?25l\x1b[2;1H\x1b[0;1;38;5;4mhi\x1b[0m\x1b[2;2H\x1b[2 q\x1b[?25h"
+            b"\x1b[?25l\x1b[2;1H\x1b[0;1;34mhi\x1b[0m\x1b[2;2H\x1b[2 q\x1b[?25h"
         );
     }
 
@@ -699,7 +714,7 @@ mod tests {
         let mut renderer = Renderer::new(TermCaps::default());
         assert_eq!(
             renderer.render_full(&grid, None),
-            b"\x1b[?25l\x1b[H\x1b[2J\x1b[1;1H\x1b[0;1;38;5;4mabc\x1b[0m"
+            b"\x1b[?25l\x1b[H\x1b[2J\x1b[1;1H\x1b[0;1;34mabc\x1b[0m"
         );
     }
 
@@ -716,7 +731,7 @@ mod tests {
         // rendition even if a frame is dropped.
         assert_eq!(
             renderer.render_full(&grid, None),
-            b"\x1b[?25l\x1b[H\x1b[2J\x1b[1;1H\x1b[0ma\x1b[0;4;38;5;1mb\x1b[0m"
+            b"\x1b[?25l\x1b[H\x1b[2J\x1b[1;1H\x1b[0ma\x1b[0;4;31mb\x1b[0m"
         );
     }
 
@@ -743,7 +758,7 @@ mod tests {
     }
 
     #[test]
-    fn a_background_uses_the_48_selector() {
+    fn ansi_palette_entries_use_basic_foreground_and_background_codes() {
         let mut out = String::new();
         push_sgr(
             &mut out,
@@ -754,7 +769,7 @@ mod tests {
             },
             TermCaps::default(),
         );
-        assert_eq!(out, "\x1b[0;38;5;2;48;5;3m");
+        assert_eq!(out, "\x1b[0;32;43m");
     }
 
     #[test]
@@ -851,7 +866,7 @@ mod tests {
         );
         assert_eq!(
             renderer.render_spans(&[span], None),
-            b"\x1b[?25l\x1b[3;5H\x1b[0;1;38;5;5mhi\x1b[0m"
+            b"\x1b[?25l\x1b[3;5H\x1b[0;1;35mhi\x1b[0m"
         );
     }
 

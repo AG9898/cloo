@@ -36,6 +36,7 @@ use std::collections::{HashMap, VecDeque};
 use cloo_proto::{Cell, CellAttrs, Color, Point, SessionId, TabSummary};
 
 use crate::renderer::Span;
+use crate::theme::{Theme, ThemeToken};
 
 // ---------------------------------------------------------------------------
 // Palette
@@ -127,12 +128,18 @@ impl Attention {
     /// The semantic colour supplementing the glyph and label.
     #[must_use]
     pub const fn color(self) -> Color {
+        self.color_in(Theme::storm())
+    }
+
+    /// The semantic colour supplementing this state in one client theme.
+    #[must_use]
+    pub const fn color_in(self, theme: Theme) -> Color {
         match self {
-            Self::Unknown | Self::Quiet => MUTED,
-            Self::Working => INFO,
-            Self::NeedsInput => WARNING,
-            Self::Ready => SUCCESS,
-            Self::Failed => ERROR,
+            Self::Unknown | Self::Quiet => theme.color(ThemeToken::Muted),
+            Self::Working => theme.color(ThemeToken::Info),
+            Self::NeedsInput => theme.color(ThemeToken::Warning),
+            Self::Ready => theme.color(ThemeToken::Success),
+            Self::Failed => theme.color(ThemeToken::Error),
         }
     }
 
@@ -161,12 +168,15 @@ pub struct ChromeOptions {
     /// configuration that turns this off; with it off, focus is carried by the
     /// accent border and marker alone.
     pub dim_unfocused: bool,
+    /// The client-local theme for this chrome pass.
+    pub theme: Theme,
 }
 
 impl Default for ChromeOptions {
     fn default() -> Self {
         Self {
             dim_unfocused: true,
+            theme: Theme::storm(),
         }
     }
 }
@@ -177,7 +187,15 @@ impl ChromeOptions {
     pub const fn no_dim() -> Self {
         Self {
             dim_unfocused: false,
+            theme: Theme::storm(),
         }
+    }
+
+    /// Applies one client-local theme while preserving the chosen dimming mode.
+    #[must_use]
+    pub const fn with_theme(mut self, theme: Theme) -> Self {
+        self.theme = theme;
+        self
     }
 }
 
@@ -334,11 +352,11 @@ fn tab_row_len(tabs: &[TabSummary], start: usize) -> usize {
 /// terminal's own default is left alone here and dimmed by the `DIM` attribute
 /// instead — guessing at what index 4 looks like in the user's palette would
 /// produce a worse answer than the terminal's own faint rendition.
-fn toward_frame(color: Color) -> Option<Color> {
+fn toward_frame(color: Color, frame: Color) -> Option<Color> {
     let Color::Rgb(r, g, b) = color else {
         return None;
     };
-    let Color::Rgb(fr, fg, fb) = FRAME else {
+    let Color::Rgb(fr, fg, fb) = frame else {
         return None;
     };
     let blend = |value: u8, frame: u8| -> u8 {
@@ -355,12 +373,22 @@ fn toward_frame(color: Color) -> Option<Color> {
 /// back to `DIM`, the terminal's own faint rendition.
 #[must_use]
 pub fn dim_cell(cell: Cell) -> Cell {
+    dim_cell_with_theme(cell, Theme::storm())
+}
+
+/// Dims one cell toward the frame colour of `theme`.
+///
+/// A terminal-palette-inheriting theme has no RGB frame to blend toward, so it
+/// deliberately takes the terminal's `DIM` attribute path instead of guessing
+/// what the user's default background looks like.
+#[must_use]
+pub fn dim_cell_with_theme(cell: Cell, theme: Theme) -> Cell {
     let mut dimmed = cell;
-    match toward_frame(cell.fg) {
+    match toward_frame(cell.fg, theme.color(ThemeToken::Frame)) {
         Some(fg) => dimmed.fg = fg,
         None => dimmed.attrs = dimmed.attrs.union(CellAttrs::DIM),
     }
-    if let Some(bg) = toward_frame(cell.bg) {
+    if let Some(bg) = toward_frame(cell.bg, theme.color(ThemeToken::Frame)) {
         dimmed.bg = bg;
     }
     dimmed
@@ -375,7 +403,11 @@ pub fn dim_cells(cells: &[Cell], focused: bool, options: ChromeOptions) -> Vec<C
     if focused || !options.dim_unfocused {
         return cells.to_vec();
     }
-    cells.iter().copied().map(dim_cell).collect()
+    cells
+        .iter()
+        .copied()
+        .map(|cell| dim_cell_with_theme(cell, options.theme))
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -495,9 +527,14 @@ pub fn header_cells(chrome: &PaneChrome, width: u16, options: ChromeOptions) -> 
     }
     push_str(&mut cells, state, chrome.attention.color(), CellAttrs::NONE);
 
+    // Chrome is authored against the reference Storm tokens above. Translate
+    // those roles before applying dimming, so a non-Storm frame is also the
+    // colour an unfocused pane recedes toward.
+    let mut cells = options.theme.map_storm_cells(cells);
+
     if !chrome.focused && options.dim_unfocused {
         for cell in &mut cells {
-            *cell = dim_cell(*cell);
+            *cell = dim_cell_with_theme(*cell, options.theme);
         }
     }
     cells
@@ -1204,6 +1241,29 @@ mod tests {
         );
         assert!(text_of(&unfocused_needs_input).contains('!'));
         assert!(text_of(&focused_quiet).contains('-'));
+    }
+
+    #[test]
+    fn terminal_palette_theme_keeps_focus_and_attention_distinct_without_truecolor() {
+        let pane = PaneChrome::new(1, "agent")
+            .attention(Attention::NeedsInput)
+            .focused(true);
+        let options = ChromeOptions::no_dim().with_theme(Theme::terminal());
+        let row = header_cells(&pane, wide(), options);
+
+        // Both meanings remain readable even when a terminal owns the actual
+        // palette: ASCII carries the state, and their ANSI semantic colours do
+        // not collapse into one another.
+        assert_eq!(fg_of(&row, '>'), Color::Indexed(13));
+        assert_eq!(fg_of(&row, '!'), Color::Indexed(11));
+        assert!(text_of(&row).contains("! needs input"));
+
+        let span = Span::new(Point::new(0, 0), row);
+        let mut renderer = crate::renderer::Renderer::new(cloo_proto::TermCaps::default());
+        let bytes = renderer.render_spans(&[span], None);
+        assert!(!bytes.windows(3).any(|window| window == b";2;"));
+        assert!(bytes.windows(4).any(|window| window == b";95m"));
+        assert!(bytes.windows(4).any(|window| window == b";93m"));
     }
 
     #[test]

@@ -342,6 +342,11 @@ restart, invalid replacement retaining the previous value, missing-file reset to
 per-profile warnings that do not suppress valid neighbours — including a real `SIGHUP` routed
 through the same reload path. The binary's `cli.rs` test also uses an isolated child environment
 to prove a configured profile resolves before the local terminal is touched.
+M4-03 adds pure theme coverage in `cloo-core/src/theme.rs` and `cloo-client/src/theme.rs`: every
+named palette supplies every style-guide token, Storm is pinned to the handoff values, and a
+terminal-palette theme emits basic ANSI semantic colours rather than RGB or 256-colour guesses.
+The chrome fixture proves focus's `>` and attention's `!` remain textually and colour-wise distinct
+without truecolor.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 

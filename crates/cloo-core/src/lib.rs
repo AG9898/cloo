@@ -24,6 +24,8 @@
 //! - [`id`] — monotonic allocators for the `cloo-proto` newtype IDs.
 //! - [`error`] — the crate-local [`LayoutError`], [`MetadataError`], and
 //!   [`SessionError`].
+//! - [`theme`] — named semantic chrome palettes and terminal-palette
+//!   inheritance as data; the client resolves them for its terminal.
 //!
 //! Layout is always stored as ratios, never as cell counts. Cell counts are
 //! derived by [`Layout::resolve`] on every pass, which is what lets a layout
@@ -40,6 +42,7 @@ pub mod pane;
 pub mod profile;
 pub mod session;
 pub mod tab;
+pub mod theme;
 
 pub use config::{Config, ConfigError, ConfigWarning};
 pub use error::{LayoutError, MetadataError, SessionError};
@@ -55,3 +58,4 @@ pub use pane::{
 pub use profile::{AdapterId, Profile, ProfileCommand, ProfileId};
 pub use session::Session;
 pub use tab::{MAX_TAB_NAME, Tab, TabName};
+pub use theme::{Rgb, ThemeChoice, ThemeName, ThemeTokens};

@@ -103,6 +103,10 @@ Covered today in `cloo-core`, all as unit tests:
   crossing intact, an invisible cursor becoming "nothing to draw" rather than a hidden shape, and
   `HollowBlock` degrading to a block. One assertion compares the two crates' attribute bit values
   directly — it is the tripwire for the duplicated `CellAttrs` layouts drifting apart.
+- Named theme data (M4-03): the four stable names each carrying all twelve style-guide tokens,
+  their configuration spellings round-tripping, and Storm's reference values matching the style
+  guide exactly. Theme choice remains model data; terminal-specific colour resolution stays in the
+  client.
 
 Covered today in `cloo-proto`, all as unit tests:
 
@@ -377,6 +381,12 @@ into cells and into deterministic model state:
 origin, each span restating its style absolutely so a second one cannot inherit the first's, an
 empty span moving nothing, and spans never clearing the outer terminal.
 
+M4-03 adds pure theme resolution in `cloo-client::theme`: every named palette resolves each
+style-guide role deterministically, non-truecolor paths choose explicit ANSI entries below 16, and
+terminal-palette inheritance leaves default foreground/background alone while retaining distinct
+semantic colours. A chrome-and-renderer fixture proves a focused `>` and `needs input` `!` remain
+different ANSI colours and textual signals without truecolor; it asserts no RGB SGR is emitted.
+
 M3-03 adds the always-on minimal status row through the same pure chrome-and-renderer seam:
 
 - A wide row carries its session, active one-based tab and title, per-state actionable tally, and
@@ -500,6 +510,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/config.rs` | Configuration | Profile definitions parsed from `config.toml` text: a document error keeping the defaults and an unknown key refusing rather than being ignored, one invalid profile dropped with a warning while its neighbours load, built-in override in place, duplicate IDs keeping the first, and the command and `min_size` surface — omitted command as login shell, empty array refused, arguments verbatim, a recommendation below the layout floor rejected |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused, `MetadataError` naming its field and escaping a rejected control character rather than printing it, and `SessionError` naming the tab it refused and explaining the last-tab rule |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
+| `crates/cloo-core/src/theme.rs` | Theme model | The four named palette spellings, complete style-guide token tables, and Storm's exact reference values |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, typed title/clipboard effects with backend replies suppressed, one fixture per negotiated input mode — set, read back, and cleared — and the bell taken once, coalesced across several rings, never rung by text, and never surfaced as an effect |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/src/launch.rs` | Launching | Pure only: a profile's default name kept and the user's overriding it, an invalid profile refused before anything is spawned, argv kept verbatim through `configure`, the session's environment surviving a profile's command, and login-shell resolution with its `/bin/sh` fallback |
@@ -514,6 +525,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, exit-frame detection, and pane identity, attention, and tab selection each resent only when they change rather than on every damaged row |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, and grid apply/resize rejections |
+| `crates/cloo-client/src/theme.rs` | Theme resolution | Named theme RGB tokens, deliberate ANSI semantic fallback below truecolor, and outer-terminal palette inheritance |
 | `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck; plus the always-on status row's session, active tab, attention, and prefix forms yielding to ASCII markers |
 | `crates/cloo-client/src/effects.rs` | Outer-terminal effects | Default-deny client policy, exact title and OSC 52 rendering, capability checks, safe suppression, and base64 padding |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |

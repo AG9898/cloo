@@ -260,6 +260,10 @@ inheritance prevents cloo chrome from fighting an existing terminal setup.
 palette would leave focus and attention styling without a canonical semantic mapping.
 
 **Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), M4 theme configuration and renderer tokens.
+Implemented in M4-03: `cloo-core` owns the `storm`, `night`, `gruvbox`, and `nord` token tables
+plus the terminal-palette choice, while `cloo-client` resolves that data to exact RGB or deliberate
+ANSI semantic roles before rendering. The client-local resolution means two attachments can use
+different terminal palettes without changing session state.
 
 ---
 
