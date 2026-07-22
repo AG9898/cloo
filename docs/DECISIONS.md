@@ -413,3 +413,37 @@ the marker plus index already tell the user which pane they are reading.
 **Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md) geometry and chrome, `crates/cloo-client/src/chrome.rs`,
 `crates/cloo-client/src/renderer.rs`. Implemented in M2-03; no wire change, because chrome is
 rendered entirely client-side.
+
+---
+
+### RESOLVED-15 — Adapters speak a separate vocabulary on a separate socket, and a profile is the opt-in
+
+**Resolved:** 2026-07-22
+
+**Decision:** The local adapter control interface is a second endpoint, `<session socket>.control`,
+bound by the daemon under the same lock and cleanup rules as the session socket. An adapter speaks
+`cloo-proto::adapter` — `AdapterMessage::{Hello, Report}` and `AdapterReply::{Ready, Refused,
+Applied, Rejected}` — never `ClientMessage`, and its `AdapterState` carries only `working`,
+`needs_input`, `ready`, and `failed`. A report is applied only to a pane whose profile named that
+adapter, and the server stamps `AttentionSource::Adapter(<announced name>)` itself. Every report is
+answered.
+
+**Why:** "An adapter may only report advisory state" is worth more as a type than as a check. A
+separate enum on a separate socket means there is no variant an adapter could send that reaches a
+child, so no refusal branch has to exist or be maintained; a narrowed state enum means `quiet` and
+`unknown` — the two claims only cloo's own observations may make — are unrepresentable rather than
+rejected. The profile's `adapter` field becomes load-bearing instead of decorative: it is the
+user's consent, no built-in sets one, and a default install is therefore reachable by no local
+process at all. Answering every report matters because an adapter is usually a script, and a silent
+drop is indistinguishable from success.
+
+**Alternatives rejected:** Adding an `AdapterAttach` variant to `ClientMessage` on the one socket
+would have saved a listener, but it widens the client vocabulary and turns each narrowing into a
+runtime role check. Letting any connected adapter speak for any pane would make the profile field
+meaningless and let one harness's helper overwrite a `failed` cloo observed for itself. A separate
+protocol version number for the control socket would only ever diverge from the shared one by
+accident.
+
+**Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md),
+`crates/cloo-proto/src/adapter.rs`, `crates/cloo-server/src/{socket,conn,daemon,session}.rs`,
+`crates/cloo-core/src/pane.rs`. Implemented in M2-09; `PROTOCOL_VERSION` bumped to 8.

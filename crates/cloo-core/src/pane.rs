@@ -240,6 +240,22 @@ impl AttentionState {
         matches!(self, Self::NeedsInput | Self::Ready | Self::Failed)
     }
 
+    /// The state an opt-in adapter reported, as a model state.
+    ///
+    /// The conversion only goes this way. An [`AdapterState`](cloo_proto::AdapterState)
+    /// cannot express [`Quiet`](Self::Quiet) or [`Unknown`](Self::Unknown), so
+    /// an advisory source can never assert "there is nothing to do" nor
+    /// withdraw a state cloo observed for itself.
+    #[must_use]
+    pub const fn from_adapter(state: cloo_proto::AdapterState) -> Self {
+        match state {
+            cloo_proto::AdapterState::Working => Self::Working,
+            cloo_proto::AdapterState::NeedsInput => Self::NeedsInput,
+            cloo_proto::AdapterState::Ready => Self::Ready,
+            cloo_proto::AdapterState::Failed => Self::Failed,
+        }
+    }
+
     /// Projects the state onto its wire form.
     #[must_use]
     pub const fn to_wire(self) -> cloo_proto::AttentionState {
@@ -386,6 +402,15 @@ pub struct PaneMeta {
     /// The profile's recommended minimum geometry, carried along so a split can
     /// consult it without looking the profile up again.
     pub min_size: Size,
+    /// The opt-in adapter the pane's profile named, if it named one.
+    ///
+    /// This is the whole of the pane's consent: a report from the local control
+    /// interface is applied only when it comes from *this* adapter, so naming
+    /// one in a profile is what lets it speak, and a pane that named none is
+    /// reachable by no adapter at all. Carried on the pane rather than looked up
+    /// from the profile at report time, because a profile can be reloaded and a
+    /// running pane was launched under the one it was launched under.
+    pub adapter: Option<AdapterId>,
     /// The pane's attention state and provenance.
     pub attention: Attention,
 }
@@ -414,8 +439,19 @@ impl PaneMeta {
             task,
             cwd,
             min_size: profile.min_size,
+            adapter: profile.adapter.clone(),
             attention: Attention::default(),
         })
+    }
+
+    /// Whether `adapter` is the one this pane's profile opted into.
+    ///
+    /// A pane whose profile named no adapter permits none: the built-ins name
+    /// none, so nothing on a default install can have its state claimed by a
+    /// local process the user never configured.
+    #[must_use]
+    pub fn permits_adapter(&self, adapter: &AdapterId) -> bool {
+        self.adapter.as_ref() == Some(adapter)
     }
 
     /// The projection of this metadata a client is sent.
@@ -722,6 +758,56 @@ mod tests {
         // user said nothing" from "the user said something short".
         let meta = PaneMeta::from_profile(&Profile::generic(), None, None, cwd()).expect("valid");
         assert_eq!(meta.to_wire(cloo_proto::PaneId::new(1)).task, None);
+    }
+
+    #[test]
+    fn a_pane_permits_only_the_adapter_its_profile_named() {
+        let named = AdapterId::new("my-adapter").expect("valid id");
+        let other = AdapterId::new("someone-else").expect("valid id");
+        let profile = Profile::generic().adapter(named.clone());
+        let meta = PaneMeta::from_profile(&profile, None, None, cwd()).expect("valid");
+
+        assert_eq!(meta.adapter.as_ref(), Some(&named));
+        assert!(meta.permits_adapter(&named));
+        assert!(
+            !meta.permits_adapter(&other),
+            "an adapter the profile did not name may not speak for the pane"
+        );
+    }
+
+    #[test]
+    fn a_pane_whose_profile_named_no_adapter_permits_none() {
+        // Every built-in is in this state, which is what keeps a default
+        // install from having its pane states claimed by a local process the
+        // user never opted into.
+        let any = AdapterId::new("my-adapter").expect("valid id");
+        for profile in Profile::built_ins() {
+            let meta = PaneMeta::from_profile(&profile, None, None, cwd()).expect("valid");
+            assert_eq!(meta.adapter, None, "{} names an adapter", profile.id);
+            assert!(!meta.permits_adapter(&any));
+        }
+    }
+
+    #[test]
+    fn an_adapter_state_can_never_become_quiet_or_unknown() {
+        // The permitted set, and the two states an advisory source may not
+        // claim: `quiet` asserts there is nothing to do, and `unknown` would
+        // withdraw something cloo observed for itself.
+        let permitted = [
+            (cloo_proto::AdapterState::Working, AttentionState::Working),
+            (
+                cloo_proto::AdapterState::NeedsInput,
+                AttentionState::NeedsInput,
+            ),
+            (cloo_proto::AdapterState::Ready, AttentionState::Ready),
+            (cloo_proto::AdapterState::Failed, AttentionState::Failed),
+        ];
+        for (reported, expected) in permitted {
+            let state = AttentionState::from_adapter(reported);
+            assert_eq!(state, expected);
+            assert_ne!(state, AttentionState::Quiet);
+            assert_ne!(state, AttentionState::Unknown);
+        }
     }
 
     #[test]

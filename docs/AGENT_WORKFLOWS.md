@@ -117,7 +117,30 @@ both with `Lifecycle` provenance and the status read by a non-blocking reap rath
 an explicit user mark carries `User` provenance. Every one of them is something cloo observes
 directly — a control byte, an end-of-file, a command — and never text read out of the rendered
 grid, so the no-screen-scraping rule is a property of what a source *is*, not a check bolted on
-after. The opt-in adapter interface, the only advisory source, lands in M2-09.
+after.
+
+M2-09 adds the only advisory source: the local adapter control interface. An adapter — a wrapper
+script, a hook, a small daemon of the user's own — connects to `<session socket>.control`, announces
+itself with `AdapterMessage::Hello { protocol_version, adapter }`, and then sends
+`AdapterMessage::Report { pane, state }`. It is deliberately not a client: it speaks a separate
+vocabulary with no variant for keystrokes, geometry, or anything else that reaches a child, and its
+`AdapterState` is exactly `working`, `needs_input`, `ready`, and `failed` — an advisory source
+cannot claim `quiet` or withdraw an observed state to `unknown`.
+
+Two things are checked, and both are the user's decision rather than cloo's. The announced name
+goes through the same `AdapterId` alphabet a profile uses, because that name is what the chrome
+renders as provenance. Then each report is applied only to a pane whose profile named *that*
+adapter: the `adapter` field in a profile is the opt-in, no built-in sets one, and a pane that named
+none is reachable by no adapter at all. The server stamps `AttentionSource::Adapter(<name>)` itself
+rather than taking provenance from the report, so an adapter can say what it thinks and never that
+a bell, an exit, or the user said it, and every claim stays visibly attributed and advisory in the
+chrome.
+
+Every report is answered — `Applied`, or `Rejected { UnknownPane | NotPermitted | SessionEnded }`.
+An adapter is usually a script, and a silent drop is indistinguishable from success to one; a
+refusal it can print is the difference between a misconfigured profile being found and being lived
+with. A refused report changes nothing at all, including the repaint, so an impostor cannot even
+learn a pane exists by watching for a flicker.
 
 M2-10 renders those two surfaces client-side in `cloo-client`'s `chrome` module. The status bar's
 compact count is `summary_cells`, a per-state tally coloured and glyphed in a fixed urgency order.

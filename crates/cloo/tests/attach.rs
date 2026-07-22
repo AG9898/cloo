@@ -26,16 +26,17 @@ use cloo_client::effects::{EffectPolicy, apply_effect};
 use cloo_client::renderer::Grid;
 use cloo_client::theme::Theme;
 use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
-use cloo_core::profile::{Profile, ProfileCommand};
+use cloo_core::profile::{AdapterId, Profile, ProfileCommand};
 use cloo_proto::{
-    Action, ClientMessage, ClipboardTarget, CopyMotion, FrameStream, MouseButton, MouseEvent,
-    MouseKind, MouseMods, MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId, PaneModes,
-    Point, RowUpdate, SearchDirection, ServerMessage, Size, TermCaps,
+    Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, AttentionSource,
+    AttentionState, ClientMessage, ClipboardTarget, CopyMotion, FrameStream, MouseButton,
+    MouseEvent, MouseKind, MouseMods, MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId,
+    PaneModes, Point, RowUpdate, SearchDirection, ServerMessage, Size, TermCaps,
 };
 use cloo_server::daemon::Daemon;
 use cloo_server::launch::Launch;
 use cloo_server::pty::PtyConfig;
-use cloo_server::socket::Listener;
+use cloo_server::socket::{Listener, control_path_for};
 use tokio::net::UnixStream;
 
 /// How long any single wire expectation may take before the test fails.
@@ -109,6 +110,90 @@ fn spawn_daemon(
     let pid = daemon.child_id();
     let handle = tokio::spawn(async move { daemon.run().await });
     (pid, handle)
+}
+
+/// The same, for a pane whose profile opted into `adapter`.
+///
+/// The opt-in is the profile's, so it has to be set before the pane exists —
+/// which is exactly how a user's `config.toml` sets it.
+fn spawn_daemon_with_adapter(
+    socket: &Path,
+    script: &str,
+    adapter: &str,
+) -> tokio::task::JoinHandle<Result<std::process::ExitStatus, cloo_server::DaemonError>> {
+    let mut profile = Profile::generic().adapter(AdapterId::new(adapter).expect("a valid id"));
+    profile.command = ProfileCommand::Program {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), script.to_owned()],
+    };
+    let launch = Launch::new(
+        profile,
+        Some(PaneName::new("api").expect("a valid name")),
+        None,
+        WorkingDir::new("/").expect("absolute"),
+    )
+    .expect("the profile validates");
+
+    let listener = Listener::bind(socket).expect("a fresh socket path must bind");
+    let mut daemon = Daemon::new(listener, &base(), launch).expect("the daemon must start");
+    tokio::spawn(async move { daemon.run().await })
+}
+
+/// Connects to a daemon's adapter control socket and announces `adapter`.
+async fn control(socket: &Path, adapter: &str) -> FrameStream<UnixStream> {
+    let path = control_path_for(socket);
+    let stream = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match UnixStream::connect(&path).await {
+                Ok(stream) => return stream,
+                // The daemon binds both sockets before it accepts on either, so
+                // this only spins while the task is being scheduled.
+                Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+    })
+    .await
+    .expect("the control socket must appear");
+
+    let mut conn = FrameStream::new(stream);
+    conn.send(&AdapterMessage::Hello {
+        protocol_version: PROTOCOL_VERSION,
+        adapter: adapter.to_owned(),
+    })
+    .await
+    .expect("the hello must send");
+    let reply: Option<AdapterReply> = conn.recv().await.expect("the control socket must answer");
+    assert!(
+        matches!(reply, Some(AdapterReply::Ready { .. })),
+        "expected a ready, got {reply:?}"
+    );
+    conn
+}
+
+/// Reads frames until the server reports `pane`'s attention as `state`.
+async fn await_attention(
+    attached: &mut Attached<UnixStream>,
+    pane: PaneId,
+    state: AttentionState,
+) -> cloo_proto::PaneAttention {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Attention(states)) => {
+                    if let Some(found) = states
+                        .into_iter()
+                        .find(|att| att.pane == pane && att.state == state)
+                    {
+                        return found;
+                    }
+                }
+                Some(_) => {}
+                None => panic!("the server closed before reporting {state:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("pane {pane:?} was never reported {state:?}"))
 }
 
 /// Whether `pid` still exists.
@@ -917,6 +1002,88 @@ async fn copy_mode_highlights_reach_a_client_and_its_copy_is_policy_gated() {
         .expect("the in-memory terminal accepts one store")
     );
     assert_eq!(terminal, b"\x1b]52;c;bmVlZGxlIG9uZQ==\x1b\\");
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    drop(attached);
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn an_opt_in_adapter_reports_advisory_state_that_reaches_a_client_attributed() {
+    // The whole loop for the one advisory source: a separate local process
+    // connects to the control socket, claims a state for a pane whose profile
+    // opted into it, and an attached client is told both the state *and* who
+    // said so. The pane is the daemon's first pane, which is always id 1.
+    let dir = TempDir::new("adapter");
+    let socket = dir.socket();
+    let daemon = spawn_daemon_with_adapter(&socket, "read _; exit 0", "my-adapter");
+    let pane = PaneId::new(1);
+
+    let mut attached = client(&socket).await;
+    let mut adapter = control(&socket, "my-adapter").await;
+
+    adapter
+        .send(&AdapterMessage::Report {
+            pane,
+            state: AdapterState::NeedsInput,
+        })
+        .await
+        .expect("the report must send");
+    let reply: Option<AdapterReply> = adapter.recv().await.expect("every report is answered");
+    assert_eq!(
+        reply,
+        Some(AdapterReply::Applied { pane }),
+        "an opted-in adapter's report must be applied"
+    );
+
+    let att = await_attention(&mut attached, pane, AttentionState::NeedsInput).await;
+    assert_eq!(
+        att.source,
+        AttentionSource::Adapter("my-adapter".to_owned()),
+        "the claim must reach the chrome attributed, never as an observed fact"
+    );
+    assert!(!att.acknowledged);
+
+    // An impostor gets a refusal it can print, and changes nothing: the profile
+    // named one adapter, and that name is the user's whole consent.
+    let mut impostor = control(&socket, "someone-else").await;
+    impostor
+        .send(&AdapterMessage::Report {
+            pane,
+            state: AdapterState::Ready,
+        })
+        .await
+        .expect("the report must send");
+    let reply: Option<AdapterReply> = impostor.recv().await.expect("every report is answered");
+    assert_eq!(
+        reply,
+        Some(AdapterReply::Rejected {
+            pane,
+            reason: AdapterRejection::NotPermitted,
+        })
+    );
+
+    // Prove the refusal was a no-op rather than a race: a state the permitted
+    // adapter reports afterwards is the next one the client sees.
+    adapter
+        .send(&AdapterMessage::Report {
+            pane,
+            state: AdapterState::Failed,
+        })
+        .await
+        .expect("the report must send");
+    let att = await_attention(&mut attached, pane, AttentionState::Failed).await;
+    assert_eq!(
+        att.source,
+        AttentionSource::Adapter("my-adapter".to_owned())
+    );
 
     attached
         .send_input(b"\n".to_vec())

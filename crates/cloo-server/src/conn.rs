@@ -9,6 +9,12 @@
 //! it was turned away can print something a user can act on; a client that just
 //! sees a closed socket cannot.
 //!
+//! [`accept_adapter`] is the same rule for the other endpoint. An opt-in local
+//! adapter connects to the control socket, announces itself, and is refused the
+//! same way — but it speaks [`AdapterMessage`], a vocabulary with no variant
+//! that could reach a child, so "an adapter may only report attention" needs no
+//! enforcement branch anywhere in the server.
+//!
 //! [`session_snapshot`] is the other half of attach. A client caches the
 //! visible grid and nothing else, so it needs a full picture the moment it
 //! connects — geometry, contents, negotiated input modes, cursor — and it must
@@ -16,9 +22,11 @@
 //! message types an incremental update uses, so applying a resync and applying
 //! damage stay one code path on the client.
 
+use cloo_core::AdapterId;
+use cloo_core::error::MetadataError;
 use cloo_proto::{
-    ClientMessage, FrameStream, ProtoError, ServerMessage, SessionId, Size, StreamError, TermCaps,
-    check_version,
+    AdapterMessage, AdapterReply, ClientMessage, FrameStream, ProtoError, ServerMessage, SessionId,
+    Size, StreamError, TermCaps, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -114,6 +122,104 @@ pub async fn accept_attach<T: AsyncRead + AsyncWrite + Unpin>(
     // sent is the more useful thing to report either way.
     let _ = refuse(conn, &rejection.to_string()).await;
     Err(rejection)
+}
+
+/// Why a control connection was refused.
+#[derive(Debug)]
+pub enum ControlRejection {
+    /// The peer speaks a different protocol version.
+    Version(ProtoError),
+    /// The first frame was something other than a hello.
+    NotAHello,
+    /// The announced name is not a usable adapter ID.
+    BadAdapterId(MetadataError),
+    /// The peer closed before saying anything.
+    Closed,
+    /// The connection failed while the handshake was in flight.
+    Stream(StreamError),
+}
+
+impl core::fmt::Display for ControlRejection {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Version(e) => write!(f, "{e}"),
+            Self::NotAHello => {
+                f.write_str("the first message on a control connection must be a hello")
+            }
+            Self::BadAdapterId(e) => write!(f, "unusable adapter id: {e}"),
+            Self::Closed => f.write_str("the adapter closed before announcing itself"),
+            Self::Stream(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for ControlRejection {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Version(e) => Some(e),
+            Self::BadAdapterId(e) => Some(e),
+            Self::Stream(e) => Some(e),
+            Self::NotAHello | Self::Closed => None,
+        }
+    }
+}
+
+/// Reads the first frame on the control socket and validates it as a hello.
+///
+/// The adapter's name is validated here, before it can be attached to any
+/// claim: provenance is rendered in pane chrome, so a name is user-facing text
+/// and goes through the same [`AdapterId`] alphabet a profile's does. Nothing
+/// else about the adapter is checked — whether it may speak for a *pane* is the
+/// session's answer, one report at a time, since panes come and go while the
+/// connection stays open.
+///
+/// # Errors
+///
+/// Returns the [`ControlRejection`] that was reported to the adapter, or the
+/// transport failure that prevented reporting one.
+pub async fn accept_adapter<T: AsyncRead + AsyncWrite + Unpin>(
+    conn: &mut Connection<T>,
+) -> Result<AdapterId, ControlRejection> {
+    let first = match conn.recv::<AdapterMessage>().await {
+        Ok(Some(message)) => message,
+        Ok(None) => return Err(ControlRejection::Closed),
+        Err(err) => return Err(ControlRejection::Stream(err)),
+    };
+
+    let rejection = match first {
+        AdapterMessage::Hello {
+            protocol_version,
+            adapter,
+        } => match check_version(protocol_version) {
+            Ok(()) => match AdapterId::new(adapter) {
+                Ok(id) => return Ok(id),
+                Err(bad) => ControlRejection::BadAdapterId(bad),
+            },
+            Err(mismatch) => ControlRejection::Version(mismatch),
+        },
+        AdapterMessage::Report { .. } => ControlRejection::NotAHello,
+    };
+
+    // Best effort, as with an attach: the reason is the useful half, and the
+    // peer may already be gone.
+    let _ = refuse_adapter(conn, &rejection.to_string()).await;
+    Err(rejection)
+}
+
+/// Tells an adapter why it is not being served, and closes the write half.
+///
+/// # Errors
+///
+/// Returns the transport failure. The caller drops the connection regardless.
+pub async fn refuse_adapter<T: AsyncRead + AsyncWrite + Unpin>(
+    conn: &mut Connection<T>,
+    reason: &str,
+) -> Result<(), StreamError> {
+    conn.send(&AdapterReply::Refused {
+        reason: reason.to_owned(),
+    })
+    .await?;
+    conn.shutdown().await
 }
 
 /// Tells a client why it is not being served, and closes the write half.
@@ -351,6 +457,107 @@ mod tests {
         assert!(
             matches!(err, AttachRejection::Closed),
             "a peer that went away is not a refusal, got {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_adapter_that_announces_itself_is_accepted_under_its_own_name() {
+        let (adapter, server) = duplex(1024);
+        let mut adapter = Connection::new(adapter);
+        let mut server = Connection::new(server);
+
+        adapter
+            .send(&cloo_proto::AdapterMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                adapter: "my-adapter".to_owned(),
+            })
+            .await
+            .expect("hello sends");
+
+        let id = accept_adapter(&mut server)
+            .await
+            .expect("a matching hello is accepted");
+        assert_eq!(id.as_str(), "my-adapter");
+    }
+
+    #[tokio::test]
+    async fn an_adapter_that_reports_before_saying_who_it_is_is_refused() {
+        // Provenance is the whole value of an advisory claim, so a report from
+        // an anonymous connection can never be attributed and is never applied.
+        let (adapter, server) = duplex(1024);
+        let mut adapter = Connection::new(adapter);
+        let mut server = Connection::new(server);
+
+        adapter
+            .send(&cloo_proto::AdapterMessage::Report {
+                pane: PaneId::new(1),
+                state: cloo_proto::AdapterState::NeedsInput,
+            })
+            .await
+            .expect("report sends");
+
+        let err = accept_adapter(&mut server)
+            .await
+            .expect_err("a report before a hello must be refused");
+        assert!(matches!(err, ControlRejection::NotAHello), "got {err}");
+
+        let reply: Option<cloo_proto::AdapterReply> =
+            adapter.recv().await.expect("a refusal arrives");
+        let Some(cloo_proto::AdapterReply::Refused { reason }) = reply else {
+            panic!("expected a refusal, got {reply:?}");
+        };
+        assert!(reason.contains("must be a hello"), "got: {reason}");
+    }
+
+    #[tokio::test]
+    async fn an_adapter_on_another_protocol_version_is_refused_with_a_reason() {
+        let (adapter, server) = duplex(1024);
+        let mut adapter = Connection::new(adapter);
+        let mut server = Connection::new(server);
+
+        adapter
+            .send(&cloo_proto::AdapterMessage::Hello {
+                protocol_version: PROTOCOL_VERSION.wrapping_add(1),
+                adapter: "my-adapter".to_owned(),
+            })
+            .await
+            .expect("hello sends");
+
+        let err = accept_adapter(&mut server)
+            .await
+            .expect_err("a mismatched version must be refused");
+        assert!(matches!(err, ControlRejection::Version(_)), "got {err}");
+
+        let reply: Option<cloo_proto::AdapterReply> =
+            adapter.recv().await.expect("a refusal arrives");
+        let Some(cloo_proto::AdapterReply::Refused { reason }) = reply else {
+            panic!("expected a refusal, got {reply:?}");
+        };
+        assert!(reason.contains("version mismatch"), "got: {reason}");
+    }
+
+    #[tokio::test]
+    async fn an_adapter_name_that_could_not_be_a_profile_id_is_refused() {
+        // The name is rendered in pane chrome as provenance, so it goes through
+        // the same alphabet a profile's adapter field does.
+        let (adapter, server) = duplex(1024);
+        let mut adapter = Connection::new(adapter);
+        let mut server = Connection::new(server);
+
+        adapter
+            .send(&cloo_proto::AdapterMessage::Hello {
+                protocol_version: PROTOCOL_VERSION,
+                adapter: "Not An\u{1b}Id".to_owned(),
+            })
+            .await
+            .expect("hello sends");
+
+        let err = accept_adapter(&mut server)
+            .await
+            .expect_err("an unusable name must be refused");
+        assert!(
+            matches!(err, ControlRejection::BadAdapterId(_)),
+            "got {err}"
         );
     }
 

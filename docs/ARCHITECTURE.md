@@ -47,7 +47,7 @@ boundary, which is what makes the emulation backend replaceable.
 
 | Crate | Owns | Explicitly does not |
 |---|---|---|
-| `cloo-proto` | Wire types, framing (serde + postcard), the framed async transport, handshake version | Know anything about PTYs or rendering |
+| `cloo-proto` | Wire types, framing (serde + postcard), the framed async transport, the adapter control vocabulary, handshake version | Know anything about PTYs or rendering |
 | `cloo-term` | Thin wrapper over `alacritty_terminal` — feed bytes, read cells, resize, scrollback | Leak `alacritty_terminal` types across its public API |
 | `cloo-core` | Session/tab/pane model, layout tree, keymap, profiles, pane metadata, config | Perform I/O |
 | `cloo-server` | Daemon: socket, PTY reactor, damage tracking | Decide what anything looks like |
@@ -191,6 +191,12 @@ collide, and it is a fallback rather than the default because `/tmp` outlives a 
 A session name reaches the filesystem, so `/`, `\`, control characters, `.`, `..`, and the empty
 string are refused rather than sanitized — silently renaming a session produces a socket the user
 cannot find.
+
+A session has a second endpoint beside it: `control_path_for` appends `.control` to the session
+socket, and that is where opt-in local adapters connect (M2-09). It is derived rather than resolved
+separately so `CLOO_SOCKET` moves both halves of a development daemon together, and it is a
+`Listener` like any other — its own `.control.lock`, the same stale cleanup, the same unlink on
+drop.
 
 **Ownership is an advisory `flock` on a companion `<socket>.lock`, not the presence of the socket
 file.** A socket file proves nothing: a daemon killed with `SIGKILL` leaves one behind, and a live
@@ -664,10 +670,12 @@ dependency:
   `Profile::validate`. `ProfileCommand` is `LoginShell` or an explicit `Program { program, args }`
   — an argv, never a shell string, so no metadata can be word-split on the way to `execvp`.
   Resolving `$SHELL` and finding the executable on `PATH` are launch-time answers the server owns.
-- `cloo-core::pane` — `PaneMeta { profile, name, task, cwd, min_size, attention }`, with
+- `cloo-core::pane` — `PaneMeta { profile, name, task, cwd, min_size, adapter, attention }`, with
   `PaneName`, `TaskLabel`, and `WorkingDir` as validated newtypes. A working directory must be
   absolute (a relative one means the *daemon's* cwd, not the user's) and control characters are
-  rejected in every user-supplied field.
+  rejected in every user-supplied field. `adapter` is copied from the profile the pane was launched
+  under and is the pane's whole consent for the M2-09 control interface — a pane carries the opt-in
+  it was launched with, not whatever a later configuration reload says.
 - `Attention { state, source, acknowledged }` keeps `AttentionState` — the six states of
   [STYLEGUIDE.md](STYLEGUIDE.md#agent-workspace-states) — beside an `AttentionSource` of `None`,
   `Bell`, `Lifecycle`, `User`, or `Adapter(AdapterId)`. Only the adapter variant is advisory.
@@ -708,8 +716,28 @@ backend's bell event rather than an outer-terminal effect to forward — becomes
 exit and `failed` on any other status, both with `Lifecycle` provenance; the exit code is read with
 a non-blocking reap (`PtyReactor::try_exit_status`, cached so the shutdown wait agrees) rather than
 guessed. An explicit user mark reaches the same command with `User` provenance. None of the three
-reads the pane's grid — no transcript or process-name matcher exists. The opt-in adapter control
-interface that may also feed `SetAttention` is M2-09.
+reads the pane's grid — no transcript or process-name matcher exists.
+
+M2-09 adds the one advisory source: the local adapter control interface. It is a **second socket**,
+`<session socket>.control`, derived from the session socket by `socket::control_path_for` and bound
+by `Daemon::new` under the same lock, stale-cleanup, and unlink-on-drop rules. An adapter is not a
+client and does not speak `ClientMessage`: `cloo-proto::adapter` is a separate vocabulary of
+`AdapterMessage::{Hello, Report}` and `AdapterReply::{Ready, Refused, Applied, Rejected}`, so "an
+adapter may only report attention" is a property of the enum it can encode rather than a refusal
+some branch has to remember. `AdapterState` likewise carries only `working`, `needs_input`,
+`ready`, and `failed` — an advisory source cannot assert `quiet` or withdraw an observed state to
+`unknown`.
+
+Two gates and no more. `conn::accept_adapter` validates the version and the announced name through
+the same `AdapterId` alphabet a profile uses, because that name is rendered as provenance; then
+each report goes to the session actor as `Command::AdapterReport`, which applies it only if the
+pane's own `PaneMeta::adapter` — copied from the profile it was launched under — names that
+adapter. That is what "opt-in" means: a profile's `adapter` field is the user's consent, no
+built-in sets one, and a pane that named none is reachable by no adapter. The provenance is stamped
+by the session from the announced name, never taken from the report, so an adapter can say what it
+thinks and never that a bell, an exit, or the user said it. Every report is answered — `Applied`,
+or `Rejected` with `UnknownPane`, `NotPermitted`, or `SessionEnded` — because an adapter is a
+separate program and a silent drop is indistinguishable from success to a script.
 
 M5-01 puts copy mode and regex search in that same actor. A pane owns its `CopyMode` state — a
 retained-scrollback cursor, an optional linear selection, and the current regex results — while
@@ -840,7 +868,10 @@ desync that presents as a rendering bug.
 `Attach` carries the client's version and `Hello` echoes the server's, so either side can catch
 a mismatch before interpreting a single message. `check_version` returns
 `ProtoError::VersionMismatch`, whose `Display` output is the user-facing reattach message; the
-server relays it in `Refused { reason }` and closes the connection.
+server relays it in `Refused { reason }` and closes the connection. The adapter control socket
+shares the same number and the same check — `AdapterMessage::Hello` carries it and
+`AdapterReply::Ready` echoes it — because both protocols are built from this one crate and two
+version constants could only ever disagree by accident.
 
 ### Types on the wire
 

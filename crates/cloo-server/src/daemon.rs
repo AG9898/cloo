@@ -13,9 +13,10 @@ use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
 
+use cloo_core::AdapterId;
 use cloo_proto::{
-    Action, ClientId, ClientMessage, ClipboardTarget, OuterTerminalEffect, PaneId, ServerMessage,
-    SessionId, Size, StreamError,
+    Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, ClientId, ClientMessage,
+    ClipboardTarget, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size, StreamError,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -26,7 +27,7 @@ use crate::damage::{DamageFrame, DamageTracker};
 use crate::launch::Launch;
 use crate::pty::{PtyConfig, PtyError};
 use crate::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, usable};
-use crate::socket::{Listener, SocketError};
+use crate::socket::{Listener, SocketError, control_path_for};
 
 /// The render tick, capping fan-out at roughly 60fps.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -121,6 +122,17 @@ enum ClientCommand {
         target: ClipboardTarget,
         reply: oneshot::Sender<Option<(PaneId, OuterTerminalEffect)>>,
     },
+    /// An opt-in local adapter reported an advisory state for one pane.
+    ///
+    /// Carried on the same queue as everything else a socket task asks for, so
+    /// an adapter cannot reach the session actor by any path a client cannot,
+    /// and cannot outrun the coalescing rule by having its own.
+    Report {
+        pane: PaneId,
+        adapter: AdapterId,
+        state: AdapterState,
+        reply: oneshot::Sender<Result<(), AdapterRejection>>,
+    },
     /// The connection ended, so it no longer contributes to the minimum size.
     Gone { client: ClientId },
 }
@@ -147,6 +159,9 @@ pub struct Daemon {
     /// Owns the socket file and its lock. Dropped last, unlinking the path.
     _listener: Listener,
     accepting: UnixListener,
+    /// Owns the adapter control socket beside it, on the same terms.
+    _control: Listener,
+    control: UnixListener,
     /// The only way into the session. `None` once the daemon releases it so
     /// the session task can finish and report the child's status.
     session: Option<SessionHandle>,
@@ -174,11 +189,17 @@ impl Daemon {
     /// what runs in the pane and what it is called. Both were validated before
     /// they got here, so the only failure left is the spawn.
     ///
+    /// The adapter control socket is bound here too, derived from the session
+    /// socket's path. Pairing them at construction is what makes the two
+    /// impossible to get out of step: one daemon, one session, one control
+    /// endpoint, cleaned up by the same ownership rule.
+    ///
     /// Must be called from inside a Tokio runtime context.
     ///
     /// # Errors
     ///
-    /// Returns [`DaemonError::Accept`] if the listener could not be registered
+    /// Returns [`DaemonError::Socket`] if the control socket could not be
+    /// owned, [`DaemonError::Accept`] if a listener could not be registered
     /// with the runtime, or [`DaemonError::Pty`] if the child could not be
     /// started — a profile naming a program that is not on `PATH` arrives here.
     pub fn new(
@@ -192,6 +213,15 @@ impl Daemon {
             .map_err(DaemonError::Accept)?;
         let accepting = UnixListener::from_std(std_listener).map_err(DaemonError::Accept)?;
 
+        let control_listener = Listener::bind(&control_path_for(listener.path()))?;
+        let std_control = control_listener
+            .try_clone_std()
+            .map_err(DaemonError::Accept)?;
+        std_control
+            .set_nonblocking(true)
+            .map_err(DaemonError::Accept)?;
+        let control = UnixListener::from_std(std_control).map_err(DaemonError::Accept)?;
+
         let spawned = Session::spawn(config, THE_PANE, launch)?;
         let size = cloo_core::grid::wire_size(config.term_size());
         let (client_tx, client_commands) = mpsc::channel(CLIENT_COMMAND_QUEUE);
@@ -200,6 +230,8 @@ impl Daemon {
         Ok(Self {
             _listener: listener,
             accepting,
+            _control: control_listener,
+            control,
             session: Some(spawned.handle),
             events: spawned.events,
             task: Some(spawned.task),
@@ -273,6 +305,10 @@ impl Daemon {
                     let (stream, _addr) = accepted.map_err(DaemonError::Accept)?;
                     self.spawn_client(stream);
                 }
+                accepted = self.control.accept() => {
+                    let (stream, _addr) = accepted.map_err(DaemonError::Accept)?;
+                    self.spawn_adapter(stream);
+                }
                 _ = frames.tick(), if dirty => {
                     self.publish_current().await?;
                     dirty = false;
@@ -314,6 +350,18 @@ impl Daemon {
         let commands = self.client_tx.clone();
         self.clients.spawn(async move {
             serve_client(stream, client, commands).await;
+        });
+    }
+
+    /// Starts a control-socket task for one opt-in adapter.
+    ///
+    /// An adapter gets no [`ClientId`]: it is not a client, contributes nothing
+    /// to the negotiated size, and receives no damage. It shares the client
+    /// [`JoinSet`] only so a departing daemon stops it the same way.
+    fn spawn_adapter(&mut self, stream: UnixStream) {
+        let commands = self.client_tx.clone();
+        self.clients.spawn(async move {
+            serve_adapter(stream, commands).await;
         });
     }
 
@@ -425,6 +473,23 @@ impl Daemon {
             ClientCommand::Copy { target, reply } => {
                 let effect = self.session()?.copy_selection(target).await?;
                 let _ = reply.send(effect);
+            }
+            ClientCommand::Report {
+                pane,
+                adapter,
+                state,
+                reply,
+            } => {
+                // The session decides whether this adapter may speak for this
+                // pane and stamps the provenance; the daemon only carries the
+                // answer back. A session that has ended is an ordinary refusal
+                // rather than a daemon error: the adapter is a separate program
+                // and can be told.
+                let outcome = match self.session() {
+                    Ok(session) => session.adapter_report(pane, adapter, state).await,
+                    Err(_) => Err(AdapterRejection::SessionEnded),
+                };
+                let _ = reply.send(outcome);
             }
             ClientCommand::Gone { client } => {
                 if self.client_sizes.remove(&client).is_some() && self.resize_to_clients().await? {
@@ -609,6 +674,66 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
     }
 
     let _ = commands.send(ClientCommand::Gone { client }).await;
+}
+
+/// Runs one opt-in adapter from its hello until it disconnects.
+///
+/// The loop is deliberately the whole interface: announce, then report, and
+/// nothing else is expressible. Every report is answered — an adapter is
+/// usually a shell script, and a refusal it can print is what turns a
+/// misconfigured profile into something a user finds instead of something they
+/// live with.
+async fn serve_adapter(stream: UnixStream, commands: mpsc::Sender<ClientCommand>) {
+    let mut conn = Connection::new(stream);
+    let Ok(adapter) = conn::accept_adapter(&mut conn).await else {
+        return;
+    };
+
+    let ready = AdapterReply::Ready {
+        protocol_version: cloo_proto::PROTOCOL_VERSION,
+        session: THE_SESSION,
+    };
+    if conn.send(&ready).await.is_err() {
+        return;
+    }
+
+    loop {
+        let message = match conn.recv::<AdapterMessage>().await {
+            Ok(Some(message)) => message,
+            Ok(None) | Err(_) => break,
+        };
+        let AdapterMessage::Report { pane, state } = message else {
+            // A second hello would be a rename mid-connection, and every claim
+            // already made was attributed to the first name.
+            let _ = conn::refuse_adapter(&mut conn, "this connection already announced").await;
+            break;
+        };
+
+        let (reply, answered) = oneshot::channel();
+        if commands
+            .send(ClientCommand::Report {
+                pane,
+                adapter: adapter.clone(),
+                state,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            break;
+        }
+        let outcome = match answered.await {
+            Ok(outcome) => outcome,
+            Err(_) => Err(AdapterRejection::SessionEnded),
+        };
+        let answer = match outcome {
+            Ok(()) => AdapterReply::Applied { pane },
+            Err(reason) => AdapterReply::Rejected { pane, reason },
+        };
+        if conn.send(&answer).await.is_err() {
+            break;
+        }
+    }
 }
 
 /// Sends a batch of messages, stopping at the first socket failure.

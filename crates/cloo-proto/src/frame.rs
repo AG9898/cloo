@@ -17,10 +17,13 @@ use crate::error::ProtoError;
 
 /// The wire protocol version.
 ///
-/// **Bump this on every change to a type in [`crate::message`].** A stale client
-/// attached to a rebuilt server is a routine occurrence, and a clean "version
-/// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 7;
+/// **Bump this on every change to a type in [`crate::message`] or
+/// [`crate::adapter`].** A stale client attached to a rebuilt server is a
+/// routine occurrence, and a clean "version mismatch, reattach" beats a desync
+/// that presents as a rendering bug. Adapters share the number rather than
+/// carrying one of their own: both protocols are built from this one crate, so
+/// two versions could only ever disagree by accident.
+pub const PROTOCOL_VERSION: u16 = 8;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;

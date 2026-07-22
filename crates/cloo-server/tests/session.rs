@@ -20,8 +20,8 @@ use std::time::Duration;
 
 use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
 use cloo_core::profile::{Profile, ProfileCommand, ProfileId};
-use cloo_core::{CopyMotion, LayoutError, SearchDirection, Side};
-use cloo_proto::{Direction, PaneId, Size};
+use cloo_core::{AdapterId, CopyMotion, LayoutError, SearchDirection, Side};
+use cloo_proto::{AdapterState, Direction, PaneId, Size};
 use cloo_server::launch::Launch;
 use cloo_server::pty::PtyConfig;
 use cloo_server::session::{CopyModeError, PaneError, Session, SessionHandle, SessionSnapshot};
@@ -947,6 +947,163 @@ async fn ordinary_output_is_never_a_source() {
         "text on the grid is never a source"
     );
     assert_eq!(att.source, cloo_proto::AttentionSource::None);
+}
+
+// --- The opt-in adapter control path (M2-09) --------------------------------
+//
+// An adapter is the one advisory source. Two things are being proved: that its
+// claims arrive attributed, and that "opt-in" is a real gate rather than a
+// label — a pane whose profile named no adapter, or named a different one, is
+// unreachable, and being refused changes nothing at all.
+
+/// A session of one pane whose profile opted into `adapter`.
+fn session_with_adapter(
+    adapter: &str,
+    cols: u16,
+    rows: u16,
+) -> (PaneId, cloo_server::session::SpawnedSession) {
+    let mut profile = Profile::generic().adapter(AdapterId::new(adapter).expect("a valid id"));
+    profile.command = ProfileCommand::Program {
+        program: "sh".to_owned(),
+        args: vec!["-c".to_owned(), REPORT_ON_DEMAND.to_owned()],
+    };
+    let launch = Launch::new(profile, None, None, WorkingDir::new("/").expect("absolute"))
+        .expect("the profile validates");
+    let root = PaneId::new(0);
+    let spawned = Session::spawn(&base(cols, rows), root, launch)
+        .expect("a pty and an sh child must be available");
+    (root, spawned)
+}
+
+#[tokio::test]
+async fn an_opted_in_adapters_report_arrives_attributed_to_it() {
+    let (root, session) = session_with_adapter("my-adapter", 80, 24);
+    let adapter = AdapterId::new("my-adapter").expect("a valid id");
+
+    session
+        .handle
+        .adapter_report(root, adapter.clone(), AdapterState::Working)
+        .await
+        .expect("the pane opted into this adapter");
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let att = attention_of(&snapshot, root);
+    assert_eq!(att.state, cloo_proto::AttentionState::Working);
+    assert_eq!(
+        att.source,
+        cloo_proto::AttentionSource::Adapter("my-adapter".to_owned()),
+        "an advisory claim must reach the chrome named, never as fact"
+    );
+
+    // The same coalescing rule every other source obeys, through the same
+    // serialized path: a chatty adapter cannot refill a cleared queue.
+    session
+        .handle
+        .adapter_report(root, adapter.clone(), AdapterState::NeedsInput)
+        .await
+        .expect("the pane opted into this adapter");
+    session
+        .handle
+        .acknowledge_attention(root)
+        .await
+        .expect("session is alive");
+    session
+        .handle
+        .adapter_report(root, adapter, AdapterState::NeedsInput)
+        .await
+        .expect("the pane opted into this adapter");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert!(
+        attention_of(&snapshot, root).acknowledged,
+        "a re-announced adapter state must not resurrect the queue entry"
+    );
+}
+
+#[tokio::test]
+async fn an_adapter_the_profile_did_not_name_is_refused_and_changes_nothing() {
+    let (root, session) = session_with_adapter("my-adapter", 80, 24);
+
+    // A state cloo observed for itself, which an impostor must not be able to
+    // overwrite — the failure mode this gate exists to prevent.
+    session
+        .handle
+        .set_attention(
+            root,
+            cloo_core::pane::AttentionState::Failed,
+            cloo_core::pane::AttentionSource::Lifecycle,
+        )
+        .await
+        .expect("session is alive");
+
+    let refusal = session
+        .handle
+        .adapter_report(
+            root,
+            AdapterId::new("someone-else").expect("a valid id"),
+            AdapterState::Ready,
+        )
+        .await
+        .expect_err("an adapter the profile did not name may not speak");
+    assert_eq!(refusal, cloo_proto::AdapterRejection::NotPermitted);
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let att = attention_of(&snapshot, root);
+    assert_eq!(att.state, cloo_proto::AttentionState::Failed);
+    assert_eq!(att.source, cloo_proto::AttentionSource::Lifecycle);
+}
+
+#[tokio::test]
+async fn a_pane_that_opted_into_nothing_is_reachable_by_no_adapter() {
+    // Every built-in profile is in this state, so this is what a default
+    // install looks like to a local process the user never configured.
+    let (root, session) = session(80, 24);
+
+    let refusal = session
+        .handle
+        .adapter_report(
+            root,
+            AdapterId::new("my-adapter").expect("a valid id"),
+            AdapterState::NeedsInput,
+        )
+        .await
+        .expect_err("a pane that named no adapter permits none");
+    assert_eq!(refusal, cloo_proto::AdapterRejection::NotPermitted);
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(
+        attention_of(&snapshot, root).state,
+        cloo_proto::AttentionState::Unknown,
+        "an unpermitted report leaves the honest default in place"
+    );
+}
+
+#[tokio::test]
+async fn a_report_naming_a_closed_pane_is_refused_rather_than_dropped() {
+    // Unlike an internal source, an adapter is a separate program that can
+    // correct itself — so this one gets an answer instead of the silence a
+    // stale mouse event gets.
+    let (_root, session) = session_with_adapter("my-adapter", 120, 40);
+    let new_pane = session
+        .handle
+        .split_even(Direction::Horizontal)
+        .await
+        .expect("a 120x40 session has room for two panes");
+    session
+        .handle
+        .close(new_pane)
+        .await
+        .expect("the pane closes");
+
+    let refusal = session
+        .handle
+        .adapter_report(
+            new_pane,
+            AdapterId::new("my-adapter").expect("a valid id"),
+            AdapterState::Ready,
+        )
+        .await
+        .expect_err("a pane that is gone cannot be reported on");
+    assert_eq!(refusal, cloo_proto::AdapterRejection::UnknownPane);
 }
 
 // --- Copy mode and search through the session actor (M5-01) ----------------

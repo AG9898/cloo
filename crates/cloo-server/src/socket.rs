@@ -46,6 +46,9 @@ const SOCKET_DIR: &str = "cloo";
 /// The extension appended to a socket path to name its lock file.
 const LOCK_SUFFIX: &str = ".lock";
 
+/// The extension appended to a socket path to name its adapter control socket.
+const CONTROL_SUFFIX: &str = ".control";
+
 /// Mode for the socket directory and the lock file: owner only.
 ///
 /// A session socket is a channel into the user's shell. Anything wider than
@@ -283,6 +286,24 @@ pub fn session_socket_path(session: &str) -> Result<PathBuf, SocketError> {
 pub fn lock_path_for(socket: &Path) -> PathBuf {
     let mut name = socket.as_os_str().to_os_string();
     name.push(LOCK_SUFFIX);
+    PathBuf::from(name)
+}
+
+/// The adapter control socket that belongs to `socket`.
+///
+/// Derived from the session socket rather than resolved separately, so
+/// `CLOO_SOCKET` moves both halves of a development daemon together and the two
+/// can never end up pointing at different sessions.
+///
+/// It is a *separate* endpoint on purpose. An opt-in adapter is not a client:
+/// it speaks [`AdapterMessage`](cloo_proto::AdapterMessage), which has no
+/// variant for keystrokes, geometry, or anything else that could reach a child,
+/// so "an adapter may only report attention" is a property of which socket it
+/// connected to rather than a refusal the server has to remember to make.
+#[must_use]
+pub fn control_path_for(socket: &Path) -> PathBuf {
+    let mut name = socket.as_os_str().to_os_string();
+    name.push(CONTROL_SUFFIX);
     PathBuf::from(name)
 }
 
@@ -572,6 +593,31 @@ mod tests {
         assert_eq!(
             lock_path_for(Path::new("/run/user/1000/cloo/work.sock")),
             PathBuf::from("/run/user/1000/cloo/work.sock.lock")
+        );
+    }
+
+    #[test]
+    fn the_control_socket_is_derived_from_the_session_socket() {
+        // Including an overridden one: a dev daemon must not serve adapters on
+        // the live session's control socket.
+        assert_eq!(
+            control_path_for(Path::new("/run/user/1000/cloo/work.sock")),
+            PathBuf::from("/run/user/1000/cloo/work.sock.control")
+        );
+        assert_eq!(
+            control_path_for(Path::new("/tmp/cloo-dev.sock")),
+            PathBuf::from("/tmp/cloo-dev.sock.control")
+        );
+    }
+
+    #[test]
+    fn the_control_socket_has_a_lock_of_its_own() {
+        // Two endpoints, two guards: a stale control socket is cleaned up by
+        // the same ownership rule the session socket uses.
+        let control = control_path_for(Path::new("/run/user/1000/cloo/work.sock"));
+        assert_eq!(
+            lock_path_for(&control),
+            PathBuf::from("/run/user/1000/cloo/work.sock.control.lock")
         );
     }
 }

@@ -4,10 +4,12 @@
 //! PTYs, terminal emulation, or rendering. Every type here crosses the Unix
 //! socket between `cloo-server` and `cloo-client`.
 //!
-//! Five modules:
+//! Six modules:
 //!
 //! - [`ids`] — newtype identifiers that cross the wire.
 //! - [`message`] — the [`ClientMessage`] and [`ServerMessage`] enums.
+//! - [`adapter`] — the separate, much narrower vocabulary an opt-in local
+//!   adapter speaks on the control socket.
 //! - [`frame`] — length-prefixed postcard framing and the
 //!   [`PROTOCOL_VERSION`] handshake check.
 //! - [`stream`] — that framing paired with an async transport, so the
@@ -22,12 +24,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod adapter;
 pub mod error;
 pub mod frame;
 pub mod ids;
 pub mod message;
 pub mod stream;
 
+pub use adapter::{AdapterMessage, AdapterRejection, AdapterReply, AdapterState};
 pub use error::ProtoError;
 pub use frame::{
     LENGTH_PREFIX_LEN, MAX_FRAME_LEN, PROTOCOL_VERSION, check_version, decode, decode_frame, encode,

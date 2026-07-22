@@ -51,12 +51,13 @@ use cloo_core::layout::Side;
 use cloo_core::pane::{AttentionSource, AttentionState, PaneMeta};
 use cloo_core::session::Session as SessionModel;
 use cloo_core::tab::TabName;
-use cloo_core::{CopyMode, CopyMotion, SearchDirection, SearchError};
+use cloo_core::{AdapterId, CopyMode, CopyMotion, SearchDirection, SearchError};
 use cloo_proto::{
-    ClipboardTarget, CopyModeState, CopySelection as WireCopySelection, Direction, GraphicsEffect,
-    MouseButton, MouseEvent, MouseKind, MouseTracking, OuterTerminalEffect, PaneAttention, PaneId,
-    PaneInfo, PaneModes, PaneRect, ProgressState, ScrollPoint, SearchMatch as WireSearchMatch,
-    SessionId, Size, TabId, TabSummary,
+    AdapterRejection, AdapterState, ClipboardTarget, CopyModeState,
+    CopySelection as WireCopySelection, Direction, GraphicsEffect, MouseButton, MouseEvent,
+    MouseKind, MouseTracking, OuterTerminalEffect, PaneAttention, PaneId, PaneInfo, PaneModes,
+    PaneRect, ProgressState, ScrollPoint, SearchMatch as WireSearchMatch, SessionId, Size, TabId,
+    TabSummary,
 };
 use cloo_term::TermSize;
 use tokio::sync::{mpsc, oneshot};
@@ -174,6 +175,26 @@ pub enum Command {
     AcknowledgeAttention {
         /// The pane the user has looked at.
         pane: PaneId,
+    },
+    /// An advisory report from an opt-in local adapter.
+    ///
+    /// The same serialized path as [`SetAttention`](Self::SetAttention), with
+    /// two things it cannot skip. The pane's profile must have named *this*
+    /// adapter, which is where "opt-in" is enforced, and the provenance is
+    /// stamped by the session from the announced name rather than taken from
+    /// the report — so an adapter can never launder a claim into looking like a
+    /// bell, an exit, or the user. Unlike the other attention commands this one
+    /// replies: an adapter is usually a script, and a silent drop is
+    /// indistinguishable from success to one.
+    AdapterReport {
+        /// The pane the adapter is speaking about.
+        pane: PaneId,
+        /// The adapter making the claim, as announced on the control socket.
+        adapter: AdapterId,
+        /// One of the four states an advisory source may report.
+        state: AdapterState,
+        /// Whether the report was applied, or why it was not.
+        reply: oneshot::Sender<Result<(), AdapterRejection>>,
     },
     /// Starts copy mode on the focused pane, keeping its cursor and search
     /// state in the session actor rather than in one attached client.
@@ -656,6 +677,37 @@ impl SessionHandle {
         self.send(Command::AcknowledgeAttention { pane }).await
     }
 
+    /// Applies one advisory report from an opt-in local adapter.
+    ///
+    /// The report is applied only to a pane whose profile named `adapter`, and
+    /// the resulting provenance is always
+    /// [`AttentionSource::Adapter`](cloo_core::pane::AttentionSource::Adapter)
+    /// with that name, so the chrome can attribute the claim rather than
+    /// present it as fact.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`AdapterRejection`] that explains why nothing changed —
+    /// including [`SessionEnded`](AdapterRejection::SessionEnded), so a caller
+    /// can answer its adapter with one value either way.
+    pub async fn adapter_report(
+        &self,
+        pane: PaneId,
+        adapter: AdapterId,
+        state: AdapterState,
+    ) -> Result<(), AdapterRejection> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::AdapterReport {
+            pane,
+            adapter,
+            state,
+            reply,
+        })
+        .await
+        .map_err(|_| AdapterRejection::SessionEnded)?;
+        answer.await.map_err(|_| AdapterRejection::SessionEnded)?
+    }
+
     /// Starts copy mode on the focused pane.
     ///
     /// The state belongs to the session task and therefore remains live when a
@@ -1037,6 +1089,22 @@ impl Session {
                 }
                 Ok(())
             }
+            Command::AdapterReport {
+                pane,
+                adapter,
+                state,
+                reply,
+            } => {
+                let outcome = self.adapter_report(pane, adapter, state);
+                // A refused report changed nothing, so it costs no repaint —
+                // and a repaint on refusal would be the one visible difference
+                // between a permitted adapter and an impostor.
+                if matches!(outcome, Ok(true)) {
+                    self.notify(SessionEvent::Output);
+                }
+                let _ = reply.send(outcome.map(|_| ()));
+                Ok(())
+            }
             Command::EnterCopyMode => {
                 if self.enter_copy_mode() {
                     self.notify(SessionEvent::Output);
@@ -1319,6 +1387,39 @@ impl Session {
         let before = pane.meta.attention.clone();
         pane.meta.attention.set(state, source);
         pane.meta.attention != before
+    }
+
+    /// Applies an opt-in adapter's advisory report, or explains the refusal.
+    ///
+    /// Two checks and no more. The pane must exist — a report naming one that
+    /// closed is refused rather than dropped, because the adapter is a program
+    /// that can correct itself — and the pane's profile must have named this
+    /// adapter, which is the whole of the opt-in: a pane that named none is
+    /// reachable by no adapter, and every built-in names none.
+    ///
+    /// The state is converted from [`AdapterState`], which cannot express
+    /// `quiet` or `unknown`, and the provenance is built here from the
+    /// announced name rather than carried in the report — an adapter can say
+    /// *what* it thinks, never that something else said it.
+    fn adapter_report(
+        &mut self,
+        pane: PaneId,
+        adapter: AdapterId,
+        state: AdapterState,
+    ) -> Result<bool, AdapterRejection> {
+        let permitted = self
+            .pane_mut(pane)
+            .ok_or(AdapterRejection::UnknownPane)?
+            .meta
+            .permits_adapter(&adapter);
+        if !permitted {
+            return Err(AdapterRejection::NotPermitted);
+        }
+        Ok(self.set_attention(
+            pane,
+            AttentionState::from_adapter(state),
+            AttentionSource::Adapter(adapter),
+        ))
     }
 
     /// Maps a terminal bell to a pane's attention.

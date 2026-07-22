@@ -353,6 +353,13 @@ each role distinct by attribute as well as colour, off-viewport positions droppe
 clamped, the status row exactly its width at every width, and a denied clipboard policy that
 writes nothing and does not even send the request — plus the explicit copy through the actor in
 `cloo-server/tests/session.rs` and the whole loop end to end in `crates/cloo/tests/attach.rs`.
+M2-09 covers the opt-in adapter control interface (handshake v8): the permitted-state mapping and
+message round trips in `cloo-proto/src/adapter.rs`, the pane's opt-in in `cloo-core/src/pane.rs`,
+the derived control-socket path in `cloo-server/src/socket.rs`, the control handshake in
+`cloo-server/src/conn.rs`, and the gate in `cloo-server/tests/session.rs` — an attributed report,
+an adapter the profile never named refused with an observed `failed` left intact, a pane that opted
+into nothing reachable by none, and a closed pane refused rather than dropped — with the whole loop
+end to end in `crates/cloo/tests/attach.rs`.
 M6-01 covers mouse ownership at both ends: `cloo-client/src/input.rs` hit-tests a drawn screen at
 every region, proves a mis-described pane cannot swallow a chrome row and a header cannot swallow a
 pane's cell, and asserts that *no* chrome region produces a wire event even under full motion
@@ -796,3 +803,11 @@ a client genuinely cannot know whether an unfocused pane's application tracks th
 "chrome" there is the honest answer *and* the one a user means by clicking an unfocused pane; the
 server closes the loop by encoding a `Command::Mouse` from the **named** pane's own modes and
 refusing a pane that is not visible, so a client cannot write into an arbitrary child.
+
+### 2026-07-22 — An advisory source is narrowed by its vocabulary, not by a check
+The adapter control interface is a second socket (`<session socket>.control`) speaking
+`cloo-proto::adapter`, so "an adapter cannot type into a pane" and "an adapter cannot claim `quiet`"
+are both facts about which enums exist rather than refusals some branch must remember. The gate that
+makes it *opt-in* is the profile's `adapter` field, copied onto `PaneMeta` at launch: the server
+matches the announced name against the pane's own, stamps the provenance itself, and answers every
+report — a silent drop is indistinguishable from success to the shell script an adapter usually is.
