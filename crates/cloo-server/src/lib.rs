@@ -18,6 +18,8 @@
 //!   arrives on, the layout pass, and the coalesced events it reports.
 //! - [`socket`] — the session socket lifecycle: path resolution, exclusive
 //!   ownership, stale-socket cleanup, and unlink on drop.
+//! - [`config`] — server-side configuration-file I/O, atomic reload, and the
+//!   `SIGHUP` source that asks the daemon owner to reload.
 //! - [`conn`] — one client connection: the versioned handshake, refusals, and
 //!   the snapshot a freshly attached client is brought up to date with.
 //! - [`daemon`] — the serving loop that owns the socket and outlives every
@@ -26,6 +28,7 @@
 //!
 //! Damage coalescing with fan-out to several clients lands in M1-04.
 
+pub mod config;
 pub mod conn;
 pub mod daemon;
 pub mod damage;
@@ -34,6 +37,10 @@ pub mod pty;
 pub mod session;
 pub mod socket;
 
+pub use config::{
+    ConfigFile, ConfigLoadError, ConfigManager, ConfigPathError, InitialConfig, Reload,
+    ReloadWatch, load_from_environment, resolve_config_path,
+};
 pub use conn::{AttachRejection, AttachRequest, Connection, accept_attach};
 pub use daemon::{Daemon, DaemonError};
 pub use damage::{DamageFrame, DamageTracker};

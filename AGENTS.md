@@ -336,6 +336,12 @@ deterministic order and coalescing (an acknowledged state not refilling it, a lu
 slate), keyboard navigation with focus and acknowledge, the per-state status-bar summary, every
 state rendered text-glyph-and-colour in a queue row over the header's width ladder, and a bounded,
 per-pane-coalescing `ToastDeck` — with the queue's key bindings in `cloo-client/src/input.rs`.
+M4-01 adds server configuration-reload coverage in `cloo-server/src/config.rs` and
+`tests/config.rs`: pure `CLOO_CONFIG`/XDG/home path precedence, valid replacement without a
+restart, invalid replacement retaining the previous value, missing-file reset to built-ins, and
+per-profile warnings that do not suppress valid neighbours — including a real `SIGHUP` routed
+through the same reload path. The binary's `cli.rs` test also uses an isolated child environment
+to prove a configured profile resolves before the local terminal is touched.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -724,3 +730,9 @@ The session actor holds every pane reactor while the pure session model's tab-lo
 them; a snapshot projects only the active tab, but inactive PTYs must keep pumping. Tab creation starts
 its child before adding the tab to the model, and closing removes the model entry before dropping exactly
 its panes — a switch then applies geometry to the selected tab without restarting either child.
+
+### 2026-07-22 — Reload configuration by replacement, not mutation
+`cloo-server::config::ConfigManager` reads and validates a whole `config.toml` before assigning it
+to the live value, so a malformed `SIGHUP` reload has no partial state to undo and leaves the last
+valid configuration intact. The parser stays pure in `cloo-core`; path resolution and file I/O live
+in the server, and a missing file is a deliberate reset to the built-ins.

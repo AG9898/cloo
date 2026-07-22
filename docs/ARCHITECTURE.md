@@ -643,12 +643,15 @@ and merges local profiles over the built-ins. It takes a string and never a path
 the file is I/O and therefore the server's; a local profile is built through the same public
 constructors a built-in uses, so configuration can express exactly what a built-in can and no more.
 Two failure modes are kept apart on purpose: a document error — malformed TOML or an unknown key —
-returns `ConfigError` and the caller keeps `Config::defaults`, while a well-formed profile that
-fails `Profile::validate` is dropped alone with a `ConfigWarning` and the rest of the document
-still loads. An unknown key is never ignored, since a silently dropped key is a setting the user
-believes is applied. Overriding a built-in replaces it in place rather than appending, so the
-launcher order a user learned survives their override. The rest of the configuration surface and
-`SIGHUP` reload are M4-01. M2-06 launches from profiles.
+returns `ConfigError`, while a well-formed profile that fails `Profile::validate` is dropped alone
+with a `ConfigWarning` and the rest of the document still loads. An unknown key is never ignored,
+since a silently dropped key is a setting the user believes is applied. Overriding a built-in
+replaces it in place rather than appending, so the launcher order a user learned survives their
+override. M4-01 puts file I/O in `cloo-server::config`: `CLOO_CONFIG` wins over
+`XDG_CONFIG_HOME/cloo/config.toml` and the `$HOME/.config` fallback, a missing file means defaults,
+and a startup read failure warns before using defaults. Its `ConfigManager` loads and validates a
+whole replacement before one assignment changes the live value; a failed `SIGHUP` reload therefore
+keeps the prior valid configuration. M2-06 launches from profiles.
 
 M2-07 makes the session actor the one serialized path for that attention state. `Command::SetAttention`
 and `Command::AcknowledgeAttention` arrive on the same `mpsc` as every other mutation, so the

@@ -176,12 +176,16 @@ impl Request {
     ///
     /// Returns a [`CliError`] naming the option that was unusable.
     pub fn into_launch(self) -> Result<Launch, CliError> {
-        // `Config::defaults()` until M4-01 reads `config.toml`; the lookup is
-        // already the configured one, so local profiles work the day the file
-        // is read.
+        // File I/O lives in `cloo-server`; the core parser receives only text.
+        // Startup falls back safely on a bad optional file, while preserving a
+        // visible diagnostic rather than silently pretending it applied.
+        let loaded = cloo_server::config::load_from_environment();
+        for diagnostic in loaded.diagnostics {
+            eprintln!("cloo: warning: {diagnostic}");
+        }
         let here =
             std::env::current_dir().map_err(|err| CliError::NoCurrentDir(err.to_string()))?;
-        self.resolve(&Config::defaults(), &here)
+        self.resolve(&loaded.config, &here)
     }
 
     /// The pure form of [`into_launch`](Self::into_launch): `here` is what a

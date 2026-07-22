@@ -42,8 +42,8 @@ here and record why in [`DECISIONS.md`](DECISIONS.md).
 
 ## What Is Covered
 
-**Every crate in the workspace, including the binary.** The workspace run is 300 unit tests
-across six crates, 60 integration tests, and twelve doctests. This section grows as M2 lands.
+**Every crate in the workspace, including the binary.** The workspace run covers unit,
+integration, and doctest surfaces across all six crates. This section grows as tasks land.
 
 Covered today in `cloo-core`, all as unit tests:
 
@@ -213,6 +213,13 @@ conversion, and error conversion. Nothing that spawns. The same rule applies to 
 whose unit tests cover only path resolution and name validation — `resolve_socket_path` takes the
 environment as arguments precisely so no test has to mutate the process's own, which would race
 across the test harness's threads.
+
+Configuration follows the same seam. `src/config.rs` unit-tests pure path precedence for
+`CLOO_CONFIG`, `XDG_CONFIG_HOME`, and the `HOME/.config` fallback. Real file reads and replacement
+belong in `tests/config.rs`: a valid replacement takes effect through the same `ConfigManager`
+without a process restart, a malformed document is rejected with the old value exactly intact, a
+missing file resets safely to built-ins, an invalid entry warns while valid neighbours apply, and a
+real `SIGHUP` drives that same atomic replacement path.
 
 Socket lifecycle behaviour needs a real filesystem, so it lives in `tests/socket.rs`. Each test
 binds inside its own uniquely named directory under `$TMPDIR`, so nothing depends on
@@ -498,6 +505,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/launch.rs` | Launching | Pure only: a profile's default name kept and the user's overriding it, an invalid profile refused before anything is spawned, argv kept verbatim through `configure`, the session's environment surviving a profile's command, and login-shell resolution with its `/bin/sh` fallback |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
 | `crates/cloo-server/tests/session.rs` | Session task | Split, close, focus, and zoom against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, a resize divided between every pane, focus moving across an uneven split with input following it, and a zoom cycle that fills the area, restores the ratio, and leaves both children's pids unchanged; tab switching additionally proves both tab children retain their original pids; plus launching from an explicit profile: metadata reaching every snapshot with the split pane untouched, the child's own `pwd` proving the working directory (not only the metadata), a named profile reaching the pane it launched, a plain split repeating the session's launch, and a missing program failing with a message that names it and `PATH` while the layout rolls back; plus attention through the actor (no PTY): a report reaching the next snapshot with its provenance, acknowledgment moving only the seen flag, a re-report keeping it while a changed state clears it, and a report for a closed pane dropped without touching the survivor; plus the generic sources against real children: a bell reaching `needs_input`/`Bell`, a clean and an error exit reaching `ready`/`failed` with `Lifecycle` provenance, and bait text leaving attention `unknown` |
+| `crates/cloo-server/src/config.rs` | Configuration | Pure `CLOO_CONFIG`/`XDG_CONFIG_HOME`/`HOME` path precedence, file reading at the server boundary, atomic `ConfigManager` replacement, and an awaitable `SIGHUP` source |
+| `crates/cloo-server/tests/config.rs` | Configuration | Real-file valid reload without a restart, malformed reload preserving the last valid configuration, missing-file reset to built-ins, per-profile warning with valid neighbours applied, and a `SIGHUP` through the same atomic replacement path |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch carrying tabs before geometry with pane identity and attention before contents, and the session's layout pass carried through rather than recomputed |
@@ -516,7 +525,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/cli.rs` | Binary | The command line as a pure function: every launch option read, options stopping at the program so `sh -c` keeps its own flags, `--` for a program that looks like a flag, an unknown or repeated flag refused, `--profile` and a program refused together, and resolution — a named or configured profile with its defaults, the user's name/task/directory winning, an unknown profile naming the ones that exist, a program running as a generic pane named for itself, a relative directory resolved and a tilde refused, and a control character in a name or task refused |
 | `crates/cloo/src/local.rs` | Binary | The frame-rate cap |
-| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, a `SIGWINCH` resizing the pane all the way down to the child's own pty, and the launch surface end to end: the help naming the options and the built-in profiles, an unknown profile and a control-character task label refused as usage errors, and a profile whose program is missing failing with a message that names it |
+| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, a `SIGWINCH` resizing the pane all the way down to the child's own pty, and the launch surface end to end: the help naming the options and the built-in profiles, an unknown profile and a control-character task label refused as usage errors, a `CLOO_CONFIG` profile resolved before terminal setup, and a profile whose program is missing failing with a message that names it |
 | `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and clients over real sockets: hello and snapshot, detach leaving the child alive and its state intact, then reattaching and reaping it after exit; a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, bounded burst damage with lagged-client recovery, concurrent-client fan-out, a typed OSC 52 effect reaching a capable, permitted client once, and a resync telling a client who every pane is — profile, name, task label, and working directory; plus input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not |
 
 ---

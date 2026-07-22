@@ -156,9 +156,13 @@ crates/
   falls back to defaults — it never panics and never silently ignores a bad key.
 - A parser takes configuration *text*, never a path. Reading the file is the server's, which is
   what keeps `cloo-core` free of I/O.
+- `cloo-server::config` resolves `CLOO_CONFIG`, then `XDG_CONFIG_HOME`, then the `HOME/.config`
+  fallback. Its `ConfigManager` replaces the live configuration only after the whole file has
+  read and parsed successfully; a bad `SIGHUP` reload keeps the prior valid value intact.
 - Keep the two failure modes apart. A document error (malformed TOML, unknown key) rejects the
-  whole document and the caller keeps the previous valid configuration; one well-formed entry that
-  fails validation is dropped on its own with a warning naming it, and its neighbours still load.
+  whole document: startup warns and uses defaults, while a reload keeps the previous valid
+  configuration. One well-formed entry that fails validation is dropped on its own with a warning
+  naming it, and its neighbours still load.
   Never coerce a rejected value into a nearby valid one — a clamped setting is a setting the user
   never wrote.
 

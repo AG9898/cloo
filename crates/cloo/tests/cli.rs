@@ -12,7 +12,9 @@
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// How long a smoke test waits for expected output before failing.
@@ -20,6 +22,34 @@ const TIMEOUT: Duration = Duration::from_secs(20);
 
 fn cloo() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cloo"))
+}
+
+/// One configuration fixture, removed with its private directory.
+struct TempConfig(PathBuf);
+
+impl TempConfig {
+    fn new() -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("cloo-cli-config-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("the config fixture directory is creatable");
+        let path = directory.join("config.toml");
+        std::fs::write(&path, "[[profile]]\nid = \"notes\"\ncommand = [\"sh\"]\n")
+            .expect("the config fixture is writable");
+        Self(directory)
+    }
+
+    fn path(&self) -> PathBuf {
+        self.0.join("config.toml")
+    }
+}
+
+impl Drop for TempConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// A pseudoterminal pair standing in for the user's terminal.
@@ -228,6 +258,27 @@ fn an_unknown_profile_is_refused_before_the_terminal_is_touched() {
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("codx"), "got:\n{stderr}");
     assert!(stderr.contains("codex"), "got:\n{stderr}");
+}
+
+#[test]
+fn a_profile_from_cloo_config_is_resolved_before_terminal_setup() {
+    let config = TempConfig::new();
+    // A pipe makes the run stop before spawning the configured child. Reaching
+    // the raw-mode refusal rather than `UnknownProfile` proves this process
+    // loaded its own `CLOO_CONFIG` file without mutating the test runner's env.
+    let out = cloo()
+        .args(["--profile", "notes"])
+        .env("CLOO_CONFIG", config.path())
+        .stdin(Stdio::piped())
+        .output()
+        .expect("cloo runs");
+    assert_eq!(out.status.code(), Some(125));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("must be run from a terminal"),
+        "got:\n{stderr}"
+    );
+    assert!(!stderr.contains("no profile named"), "got:\n{stderr}");
 }
 
 #[test]

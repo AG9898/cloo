@@ -16,8 +16,8 @@
 //!   `claude` are three values of one struct, not three code paths.
 //! - [`config`] — parsing `config.toml` *text* into a validated [`Config`],
 //!   merging local profiles over the built-ins. Reading the file is the
-//!   server's; a document error falls back to defaults and a single bad profile
-//!   is dropped with a warning rather than costing the rest.
+//!   server's; a document error is returned for its owner to handle, and a
+//!   single bad profile is dropped with a warning rather than costing the rest.
 //! - [`pane`] — pane identity and the provenance-aware attention state.
 //! - [`grid`] — the emulator-cell to wire-cell conversion, the only place the
 //!   `cloo-term` and `cloo-proto` vocabularies meet.

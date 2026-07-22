@@ -51,9 +51,11 @@ launch-time failure the server reports.
 
 ### Local profiles in configuration
 
-As of M2-05, `cloo-core::config::parse` turns the *text* of `config.toml` into a validated
-`Config` and merges local profiles over the built-ins. Reading the file stays with the server —
-`cloo-core` performs no I/O — and the full configuration surface plus `SIGHUP` reload land at M4.
+`cloo-core::config::parse` turns the *text* of `config.toml` into a validated `Config` and merges
+local profiles over the built-ins. `cloo-server::config` owns the I/O: it resolves `CLOO_CONFIG`,
+then `XDG_CONFIG_HOME`, then `$HOME/.config`, and on `SIGHUP` atomically swaps only a complete
+validated replacement. A malformed reload leaves the preceding valid configuration active; the
+later M4 tasks add keymap, theme, and motion fields to that same boundary.
 
 A profile is an array-of-tables entry; `id` is the only required key:
 
