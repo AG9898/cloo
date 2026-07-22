@@ -153,7 +153,18 @@ what comes back into typed events, and re-encodes each one for the pane using th
 *harness itself* negotiated — so a harness that never enabled bracketed paste receives pasted text
 as ordinary typing rather than delimiters it would print. A harness that tracks the mouse owns
 mouse events over its own pane; shift is the override that reaches cloo's chrome without the
-harness seeing the click. Extended keys are the one required capability still unclaimed: the
+harness seeing the click.
+
+M6-01 makes that ownership a per-event decision against the screen cloo actually drew. A report is
+hit-tested into a pane's grid, a pane header, the tab row, the status bar, or a gutter, and only a
+grid hit in the *focused* pane can reach a harness — cloo is told the focused pane's negotiated
+modes and no other's, so an event over an unfocused pane is chrome's rather than a guess about a
+harness cloo cannot see. A harness never receives an event cloo decided was chrome's, and it never
+loses one it was tracking for: the server delivers a mouse event to the pane the event names,
+encoded from that pane's own modes, so a harness in a background pane is neither poked by a click
+meant for the chrome nor handed its neighbour's report.
+
+Extended keys are the one required capability still unclaimed: the
 client cannot establish it without a terminal query, so both ends stay on the legacy encoding and
 the mismatch case is [DECISIONS.md](DECISIONS.md) OPEN-02. See
 [ARCHITECTURE.md](ARCHITECTURE.md#input-routing).

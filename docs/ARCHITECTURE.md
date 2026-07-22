@@ -263,7 +263,11 @@ with no clients it keeps the last usable geometry so a detached child is not sur
 keystroke, a resize, a split — arrives as a `Command` on a single `mpsc` and is applied in
 arrival order by one task, as of M1-03. `Input` carries already-encoded keys; `Paste`, `Focus`,
 and `Mouse` carry events the task encodes itself from the pane's negotiated modes, as of M1-07,
-and `SessionSnapshot` carries those modes back out so a client can route the next event. There is
+and `SessionSnapshot` carries those modes back out so a client can route the next event. `Mouse`
+is delivered to the pane the event *names* and encoded from **that pane's** modes, as of M6-01 —
+never the focused pane's, since an application that never asked for the mouse must not be handed a
+report because its neighbour did — and only if the named pane is one the user can see: in the
+active tab, and not hidden behind a zoom. There is
 no `Mutex` on session state and no second path
 to it: a `SessionHandle` is a sender and nothing more, so a caller cannot reach past it. Both the
 daemon and the binary's local loop hold one, which is why the in-process path and the socket path
@@ -543,7 +547,8 @@ M1-07. Three pieces, composing in one direction:
   would corrupt input belonging to the pane. A sequence split across two reads is held rather than
   mis-decoded, and because a lone `ESC` is a prefix of every sequence here, the run loop calls
   `flush` on the frame tick — that is what makes the Escape key reach a pane at all.
-- **`mouse_owner`** — whether an event is the pane application's or cloo's chrome's.
+- **`ScreenLayout` / `route_mouse`** — where a report landed and who owns it. `mouse_owner` is the
+  ownership rule on its own, for a caller that has already hit-tested.
 
 The encoding sits on the far side. `ClientMessage::Paste`, `Focus`, and `Mouse` carry *what
 happened*; `cloo-server::session` turns each into bytes using the modes the pane's own application
@@ -565,17 +570,47 @@ cannot address is dropped rather than sent with a wrong coordinate.
 
 ##### Mouse ownership
 
-Three rules decide it, in order, and any one of them alone is enough to hand an event to chrome:
+Routing one report is two questions, and as of M6-01 `route_mouse` answers both in one pass:
+*where did it land*, then *whose is that place*.
 
-1. The pointer is not over a pane — a border or the status bar is never the application's.
+**Where.** `ScreenLayout` is the client's description of what it drew — the terminal size, which
+rows the tab bar and status bar took, which pane is focused, and each visible pane's grid rectangle
+in the outer terminal's own cells. It is built from what was rendered rather than re-derived from
+the wire, because a hit test has to agree with the picture the user is pointing at. `hit` answers
+in a fixed order, and the order is the safety property: off-screen first, then the chrome rows,
+then the pane grids, then the header rows, and gutter otherwise. A layout that wrongly described a
+pane as overlapping the status bar still cannot deliver a status-bar click into a child, and a
+header still cannot swallow a cell some pane's grid actually occupies. Per
+[STYLEGUIDE.md](STYLEGUIDE.md) the header row *is* the pane's top border, so it is chrome and never
+contents.
+
+**Whose.** Three rules decide it, in order, and any one of them alone is enough to hand an event to
+chrome:
+
+1. The pointer is not over the pane whose modes cloo holds — a border, the status bar, and any pane
+   other than the focused one, since `ServerMessage::Modes` reports the focused pane and guessing at
+   another application's tracking level is exactly the claim that would steal or invent an event.
+   Clicking an unfocused pane is therefore chrome's, which is also what a user means by it.
 2. Shift is held. This is the conventional multiplexer override, and the only way to reach chrome
    inside a pane run by a full-screen application.
 3. The application is not tracking the mouse, so it cannot own a mouse event. This is what makes
    click-to-focus work in an ordinary shell.
 
+The tracking *level* is deliberately not a fourth rule: a bare pointer move under click-only
+tracking is the application's event to be dropped by the encoder, not the client's to reroute, and
+rerouting it would turn a drag over a pane into a chrome action the user did not ask for.
+
 **A chrome event never reaches the wire.** Forwarding one would put escape bytes into the child's
-input, where they appear as garbage. M1-07 has no chrome to act on them yet, so they are dropped;
-M6-01 gives them somewhere to go, and hit testing arrives with splits in M2.
+input, where they appear as garbage. That is why `MouseRoute` has two differently shaped arms:
+`Application` carries the `MouseEvent` the wire takes, and `Chrome` carries a `ChromeTarget` — tab
+row, status bar, a pane header, a pane body, gutter, or off-screen — which has no wire form at all,
+so there is nothing a caller could send by mistake. Each chrome target names what it needs to be
+acted on without a second hit test; M6-02 is where they become actions. The local smoke path draws
+no chrome, so its screen is `ScreenLayout::single` and a chrome target is still dropped there.
+
+The server does not take the client's word for any of it. `Session::deliver_mouse` re-checks that
+the named pane is visible and encodes from that pane's own modes, so a client cannot write into an
+arbitrary child and an application that never asked for the mouse hears nothing.
 
 ### The binary
 

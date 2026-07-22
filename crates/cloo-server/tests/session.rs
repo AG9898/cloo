@@ -1104,3 +1104,195 @@ async fn an_explicit_copy_reads_retained_text_without_changing_anything() {
         None
     );
 }
+
+/// A child that turns on SGR mouse tracking, then echoes the next `bytes` it
+/// reads with the escape byte stripped so a report is assertable as grid text.
+///
+/// `-icanon` is what makes it work at all: a mouse report carries no newline,
+/// and a pty in canonical mode delivers nothing to the reader until one arrives.
+fn mouse_echoer(bytes: usize) -> String {
+    format!(
+        "stty -echo -icanon; printf '\\033[?1000h\\033[?1006h'; printf 'ready\\n'; \
+         head -c {bytes} | tr -d '\\033'"
+    )
+}
+
+/// The same shape without the mouse modes, for a pane that asked for nothing.
+fn plain_echoer(bytes: usize) -> String {
+    format!("stty -echo -icanon; printf 'ready\\n'; head -c {bytes} | tr -d '\\033'")
+}
+
+/// Waits for the focused pane's grid to contain `text` somewhere.
+async fn wait_for_text(handle: &SessionHandle, wanted: &str) {
+    let deadline = tokio::time::Instant::now() + DEADLINE;
+    loop {
+        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let lines = text(&snapshot);
+        if lines.iter().any(|line| line.contains(wanted)) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{wanted:?} never appeared; the pane shows {lines:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A left press on a pane-local cell.
+fn click(pane: PaneId) -> cloo_proto::MouseEvent {
+    cloo_proto::MouseEvent {
+        pane,
+        at: cloo_proto::Point::new(10, 5),
+        kind: cloo_proto::MouseKind::Press(cloo_proto::MouseButton::Left),
+        mods: cloo_proto::MouseMods::NONE,
+    }
+}
+
+/// A mouse event is delivered to the pane it names, and to no other.
+///
+/// Both halves matter and neither implies the other. The client hit-tested the
+/// event into a pane before sending it, so delivering it anywhere else is
+/// delivering it to the wrong application — and delivering it to the *focused*
+/// pane in particular would put escape bytes into whatever the user happens to
+/// be typing at.
+#[tokio::test]
+async fn a_mouse_event_reaches_the_pane_it_names_and_not_the_focused_one() {
+    // `\x1b[<0;11;6M` is ten bytes; the typed "done" is four. Each child reads
+    // exactly what it is meant to get, so a byte arriving at the wrong pane is
+    // visible as the *wrong text* rather than as a hang.
+    let (root, session) = session_running(&mouse_echoer(4), 120, 40);
+    let other = session
+        .handle
+        .launch(
+            Direction::Horizontal,
+            0.5,
+            launch_named(&mouse_echoer(10), Some("other"), None),
+        )
+        .await
+        .expect("a 120x40 session has room for two panes");
+
+    // Focus followed the split; put it back on the root so the event names the
+    // pane that is *not* focused.
+    session
+        .handle
+        .move_focus(Side::Left)
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.focused, root);
+    wait_for_text(&session.handle, "ready").await;
+
+    session
+        .handle
+        .mouse(click(other))
+        .await
+        .expect("session is alive");
+
+    // The focused pane's next four bytes must be the typed ones. Had the event
+    // been delivered to whatever is focused, its `head -c 10` would have
+    // consumed the report first and echoed that instead.
+    session
+        .handle
+        .input(b"done".to_vec())
+        .await
+        .expect("session is alive");
+    wait_for_text(&session.handle, "done").await;
+
+    session
+        .handle
+        .move_focus(Side::Right)
+        .await
+        .expect("session is alive");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .focused,
+        other
+    );
+    wait_for_text(&session.handle, "[<0;11;6M").await;
+}
+
+/// A pane whose application never asked for the mouse is written nothing, even
+/// while a neighbour is tracking.
+///
+/// The encoding is a function of the *named* pane's modes. Reading them from
+/// whichever pane is focused would hand a report to an application that has no
+/// idea what to do with it, which reaches the user as garbage in their shell.
+#[tokio::test]
+async fn a_pane_that_never_asked_for_the_mouse_is_written_nothing() {
+    let (root, session) = session_running(&plain_echoer(4), 120, 40);
+    // The neighbour tracks the mouse; the root does not. Focus stays here.
+    session
+        .handle
+        .launch(
+            Direction::Horizontal,
+            0.5,
+            launch_named(&mouse_echoer(10), Some("tracking"), None),
+        )
+        .await
+        .expect("the split must fit");
+    session
+        .handle
+        .move_focus(Side::Left)
+        .await
+        .expect("session is alive");
+    wait_for_text(&session.handle, "ready").await;
+
+    session
+        .handle
+        .mouse(click(root))
+        .await
+        .expect("session is alive");
+    session
+        .handle
+        .input(b"done".to_vec())
+        .await
+        .expect("session is alive");
+    wait_for_text(&session.handle, "done").await;
+}
+
+/// An event naming a pane that has closed is dropped, not redirected.
+#[tokio::test]
+async fn a_mouse_event_for_a_closed_pane_is_dropped() {
+    let (root, session) = session_running(&mouse_echoer(4), 120, 40);
+    let gone = session
+        .handle
+        .launch(
+            Direction::Horizontal,
+            0.5,
+            launch_named(REPORT_ON_DEMAND, Some("gone"), None),
+        )
+        .await
+        .expect("the split must fit");
+    session
+        .handle
+        .close(gone)
+        .await
+        .expect("closing the new pane must succeed");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .focused,
+        root
+    );
+    wait_for_text(&session.handle, "ready").await;
+
+    session
+        .handle
+        .mouse(click(gone))
+        .await
+        .expect("session is alive");
+    session
+        .handle
+        .input(b"done".to_vec())
+        .await
+        .expect("session is alive");
+    wait_for_text(&session.handle, "done").await;
+}

@@ -11,22 +11,31 @@
 //!    [`InputEvent`]s. A paste, a focus report, and a mouse report all arrive as
 //!    ordinary bytes on stdin, and telling them apart is the only way they can
 //!    be routed differently.
-//! 3. [`mouse_owner`] — whether a mouse event belongs to the pane's application
-//!    or to cloo's own chrome.
+//! 3. [`ScreenLayout`] and [`route_mouse`] — where a mouse report landed, and
+//!    whether that place belongs to the pane's application or to cloo's own
+//!    chrome. [`mouse_owner`] is the ownership rule on its own, for a caller
+//!    that has already done its own hit testing.
 //!
 //! **The client decodes; the server encodes.** A paste leaves here as text and
 //! is bracketed on the far side, because whether the child wants brackets is a
 //! mode the child set and only the server can see. The same split is why a mouse
 //! event crosses the wire as a [`MouseEvent`] rather than as an escape sequence.
 //!
-//! Ownership deserves its own sentence, because it is the property M6-01 builds
-//! on. A mouse event is the application's only when the application is actually
-//! tracking the mouse, the pointer is over a pane rather than over chrome, and
-//! the user did not hold the shift override. Everything else is cloo's, and
-//! **cloo's events never reach the wire** — a chrome click that leaked into a
-//! pane would appear in the user's shell as garbage.
+//! Ownership deserves its own sentence, because it is the property the whole
+//! mouse path is built on. A mouse event is the application's only when the
+//! application is actually tracking the mouse, the pointer is over that
+//! application's pane rather than over chrome, and the user did not hold the
+//! shift override. Everything else is cloo's, and **cloo's events never reach
+//! the wire** — a chrome click that leaked into a pane would appear in the
+//! user's shell as garbage. That is why [`route_mouse`] returns a
+//! [`MouseRoute`]: an application event arrives already shaped as the
+//! [`MouseEvent`] the wire takes, and a chrome event has no such shape at all,
+//! so there is nothing for a caller to send by mistake.
 
-use cloo_proto::{MouseButton, MouseKind, MouseMods, MouseTracking, PaneModes, TermCaps};
+use cloo_proto::{
+    MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, PaneId, PaneModes, Point, Size,
+    TermCaps,
+};
 
 /// Turns on bracketed paste in the outer terminal.
 const PASTE_ON: &[u8] = b"\x1b[?2004h";
@@ -477,19 +486,353 @@ pub enum MouseOwner {
 ///
 /// Three rules, in order, and each one alone is enough to keep it:
 ///
-/// 1. A pointer that is not over a pane is over chrome, whatever the
-///    application has enabled.
+/// 1. A pointer that is not over the pane `modes` describes is over chrome,
+///    whatever that application has enabled. Chrome is everything that is not a
+///    pane's own grid, and so is any pane whose modes cloo does not hold —
+///    guessing at an application's tracking level is exactly the claim that
+///    would steal an event or invent one.
 /// 2. Holding shift is the conventional "this one is for the multiplexer"
 ///    override, and it is the only way to reach chrome inside a pane run by a
 ///    full-screen application.
 /// 3. An application not tracking the mouse cannot own a mouse event, so cloo
 ///    takes it — this is what makes click-to-focus work in an ordinary shell.
+///
+/// [`route_mouse`] is the form to reach for when the caller has a screen rather
+/// than a single pane; this is the rule underneath it.
 #[must_use]
 pub fn mouse_owner(modes: PaneModes, report: &MouseReport, over_pane: bool) -> MouseOwner {
     if !over_pane || report.mods.shift || modes.mouse == MouseTracking::Off {
         return MouseOwner::Chrome;
     }
     MouseOwner::Application
+}
+
+/// One pane as the client drew it, in the outer terminal's own cells.
+///
+/// The server sends a pane's grid rectangle in the tab's coordinates; where that
+/// tab area starts, and whether a header row was drawn above the grid, are the
+/// client's answers because the client is what drew them. Building this from
+/// what was rendered — rather than re-deriving it from the wire — is what keeps
+/// a hit test agreeing with the picture the user is pointing at.
+///
+/// `size` is the grid, and the grid alone. The header row sits immediately above
+/// it and is chrome: per `docs/STYLEGUIDE.md` the header row *is* the pane's top
+/// border, so a click on it is a click on the pane's frame, never on its
+/// contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneArea {
+    /// Which pane.
+    pub pane: PaneId,
+    /// Left edge of the grid, in terminal columns.
+    pub x: u16,
+    /// Top edge of the grid, in terminal rows.
+    pub y: u16,
+    /// The grid's size, which is the size the server gave the pane.
+    pub size: Size,
+    /// Whether a header row was drawn on the row above the grid.
+    pub header: bool,
+}
+
+impl PaneArea {
+    /// A pane's grid at `(x, y)`, with a header row above it.
+    #[must_use]
+    pub const fn new(pane: PaneId, x: u16, y: u16, size: Size) -> Self {
+        Self {
+            pane,
+            x,
+            y,
+            size,
+            header: true,
+        }
+    }
+
+    /// The same area with no header row drawn above it.
+    #[must_use]
+    pub const fn headerless(mut self) -> Self {
+        self.header = false;
+        self
+    }
+
+    /// Whether `(col, row)` is inside the pane's grid.
+    #[must_use]
+    pub const fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.x
+            && row >= self.y
+            && col < self.x.saturating_add(self.size.cols)
+            && row < self.y.saturating_add(self.size.rows)
+    }
+
+    /// The cell `(col, row)` names inside this pane, if it is inside at all.
+    ///
+    /// Pane-local and zero-based, which is what [`MouseEvent`] carries: the
+    /// server encodes the coordinates the *application* sees, and an application
+    /// has never heard of the pane's place on a screen.
+    #[must_use]
+    pub const fn local(&self, col: u16, row: u16) -> Option<Point> {
+        if !self.contains(col, row) {
+            return None;
+        }
+        Some(Point::new(col - self.x, row - self.y))
+    }
+
+    /// Whether `(col, row)` is on this pane's header row.
+    #[must_use]
+    pub const fn on_header(&self, col: u16, row: u16) -> bool {
+        self.header
+            && self.y > 0
+            && row == self.y - 1
+            && col >= self.x
+            && col < self.x.saturating_add(self.size.cols)
+    }
+}
+
+/// What the client drew, in enough detail to place a mouse report.
+///
+/// Deliberately a description rather than a renderer: it holds the outer
+/// terminal's size, which rows the tab bar and status bar took, which pane is
+/// focused, and where each visible pane's grid sits. Everything else on screen —
+/// gutters, borders, the space a header does not fill — is chrome by
+/// construction, because a cell that is not in a pane's grid cannot be the
+/// application's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScreenLayout {
+    size: Size,
+    tab_row: Option<u16>,
+    status_row: Option<u16>,
+    focused: Option<PaneId>,
+    panes: Vec<PaneArea>,
+}
+
+impl ScreenLayout {
+    /// An empty screen of `size`: no chrome rows and no panes, so every cell is
+    /// chrome.
+    #[must_use]
+    pub fn new(size: Size) -> Self {
+        Self {
+            size,
+            tab_row: None,
+            status_row: None,
+            focused: None,
+            panes: Vec::new(),
+        }
+    }
+
+    /// One pane filling the whole terminal, with no chrome at all.
+    ///
+    /// The local smoke path's screen: a single grid, no tab row, no status bar,
+    /// and no header. Every report is over the pane, which is what it has always
+    /// been — now stated as a layout rather than assumed at the call site.
+    #[must_use]
+    pub fn single(size: Size, pane: PaneId) -> Self {
+        Self::new(size)
+            .focus(Some(pane))
+            .pane(PaneArea::new(pane, 0, 0, size).headerless())
+    }
+
+    /// Records the terminal row the tab bar occupies.
+    #[must_use]
+    pub const fn tab_row(mut self, row: u16) -> Self {
+        self.tab_row = Some(row);
+        self
+    }
+
+    /// Records the terminal row the status bar occupies.
+    #[must_use]
+    pub const fn status_row(mut self, row: u16) -> Self {
+        self.status_row = Some(row);
+        self
+    }
+
+    /// Records which pane holds focus, and so whose modes the client has.
+    #[must_use]
+    pub const fn focus(mut self, pane: Option<PaneId>) -> Self {
+        self.focused = pane;
+        self
+    }
+
+    /// Adds one drawn pane.
+    #[must_use]
+    pub fn pane(mut self, area: PaneArea) -> Self {
+        self.panes.push(area);
+        self
+    }
+
+    /// The focused pane, if the screen has one.
+    #[must_use]
+    pub const fn focused(&self) -> Option<PaneId> {
+        self.focused
+    }
+
+    /// Every pane on the screen, in the order they were added.
+    #[must_use]
+    pub fn panes(&self) -> &[PaneArea] {
+        &self.panes
+    }
+
+    /// Where `(col, row)` landed.
+    ///
+    /// The order is the safety property, not a detail. Off-screen is answered
+    /// first, then the chrome rows, and only then the panes: a layout that
+    /// wrongly described a pane as overlapping the status bar still cannot
+    /// deliver a status-bar click into a child, because the row is claimed
+    /// before any pane is consulted. A header is checked after the grids for the
+    /// same reason in reverse — a header row belongs to chrome, but it may never
+    /// swallow a cell some pane's grid actually occupies.
+    #[must_use]
+    pub fn hit(&self, col: u16, row: u16) -> MouseTarget {
+        if col >= self.size.cols || row >= self.size.rows {
+            return MouseTarget::Chrome(ChromeTarget::Outside);
+        }
+        if self.tab_row == Some(row) {
+            return MouseTarget::Chrome(ChromeTarget::TabRow { col });
+        }
+        if self.status_row == Some(row) {
+            return MouseTarget::Chrome(ChromeTarget::StatusBar { col });
+        }
+        for area in &self.panes {
+            if let Some(at) = area.local(col, row) {
+                return MouseTarget::Pane {
+                    pane: area.pane,
+                    at,
+                };
+            }
+        }
+        for area in &self.panes {
+            if area.on_header(col, row) {
+                return MouseTarget::Chrome(ChromeTarget::Header {
+                    pane: area.pane,
+                    col: col - area.x,
+                });
+            }
+        }
+        MouseTarget::Chrome(ChromeTarget::Gutter)
+    }
+}
+
+/// Where a mouse report landed on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseTarget {
+    /// Inside a pane's grid, at a pane-local cell.
+    Pane {
+        /// The pane whose grid holds the cell.
+        pane: PaneId,
+        /// The cell, zero-based within that pane.
+        at: Point,
+    },
+    /// On a piece of cloo's own chrome.
+    Chrome(ChromeTarget),
+}
+
+impl MouseTarget {
+    /// The pane whose grid was hit, or `None` for every chrome target.
+    ///
+    /// Deliberately not "the pane this is about": a header names a pane too, and
+    /// answering with it here would let a caller treat a border click as a click
+    /// on the pane's contents.
+    #[must_use]
+    pub const fn pane(&self) -> Option<PaneId> {
+        match self {
+            Self::Pane { pane, .. } => Some(*pane),
+            Self::Chrome(_) => None,
+        }
+    }
+}
+
+/// Which piece of chrome a mouse report landed on.
+///
+/// Every variant carries enough to act on without a second hit test, because the
+/// thing that will act on it — click-to-focus, a tab click, a gutter drag — is a
+/// different layer that must not re-derive geometry the renderer already knew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeTarget {
+    /// The tab row, at a terminal column.
+    TabRow {
+        /// The column, from the left of the terminal.
+        col: u16,
+    },
+    /// The always-on status bar, at a terminal column.
+    StatusBar {
+        /// The column, from the left of the terminal.
+        col: u16,
+    },
+    /// A pane's header row, which is that pane's top border.
+    Header {
+        /// The pane the header describes.
+        pane: PaneId,
+        /// The column, from the left of the header.
+        col: u16,
+    },
+    /// Inside a pane's grid, but the application does not own it: it is not
+    /// tracking the mouse, the user held the shift override, or the pane is not
+    /// the one whose modes cloo holds. This is the event click-to-focus is made
+    /// of.
+    PaneBody {
+        /// The pane whose grid was clicked.
+        pane: PaneId,
+        /// The cell, zero-based within that pane.
+        at: Point,
+    },
+    /// The space between panes.
+    Gutter,
+    /// Off the described screen entirely.
+    Outside,
+}
+
+/// Where one mouse report is going.
+///
+/// The two arms are deliberately different shapes. An application event is
+/// already the [`MouseEvent`] the wire takes, so sending it is one call with
+/// nothing left to decide; a chrome event is a [`ChromeTarget`] and cannot be
+/// sent at all, which is how "a chrome event never reaches the wire" stops being
+/// a rule someone has to remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseRoute {
+    /// The pane's application owns it. Send it with `Attached::send_mouse`.
+    Application(MouseEvent),
+    /// cloo's chrome owns it. It never crosses the wire.
+    Chrome(ChromeTarget),
+}
+
+impl MouseRoute {
+    /// The wire event, if this route has one.
+    ///
+    /// `None` for every chrome route, which is the whole of what a caller has to
+    /// know to keep a chrome click out of a child's input.
+    #[must_use]
+    pub const fn wire_event(&self) -> Option<&MouseEvent> {
+        match self {
+            Self::Application(event) => Some(event),
+            Self::Chrome(_) => None,
+        }
+    }
+}
+
+/// Routes one decoded mouse report against the screen the client drew.
+///
+/// `modes` describes the *focused* pane's application, because that is the only
+/// pane the server reports modes for. A report over any other pane is therefore
+/// chrome: cloo does not know whether that application is tracking the mouse,
+/// and the honest answer to "is this the application's?" for an application
+/// whose modes are unknown is no. That is also the behaviour a user expects —
+/// clicking an unfocused pane selects it rather than poking whatever runs there.
+#[must_use]
+pub fn route_mouse(layout: &ScreenLayout, modes: PaneModes, report: &MouseReport) -> MouseRoute {
+    match layout.hit(report.col, report.row) {
+        MouseTarget::Chrome(target) => MouseRoute::Chrome(target),
+        MouseTarget::Pane { pane, at } => {
+            let known = layout.focused() == Some(pane);
+            if mouse_owner(modes, report, known) == MouseOwner::Application {
+                MouseRoute::Application(MouseEvent {
+                    pane,
+                    at,
+                    kind: report.kind,
+                    mods: report.mods,
+                })
+            } else {
+                MouseRoute::Chrome(ChromeTarget::PaneBody { pane, at })
+            }
+        }
+    }
 }
 
 /// A keyboard action against the attention queue overlay.
@@ -864,6 +1207,285 @@ mod tests {
             MouseOwner::Application,
             "and without it the application still gets everything"
         );
+    }
+
+    // -- hit testing --------------------------------------------------------
+
+    /// Two panes side by side under a tab row, over a status bar:
+    ///
+    /// ```text
+    ///  row 0        tab row
+    ///  row 1        header(1)              header(2)
+    ///  rows 2..=8   pane 1 grid, cols 0..=9   |   pane 2 grid, cols 11..=19
+    ///  row 9        status bar
+    ///  col 10       gutter
+    /// ```
+    fn screen() -> ScreenLayout {
+        ScreenLayout::new(Size::new(20, 10))
+            .tab_row(0)
+            .status_row(9)
+            .focus(Some(PaneId::new(1)))
+            .pane(PaneArea::new(PaneId::new(1), 0, 2, Size::new(10, 7)))
+            .pane(PaneArea::new(PaneId::new(2), 11, 2, Size::new(9, 7)))
+    }
+
+    fn at(col: u16, row: u16) -> MouseReport {
+        MouseReport {
+            kind: MouseKind::Press(MouseButton::Left),
+            mods: MouseMods::NONE,
+            col,
+            row,
+        }
+    }
+
+    #[test]
+    fn every_region_of_a_drawn_screen_hit_tests_to_itself() {
+        let screen = screen();
+        let cases: [(&str, u16, u16, MouseTarget); 7] = [
+            (
+                "the tab row",
+                3,
+                0,
+                MouseTarget::Chrome(ChromeTarget::TabRow { col: 3 }),
+            ),
+            (
+                "a pane header",
+                4,
+                1,
+                MouseTarget::Chrome(ChromeTarget::Header {
+                    pane: PaneId::new(1),
+                    col: 4,
+                }),
+            ),
+            (
+                "the left pane's grid",
+                2,
+                3,
+                MouseTarget::Pane {
+                    pane: PaneId::new(1),
+                    at: Point::new(2, 1),
+                },
+            ),
+            (
+                "the right pane's grid",
+                12,
+                4,
+                MouseTarget::Pane {
+                    pane: PaneId::new(2),
+                    at: Point::new(1, 2),
+                },
+            ),
+            (
+                "the gutter between them",
+                10,
+                4,
+                MouseTarget::Chrome(ChromeTarget::Gutter),
+            ),
+            (
+                "the status bar",
+                7,
+                9,
+                MouseTarget::Chrome(ChromeTarget::StatusBar { col: 7 }),
+            ),
+            (
+                "past the right edge",
+                20,
+                4,
+                MouseTarget::Chrome(ChromeTarget::Outside),
+            ),
+        ];
+
+        for (name, col, row, expected) in cases {
+            assert_eq!(screen.hit(col, row), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_pane_local_cell_is_zero_based_within_its_own_grid() {
+        // The top-left cell of the right pane, which sits at terminal (11, 2).
+        assert_eq!(
+            screen().hit(11, 2),
+            MouseTarget::Pane {
+                pane: PaneId::new(2),
+                at: Point::new(0, 0),
+            },
+            "the server encodes what the application sees, and it has never \
+             heard of the pane's place on a screen"
+        );
+    }
+
+    #[test]
+    fn a_chrome_row_is_claimed_before_any_pane_is_consulted() {
+        // A layout that wrongly describes a pane as reaching over the status
+        // row. The row still answers as the status bar.
+        let screen = ScreenLayout::new(Size::new(20, 10))
+            .status_row(9)
+            .focus(Some(PaneId::new(1)))
+            .pane(PaneArea::new(PaneId::new(1), 0, 0, Size::new(20, 10)));
+        assert_eq!(
+            screen.hit(4, 9),
+            MouseTarget::Chrome(ChromeTarget::StatusBar { col: 4 }),
+            "a mis-described pane must not be able to swallow a chrome row"
+        );
+    }
+
+    #[test]
+    fn a_header_never_swallows_a_cell_some_pane_actually_occupies() {
+        // Pane 2's grid starts on the same row pane 1's header would claim.
+        let screen = ScreenLayout::new(Size::new(20, 10))
+            .pane(PaneArea::new(PaneId::new(1), 0, 5, Size::new(20, 4)))
+            .pane(PaneArea::new(PaneId::new(2), 0, 0, Size::new(20, 5)));
+        assert_eq!(
+            screen.hit(3, 4),
+            MouseTarget::Pane {
+                pane: PaneId::new(2),
+                at: Point::new(3, 4),
+            }
+        );
+    }
+
+    #[test]
+    fn a_pane_at_the_top_of_the_screen_has_no_header_row_above_it() {
+        let screen = ScreenLayout::new(Size::new(20, 10)).pane(PaneArea::new(
+            PaneId::new(1),
+            0,
+            0,
+            Size::new(20, 10),
+        ));
+        assert_eq!(screen.hit(3, 0).pane(), Some(PaneId::new(1)));
+    }
+
+    #[test]
+    fn the_local_screen_is_one_pane_and_no_chrome() {
+        let screen = ScreenLayout::single(Size::new(80, 24), PaneId::new(1));
+        assert_eq!(
+            screen.hit(0, 0),
+            MouseTarget::Pane {
+                pane: PaneId::new(1),
+                at: Point::new(0, 0),
+            }
+        );
+        assert_eq!(
+            screen.hit(79, 23),
+            MouseTarget::Pane {
+                pane: PaneId::new(1),
+                at: Point::new(79, 23),
+            }
+        );
+        assert_eq!(
+            screen.hit(80, 23),
+            MouseTarget::Chrome(ChromeTarget::Outside)
+        );
+    }
+
+    // -- routing over a screen ----------------------------------------------
+
+    #[test]
+    fn an_application_event_is_routed_as_the_wire_event_the_server_takes() {
+        let route = route_mouse(&screen(), tracking(MouseTracking::Click), &at(2, 3));
+        assert_eq!(
+            route,
+            MouseRoute::Application(MouseEvent {
+                pane: PaneId::new(1),
+                at: Point::new(2, 1),
+                kind: MouseKind::Press(MouseButton::Left),
+                mods: MouseMods::NONE,
+            }),
+            "an application tracking the mouse is not stolen from"
+        );
+        assert!(route.wire_event().is_some());
+    }
+
+    /// Every chrome region routes to chrome and produces no wire event, which
+    /// is the property that keeps escape bytes out of a child's input.
+    #[test]
+    fn no_chrome_region_ever_produces_a_wire_event() {
+        let screen = screen();
+        // The most permissive application state there is: full motion tracking
+        // in the focused pane. Even so, none of these are its business.
+        let modes = tracking(MouseTracking::Motion);
+        let cases: [(&str, u16, u16, ChromeTarget); 5] = [
+            ("the tab row", 3, 0, ChromeTarget::TabRow { col: 3 }),
+            (
+                "a pane header",
+                4,
+                1,
+                ChromeTarget::Header {
+                    pane: PaneId::new(1),
+                    col: 4,
+                },
+            ),
+            ("the gutter", 10, 4, ChromeTarget::Gutter),
+            ("the status bar", 7, 9, ChromeTarget::StatusBar { col: 7 }),
+            ("off screen", 40, 40, ChromeTarget::Outside),
+        ];
+
+        for (name, col, row, target) in cases {
+            let route = route_mouse(&screen, modes, &at(col, row));
+            assert_eq!(route, MouseRoute::Chrome(target), "{name}");
+            assert_eq!(
+                route.wire_event(),
+                None,
+                "{name} must have nothing a caller could send"
+            );
+        }
+    }
+
+    #[test]
+    fn a_click_in_an_unfocused_pane_is_chrome_because_its_modes_are_unknown() {
+        // The modes belong to the focused pane; pane 2's are not reported at
+        // all, and guessing at them is what would steal or invent an event.
+        let route = route_mouse(&screen(), tracking(MouseTracking::Motion), &at(12, 4));
+        assert_eq!(
+            route,
+            MouseRoute::Chrome(ChromeTarget::PaneBody {
+                pane: PaneId::new(2),
+                at: Point::new(1, 2),
+            }),
+            "and naming the pane is what click-to-focus is made of"
+        );
+    }
+
+    #[test]
+    fn a_click_in_a_shell_that_tracks_nothing_is_chrome_that_still_names_the_pane() {
+        assert_eq!(
+            route_mouse(&screen(), tracking(MouseTracking::Off), &at(2, 3)),
+            MouseRoute::Chrome(ChromeTarget::PaneBody {
+                pane: PaneId::new(1),
+                at: Point::new(2, 1),
+            })
+        );
+    }
+
+    #[test]
+    fn shift_takes_an_event_back_from_a_full_screen_application() {
+        let mut shifted = at(2, 3);
+        shifted.mods.shift = true;
+        assert_eq!(
+            route_mouse(&screen(), tracking(MouseTracking::Motion), &shifted),
+            MouseRoute::Chrome(ChromeTarget::PaneBody {
+                pane: PaneId::new(1),
+                at: Point::new(2, 1),
+            })
+        );
+    }
+
+    /// Motion under click-only tracking is still the application's to refuse,
+    /// not the client's to reroute: the tracking *level* is a server-side
+    /// encoding question, and rerouting it here would turn a drag over a pane
+    /// into a chrome action the user did not ask for.
+    #[test]
+    fn a_tracking_level_below_the_event_is_left_for_the_server_to_drop() {
+        let motion = MouseReport {
+            kind: MouseKind::Motion(None),
+            mods: MouseMods::NONE,
+            col: 2,
+            row: 3,
+        };
+        assert!(matches!(
+            route_mouse(&screen(), tracking(MouseTracking::Click), &motion),
+            MouseRoute::Application(_)
+        ));
     }
 
     // -- queue actions ------------------------------------------------------

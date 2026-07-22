@@ -21,9 +21,10 @@
 //! - [`resize`] — `SIGWINCH`, turned into an awaitable report of the outer
 //!   terminal's new geometry.
 //! - [`input`] — the reporting modes cloo asks the outer terminal for, the
-//!   decoder that splits its byte stream back into typed events, the rule that
-//!   decides whether a mouse event is chrome's or the application's, and the
-//!   keyboard actions that drive the attention queue overlay.
+//!   decoder that splits its byte stream back into typed events, the hit test
+//!   and ownership rule that decide whether a mouse event is chrome's or the
+//!   application's, and the keyboard actions that drive the attention queue
+//!   overlay.
 //! - [`copy_mode`] — highlights and the status row for server-owned copy mode,
 //!   plus the explicit, policy-gated OSC 52 copy.
 //! - [`effects`] — client-local policy and safe rendering for allowlisted
@@ -65,8 +66,8 @@ pub use copy_mode::{
 };
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{
-    InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, QueueAction, mouse_owner,
-    queue_action,
+    ChromeTarget, InputDecoder, InputEvent, MouseOwner, MouseReport, MouseRoute, MouseTarget,
+    OuterModes, PaneArea, QueueAction, ScreenLayout, mouse_owner, queue_action, route_mouse,
 };
 pub use outer::{current_size, window_size};
 pub use raw_mode::{RawMode, RawModeError};

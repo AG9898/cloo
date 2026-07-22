@@ -353,6 +353,12 @@ each role distinct by attribute as well as colour, off-viewport positions droppe
 clamped, the status row exactly its width at every width, and a denied clipboard policy that
 writes nothing and does not even send the request — plus the explicit copy through the actor in
 `cloo-server/tests/session.rs` and the whole loop end to end in `crates/cloo/tests/attach.rs`.
+M6-01 covers mouse ownership at both ends: `cloo-client/src/input.rs` hit-tests a drawn screen at
+every region, proves a mis-described pane cannot swallow a chrome row and a header cannot swallow a
+pane's cell, and asserts that *no* chrome region produces a wire event even under full motion
+tracking; `cloo-server/tests/session.rs` proves against real children that an event reaches the pane
+it names and not the focused one, that a pane which never enabled the mouse is written nothing, and
+that an event naming a closed pane is dropped.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -775,3 +781,18 @@ through the damage broadcast would store one user's selection in every attached 
 client-side gate runs before the request too: `EffectPolicy::permits_clipboard` decides whether to
 ask at all, so a client that would refuse the store never makes the server put scrollback on the
 wire.
+
+### 2026-07-22 — A mouse report is hit-tested against what was drawn, not against the wire
+`cloo-client::input::ScreenLayout` is the client's own description of its screen — chrome rows, pane
+grid rectangles in terminal cells, and which pane is focused — because the server's `PaneRect` is a
+pane's *grid* in tab coordinates and knows nothing about the header, gutter, or status bar the
+client drew around it. `hit` claims the chrome rows before consulting any pane, so a wrongly
+described pane cannot swallow a status-bar click, and `MouseRoute::Chrome` carries no `MouseEvent`
+at all, which is what makes "a chrome event never reaches the wire" a type rather than a rule.
+
+### 2026-07-22 — Modes are reported for the focused pane, so every other pane is chrome's
+`ServerMessage::Modes` names one pane and the `DamageTracker` sends it for the focused one only, so
+a client genuinely cannot know whether an unfocused pane's application tracks the mouse. Answering
+"chrome" there is the honest answer *and* the one a user means by clicking an unfocused pane; the
+server closes the loop by encoding a `Command::Mouse` from the **named** pane's own modes and
+refusing a pane that is not visible, so a client cannot write into an arbitrary child.

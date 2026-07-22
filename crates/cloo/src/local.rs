@@ -29,13 +29,13 @@ use std::time::Duration;
 use cloo_client::capabilities::detect_caps;
 use cloo_client::effects::{EffectPolicy, apply_effect};
 use cloo_client::input::{
-    InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, mouse_owner,
+    InputDecoder, InputEvent, MouseRoute, OuterModes, ScreenLayout, route_mouse,
 };
 use cloo_client::outer::current_size;
 use cloo_client::raw_mode::{RawMode, RawModeError};
 use cloo_client::renderer::{Cursor, Grid, RenderError, Renderer};
 use cloo_client::resize::ResizeWatch;
-use cloo_proto::{MouseEvent, PaneId, PaneModes, Point};
+use cloo_proto::{PaneId, PaneModes};
 use cloo_server::launch::Launch;
 use cloo_server::pty::{PtyConfig, PtyError};
 use cloo_server::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot};
@@ -203,6 +203,11 @@ async fn session(
     // frame stale, which is what routing a mouse event costs instead of a
     // round trip to the session task per click.
     let mut pane_modes = PaneModes::default();
+    // What the client drew, which is what a mouse report is hit-tested against.
+    // One pane, no chrome: the local path composes no tab row, no status bar,
+    // and no header. It is rebuilt on a resize rather than adjusted, because a
+    // stale screen would place a click in a pane that has moved.
+    let mut screen = ScreenLayout::single(size, THE_PANE);
     let mut decoder = InputDecoder::new(modes);
     let mut input = spawn_input_reader();
     let mut input_open = true;
@@ -234,12 +239,15 @@ async fn session(
             Step::Session(Some(SessionEvent::Exited) | None) => break,
             Step::Input(bytes) => {
                 for event in decoder.feed(&bytes) {
-                    route(handle(&session)?, pane_modes, event).await?;
+                    route(handle(&session)?, &screen, pane_modes, event).await?;
                 }
             }
             // The outer terminal changed shape. The grid reflow and the child's
             // `TIOCSWINSZ` are the session task's business, in that order.
-            Step::Resized(size) => handle(&session)?.resize(size).await?,
+            Step::Resized(size) => {
+                screen = ScreenLayout::single(size, THE_PANE);
+                handle(&session)?.resize(size).await?;
+            }
             // Stdin reached end of file. The child keeps running; it simply
             // gets no more input.
             Step::InputClosed => input_open = false,
@@ -247,7 +255,7 @@ async fn session(
                 // A held escape prefix is released within a frame, which is what
                 // makes a lone Escape key reach the pane at all.
                 if let Some(event) = decoder.flush() {
-                    route(handle(&session)?, pane_modes, event).await?;
+                    route(handle(&session)?, &screen, pane_modes, event).await?;
                 }
                 if dirty {
                     let snapshot = handle(&session)?.snapshot().await?;
@@ -299,13 +307,16 @@ fn enable_modes(modes: OuterModes) -> Result<(), LocalError> {
 
 /// Sends one decoded input event to the session.
 ///
-/// The one branch worth reading twice is the mouse. An event the pane's
-/// application does not own belongs to cloo's chrome, and it is **dropped
-/// rather than forwarded**: a chrome click delivered to a child appears in the
-/// user's shell as garbage. M1 has no chrome to act on it yet, so dropping is
-/// the whole of the chrome half; M6-01 gives those events somewhere to go.
+/// The one branch worth reading twice is the mouse. `route_mouse` hit-tests the
+/// report against the screen the client actually drew and answers with either
+/// the wire event or a chrome target; a chrome target has no wire form at all,
+/// which is what keeps a chrome click out of a child's input — delivered there
+/// it appears in the user's shell as garbage. The local path draws no chrome, so
+/// there is nothing here to act on a chrome target yet and it is dropped;
+/// M6-02 is where those targets become actions.
 async fn route(
     session: &SessionHandle,
+    screen: &ScreenLayout,
     modes: PaneModes,
     event: InputEvent,
 ) -> Result<(), LocalError> {
@@ -314,24 +325,12 @@ async fn route(
         InputEvent::Paste(text) => session.paste(text).await?,
         InputEvent::Focus(focused) => session.focus(focused).await?,
         InputEvent::Mouse(report) => {
-            // One pane filling the whole area, so every report is over it. Real
-            // hit testing arrives with splits in M2.
-            if mouse_owner(modes, &report, true) == MouseOwner::Application {
-                session.mouse(pane_event(&report)).await?;
+            if let MouseRoute::Application(event) = route_mouse(screen, modes, &report) {
+                session.mouse(event).await?;
             }
         }
     }
     Ok(())
-}
-
-/// Places a mouse report in the session's only pane.
-fn pane_event(report: &MouseReport) -> MouseEvent {
-    MouseEvent {
-        pane: THE_PANE,
-        at: Point::new(report.col, report.row),
-        kind: report.kind,
-        mods: report.mods,
-    }
 }
 
 /// Borrows the session handle, or reports that the task is gone.

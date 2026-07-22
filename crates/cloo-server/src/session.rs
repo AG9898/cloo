@@ -957,18 +957,7 @@ impl Session {
                 // nothing is the whole of the fallback.
                 None => Ok(()),
             },
-            Command::Mouse(event) => {
-                // A mouse event names the pane the client hit-tested it into. A
-                // stale one naming some other pane is dropped rather than
-                // delivered to whatever is focused now.
-                if event.pane != self.focused() {
-                    return Ok(());
-                }
-                match mouse_bytes(self.modes(), &event) {
-                    Some(bytes) => self.write_focused(&bytes),
-                    None => Ok(()),
-                }
-            }
+            Command::Mouse(event) => self.deliver_mouse(&event),
             Command::Resize(area) => self.resize(area),
             Command::Split {
                 dir,
@@ -1683,6 +1672,53 @@ impl Session {
         self.focused_pane().map_or_else(PaneModes::default, |pane| {
             cloo_core::grid::wire_modes(pane.reactor.emulator().modes())
         })
+    }
+
+    /// Delivers a mouse event to the pane it names, or to nobody.
+    ///
+    /// The client hit-tested the event into a pane before sending it, and only
+    /// events it decided belong to an *application* are sent at all. The server
+    /// is the second half of that contract and it checks the same two things
+    /// again, because a client is not something to be trusted with a write into
+    /// an arbitrary child:
+    ///
+    /// - The named pane must be one the user can actually see — in the active
+    ///   tab, and not hidden behind a zoom. A stale event naming a pane that has
+    ///   closed, moved to another tab, or been zoomed away is dropped.
+    /// - The bytes are encoded from *that pane's* modes, never the focused
+    ///   pane's, so an application that never asked for the mouse cannot be
+    ///   handed a report because its neighbour did.
+    ///
+    /// Delivering to the named pane rather than to whatever is focused is what
+    /// makes "an application's mouse events are not stolen" true when the
+    /// pointer is over an unfocused pane, and it is also the stricter rule:
+    /// nothing is ever written to a pane the event did not name.
+    fn deliver_mouse(&self, event: &MouseEvent) -> Result<(), PtyError> {
+        if !self.is_visible(event.pane) {
+            return Ok(());
+        }
+        let Some(pane) = self.panes.iter().find(|pane| pane.id == event.pane) else {
+            return Ok(());
+        };
+        let modes = cloo_core::grid::wire_modes(pane.reactor.emulator().modes());
+        match mouse_bytes(modes, event) {
+            Some(bytes) => pane.reactor.write_all(&bytes),
+            // The application is not tracking the mouse, or not at the level
+            // this event needs. Writing nothing is the whole of the fallback.
+            None => Ok(()),
+        }
+    }
+
+    /// Whether a pane is one the user is currently looking at.
+    ///
+    /// A zoomed tab shows exactly one pane, so every other pane in it is as
+    /// unreachable by the pointer as a pane in another tab.
+    fn is_visible(&self, pane: PaneId) -> bool {
+        let layout = self.active_tab().layout();
+        match layout.zoomed() {
+            Some(zoomed) => zoomed == pane,
+            None => layout.contains(pane),
+        }
     }
 
     /// Writes to the focused pane's child.
