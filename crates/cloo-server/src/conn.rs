@@ -157,6 +157,10 @@ pub fn session_snapshot(tab: TabId, snapshot: &SessionSnapshot) -> Vec<ServerMes
             zoomed: snapshot.zoomed,
         }),
         ServerMessage::Panes(snapshot.metas.clone()),
+        // Attention rides with identity on the resync: the chrome needs a pane's
+        // state and provenance to draw its header, and cannot derive either from
+        // the grid.
+        ServerMessage::Attention(snapshot.attention.clone()),
         ServerMessage::Damage {
             pane,
             rows: snapshot.pane.rows.clone(),
@@ -221,6 +225,12 @@ mod tests {
                 name: "api".into(),
                 task: Some("fix the flaky test".into()),
                 cwd: "/home/dev/api".into(),
+            }],
+            attention: vec![cloo_proto::PaneAttention {
+                pane,
+                state: cloo_proto::AttentionState::Unknown,
+                source: cloo_proto::AttentionSource::None,
+                acknowledged: false,
             }],
             focused: pane,
             zoomed: None,
@@ -351,13 +361,14 @@ mod tests {
             "layout must come first so rows have somewhere to land"
         );
         assert!(matches!(messages.get(1), Some(ServerMessage::Panes(_))));
+        assert!(matches!(messages.get(2), Some(ServerMessage::Attention(_))));
         assert!(matches!(
-            messages.get(2),
+            messages.get(3),
             Some(ServerMessage::Damage { rows, .. }) if rows.len() == 1
         ));
-        assert!(matches!(messages.get(3), Some(ServerMessage::Modes { .. })));
+        assert!(matches!(messages.get(4), Some(ServerMessage::Modes { .. })));
         assert!(matches!(
-            messages.get(4),
+            messages.get(5),
             Some(ServerMessage::CursorMoved { visible: true, .. })
         ));
     }
@@ -396,7 +407,7 @@ mod tests {
         let messages = session_snapshot(TabId::new(1), &snapshot);
         assert!(
             matches!(
-                messages.get(4),
+                messages.get(5),
                 Some(ServerMessage::CursorMoved { visible: false, .. })
             ),
             "a client with a stale cursor must be told to stop drawing it"

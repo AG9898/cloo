@@ -20,7 +20,7 @@ use crate::error::ProtoError;
 /// **Bump this on every change to a type in [`crate::message`].** A stale client
 /// attached to a rebuilt server is a routine occurrence, and a clean "version
 /// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 4;
+pub const PROTOCOL_VERSION: u16 = 5;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -125,10 +125,10 @@ mod tests {
     use super::*;
     use crate::ids::{PaneId, SessionId, TabId};
     use crate::message::{
-        Action, Cell, CellAttrs, ClientMessage, ClipboardTarget, Color, CursorShape,
-        GraphicsEffect, LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods,
-        MouseTracking, OuterTerminalEffect, PaneInfo, PaneModes, PaneRect, Point, ProgressState,
-        RowUpdate, ServerMessage, Size, TabSummary, TermCaps,
+        Action, AttentionSource, AttentionState, Cell, CellAttrs, ClientMessage, ClipboardTarget,
+        Color, CursorShape, GraphicsEffect, LayoutSnapshot, MouseButton, MouseEvent, MouseKind,
+        MouseMods, MouseTracking, OuterTerminalEffect, PaneAttention, PaneInfo, PaneModes,
+        PaneRect, Point, ProgressState, RowUpdate, ServerMessage, Size, TabSummary, TermCaps,
     };
 
     /// Encodes, decodes, and asserts the value survives unchanged.
@@ -345,6 +345,21 @@ mod tests {
                 },
             ]),
             ServerMessage::Panes(Vec::new()),
+            ServerMessage::Attention(vec![
+                PaneAttention {
+                    pane: PaneId::new(4),
+                    state: AttentionState::NeedsInput,
+                    source: AttentionSource::Adapter("claude-adapter".into()),
+                    acknowledged: false,
+                },
+                PaneAttention {
+                    pane: PaneId::new(5),
+                    state: AttentionState::Unknown,
+                    source: AttentionSource::None,
+                    acknowledged: false,
+                },
+            ]),
+            ServerMessage::Attention(Vec::new()),
             ServerMessage::Bell(PaneId::new(4)),
             ServerMessage::Tabs(Vec::new()),
             ServerMessage::Detached,
@@ -384,6 +399,16 @@ mod tests {
         round_trip(&PaneId::new(11));
         round_trip(&TabId::new(11));
         round_trip(&SessionId::new(11));
+        round_trip(&AttentionState::Unknown);
+        round_trip(&AttentionState::Failed);
+        round_trip(&AttentionSource::None);
+        round_trip(&AttentionSource::Adapter("my-adapter".into()));
+        round_trip(&PaneAttention {
+            pane: PaneId::new(11),
+            state: AttentionState::Ready,
+            source: AttentionSource::Lifecycle,
+            acknowledged: true,
+        });
     }
 
     #[test]

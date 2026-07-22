@@ -34,7 +34,7 @@
 
 use std::path::{Path, PathBuf};
 
-use cloo_proto::{PaneId, PaneInfo, Size};
+use cloo_proto::{PaneAttention, PaneId, PaneInfo, Size};
 
 use crate::error::MetadataError;
 use crate::profile::{AdapterId, Profile, ProfileId};
@@ -235,6 +235,19 @@ impl AttentionState {
     pub const fn wants_attention(self) -> bool {
         matches!(self, Self::NeedsInput | Self::Ready | Self::Failed)
     }
+
+    /// Projects the state onto its wire form.
+    #[must_use]
+    pub const fn to_wire(self) -> cloo_proto::AttentionState {
+        match self {
+            Self::Unknown => cloo_proto::AttentionState::Unknown,
+            Self::Working => cloo_proto::AttentionState::Working,
+            Self::NeedsInput => cloo_proto::AttentionState::NeedsInput,
+            Self::Ready => cloo_proto::AttentionState::Ready,
+            Self::Failed => cloo_proto::AttentionState::Failed,
+            Self::Quiet => cloo_proto::AttentionState::Quiet,
+        }
+    }
 }
 
 /// Where an attention state came from.
@@ -277,6 +290,19 @@ impl AttentionSource {
             Self::Adapter(id) => id.as_str(),
         }
     }
+
+    /// Projects the source onto its wire form, carrying an adapter's name so the
+    /// chrome can attribute an advisory claim on the far side.
+    #[must_use]
+    pub fn to_wire(&self) -> cloo_proto::AttentionSource {
+        match self {
+            Self::None => cloo_proto::AttentionSource::None,
+            Self::Bell => cloo_proto::AttentionSource::Bell,
+            Self::Lifecycle => cloo_proto::AttentionSource::Lifecycle,
+            Self::User => cloo_proto::AttentionSource::User,
+            Self::Adapter(id) => cloo_proto::AttentionSource::Adapter(id.as_str().to_owned()),
+        }
+    }
 }
 
 /// A pane's attention state, its provenance, and whether it has been seen.
@@ -315,6 +341,22 @@ impl Attention {
     #[must_use]
     pub const fn is_pending(&self) -> bool {
         self.state.wants_attention() && !self.acknowledged
+    }
+
+    /// Projects this pane's attention onto the wire, keeping state, provenance,
+    /// and acknowledgment together.
+    ///
+    /// A state without its source is exactly the claim the chrome must not make,
+    /// which is why all three cross as one value rather than being flattened
+    /// into [`PaneInfo`].
+    #[must_use]
+    pub fn to_wire(&self, pane: PaneId) -> PaneAttention {
+        PaneAttention {
+            pane,
+            state: self.state.to_wire(),
+            source: self.source.to_wire(),
+            acknowledged: self.acknowledged,
+        }
     }
 }
 
@@ -376,8 +418,9 @@ impl PaneMeta {
     ///
     /// Identity only. The recommended minimum stays on the server because it is
     /// an input to a split the server performs, and attention crosses the wire
-    /// with its provenance at M2-07 rather than being flattened in here — a
-    /// state without its source is exactly the claim the chrome must not make.
+    /// with its provenance as its own [`Attention::to_wire`] projection rather
+    /// than being flattened in here — a state without its source is exactly the
+    /// claim the chrome must not make.
     #[must_use]
     pub fn to_wire(&self, pane: PaneId) -> PaneInfo {
         PaneInfo {
@@ -558,6 +601,66 @@ mod tests {
         ] {
             assert!(!source.is_advisory(), "{source:?} should be observed");
         }
+    }
+
+    #[test]
+    fn an_uninstrumented_pane_crosses_the_wire_as_unknown_with_no_source() {
+        // The acceptance property: a child nothing has reported on projects to
+        // the honest default, provenance and all.
+        let wire = Attention::default().to_wire(cloo_proto::PaneId::new(3));
+        assert_eq!(
+            wire,
+            PaneAttention {
+                pane: cloo_proto::PaneId::new(3),
+                state: cloo_proto::AttentionState::Unknown,
+                source: cloo_proto::AttentionSource::None,
+                acknowledged: false,
+            }
+        );
+    }
+
+    #[test]
+    fn the_wire_projection_keeps_state_provenance_and_acknowledgment_together() {
+        let adapter = AdapterId::new("my-adapter").expect("valid id");
+        let mut attention = Attention::default();
+        attention.set(
+            AttentionState::NeedsInput,
+            AttentionSource::Adapter(adapter),
+        );
+        attention.acknowledge();
+        let wire = attention.to_wire(cloo_proto::PaneId::new(7));
+        assert_eq!(
+            wire,
+            PaneAttention {
+                pane: cloo_proto::PaneId::new(7),
+                state: cloo_proto::AttentionState::NeedsInput,
+                source: cloo_proto::AttentionSource::Adapter("my-adapter".into()),
+                acknowledged: true,
+            }
+        );
+    }
+
+    #[test]
+    fn every_state_and_source_has_a_distinct_wire_form() {
+        // A conversion that collapsed two states or two sources would be caught
+        // by comparing the projected set's cardinality to the input's.
+        use std::collections::HashSet;
+        let states: HashSet<_> = [
+            AttentionState::Unknown,
+            AttentionState::Working,
+            AttentionState::NeedsInput,
+            AttentionState::Ready,
+            AttentionState::Failed,
+            AttentionState::Quiet,
+        ]
+        .into_iter()
+        .map(|state| format!("{:?}", state.to_wire()))
+        .collect();
+        assert_eq!(
+            states.len(),
+            6,
+            "a state collapsed onto another on the wire"
+        );
     }
 
     #[test]

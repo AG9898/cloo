@@ -133,7 +133,7 @@ every event cloo has no allowlisted type for. `OuterTerminalEffect` deliberately
 such as title, clipboard, hyperlink, notification, and progress changes, plus
 `Graphics(Unavailable)`; it contains no raw OSC, DCS, or graphics payload. `cloo-proto` mirrors
 that vocabulary in `ServerMessage::Effect { pane, effect }`, which took the handshake to v3;
-M2-06's `ServerMessage::Panes` took it to v4.
+M2-06's `ServerMessage::Panes` took it to v4, and M2-07's `ServerMessage::Attention` to v5.
 M1-09 drains those values through the session actor and fans each one out as its own non-damage
 frame. The server neither chooses nor applies an effect: each client combines its terminal
 capabilities with a default-deny local policy. Title changes are permitted only by the title
@@ -224,11 +224,11 @@ to report to.
 
 `conn::session_snapshot` is what an attach delivers. A client caches the visible grid and nothing
 else, so it needs the whole picture the moment it connects, and it arrives as the same message
-types an incremental update uses — `Layout`, then `Panes`, then `Damage`, then `Modes`, then
-`CursorMoved` — so a resync and a
+types an incremental update uses — `Layout`, then `Panes`, then `Attention`, then `Damage`, then
+`Modes`, then `CursorMoved` — so a resync and a
 damage frame stay one code path on the client. Geometry comes first so rows never arrive with
-nowhere to land, and identity comes before contents so a pane header has something to say before
-there is anything to draw it around.
+nowhere to land, and identity and attention come before contents so a pane header has something to
+say before there is anything to draw it around.
 
 `cloo-server::daemon` is the serving loop that owns the pane and outlives every client attached to
 it. The property it exists to guarantee is that the child belongs to the daemon, not to whoever is
@@ -648,8 +648,17 @@ fails `Profile::validate` is dropped alone with a `ConfigWarning` and the rest o
 still loads. An unknown key is never ignored, since a silently dropped key is a setting the user
 believes is applied. Overriding a built-in replaces it in place rather than appending, so the
 launcher order a user learned survives their override. The rest of the configuration surface and
-`SIGHUP` reload are M4-01. M2-06 launches from profiles and M2-07 puts attention state in the
-session actor.
+`SIGHUP` reload are M4-01. M2-06 launches from profiles.
+
+M2-07 makes the session actor the one serialized path for that attention state. `Command::SetAttention`
+and `Command::AcknowledgeAttention` arrive on the same `mpsc` as every other mutation, so the
+coalescing rule in `Attention::set` — re-reporting a state keeps its acknowledgment — cannot be
+raced by a chatty source; a report naming a pane that has since closed is dropped exactly as a
+stale mouse event is. `SessionSnapshot` projects each pane's attention from the same
+`Layout::resolve` pass as its identity, so a client is never told a pane's state without also being
+told who the pane is, and the daemon fans it out as `ServerMessage::Attention` on the attention
+clock. Which generic sources feed `SetAttention` — bells, child exits, explicit marks — is M2-08;
+the opt-in adapter control interface that may also feed it is M2-09.
 
 ---
 
@@ -690,6 +699,7 @@ Server → Client:  Hello { protocol_version, session, tabs, size }
                   CursorMoved { pane, pos, shape, visible }
                   Modes { pane, modes: PaneModes }  Effect { pane, effect }
                   Layout(LayoutSnapshot)  Panes(Vec<PaneInfo>)
+                  Attention(Vec<PaneAttention>)
                   Bell(pane)  Tabs(Vec<TabSummary>)
                   Detached  Exit(code)
 ```
@@ -701,6 +711,13 @@ launched, closed, or renamed, and a full-screen drag must not resend every pane'
 sent whole rather than per pane, so a client replaces its map and can never hold an entry for a
 pane that no longer exists. Every field of a `PaneInfo` was supplied by the user or by the
 profile's defaults; none of it is ever derived from a pane's grid.
+
+`Attention` is a third clock again: `PaneAttention { pane, state, source, acknowledged }` for
+every pane, resent only when some pane's attention actually changes, so a rename does not drag
+state and a state change does not drag names. State and source travel together — a state without
+its provenance is exactly the claim the chrome must not make — and an uninstrumented pane is
+carried as `Unknown`/`None` rather than omitted, because the client renders that state too and
+never guesses one from the grid.
 
 ### Framing
 

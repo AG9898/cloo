@@ -671,3 +671,125 @@ async fn a_named_profile_reaches_the_pane_it_launched() {
         "an unnamed pane takes the profile's default name"
     );
 }
+
+// --- Attention state through the session actor (M2-07) ----------------------
+
+/// The attention a snapshot carries for one pane.
+fn attention_of(snapshot: &SessionSnapshot, pane: PaneId) -> cloo_proto::PaneAttention {
+    snapshot
+        .attention
+        .iter()
+        .find(|att| att.pane == pane)
+        .unwrap_or_else(|| {
+            panic!(
+                "no attention for {pane:?}; snapshot has {:?}",
+                snapshot.attention
+            )
+        })
+        .clone()
+}
+
+#[tokio::test]
+async fn attention_updates_are_serialized_through_the_session_task() {
+    use cloo_core::pane::{AttentionSource, AttentionState};
+
+    let (root, session) = session(80, 24);
+
+    // An uninstrumented child is Unknown with no source: a live PTY is not proof
+    // a harness is doing anything.
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(
+        attention_of(&snapshot, root),
+        cloo_proto::PaneAttention {
+            pane: root,
+            state: cloo_proto::AttentionState::Unknown,
+            source: cloo_proto::AttentionSource::None,
+            acknowledged: false,
+        }
+    );
+
+    // A report reaches the state through the one command channel and shows up in
+    // the next snapshot, provenance and all.
+    session
+        .handle
+        .set_attention(root, AttentionState::NeedsInput, AttentionSource::Bell)
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let att = attention_of(&snapshot, root);
+    assert_eq!(att.state, cloo_proto::AttentionState::NeedsInput);
+    assert_eq!(att.source, cloo_proto::AttentionSource::Bell);
+    assert!(!att.acknowledged);
+
+    // Acknowledging is its own command and clears only the seen flag.
+    session
+        .handle
+        .acknowledge_attention(root)
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let att = attention_of(&snapshot, root);
+    assert_eq!(att.state, cloo_proto::AttentionState::NeedsInput);
+    assert!(
+        att.acknowledged,
+        "the state stayed, only the seen flag moved"
+    );
+
+    // Re-reporting the same state keeps the acknowledgment — the coalescing rule
+    // the queue depends on, proven through the actor rather than only in the model.
+    session
+        .handle
+        .set_attention(root, AttentionState::NeedsInput, AttentionSource::Bell)
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert!(
+        attention_of(&snapshot, root).acknowledged,
+        "a re-announced state must not refill a queue the user just cleared"
+    );
+
+    // A different state clears it again.
+    session
+        .handle
+        .set_attention(root, AttentionState::Failed, AttentionSource::Lifecycle)
+        .await
+        .expect("session is alive");
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let att = attention_of(&snapshot, root);
+    assert_eq!(att.state, cloo_proto::AttentionState::Failed);
+    assert!(!att.acknowledged, "a changed state is unseen again");
+}
+
+#[tokio::test]
+async fn a_report_for_a_closed_pane_is_dropped_without_disturbing_the_survivor() {
+    use cloo_core::pane::{AttentionSource, AttentionState};
+
+    let (root, session) = session(120, 40);
+    let new_pane = session
+        .handle
+        .split_even(Direction::Horizontal)
+        .await
+        .expect("a 120x40 session has room for two panes");
+
+    session
+        .handle
+        .close(new_pane)
+        .await
+        .expect("the pane closes");
+
+    // Naming the pane that just closed is a no-op, exactly as a stale mouse
+    // event is — it must not panic or touch the surviving pane.
+    session
+        .handle
+        .set_attention(new_pane, AttentionState::Failed, AttentionSource::Lifecycle)
+        .await
+        .expect("session is alive");
+
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.attention.len(), 1, "only the survivor remains");
+    assert_eq!(
+        attention_of(&snapshot, root).state,
+        cloo_proto::AttentionState::Unknown,
+        "the survivor is untouched by a report aimed at a pane that is gone"
+    );
+}

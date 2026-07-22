@@ -331,6 +331,72 @@ pub struct PaneInfo {
     pub cwd: String,
 }
 
+/// A pane's workspace state, as reported to the client.
+///
+/// Mirrors `cloo_core::pane::AttentionState` — the six states of
+/// `docs/STYLEGUIDE.md`. The client turns each into a glyph, a label, and a
+/// colour; it never invents a state of its own or derives one by reading a
+/// pane's grid. `Unknown` is the honest default for a child nothing reliable has
+/// reported on, and is distinct from `Quiet`, which is a *claim* only a source
+/// may make.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AttentionState {
+    /// Nothing reliable has reported.
+    #[default]
+    Unknown,
+    /// A source says the pane is making progress.
+    Working,
+    /// The pane requires a decision or a response.
+    NeedsInput,
+    /// The pane finished with a result nobody has looked at.
+    Ready,
+    /// The child exited unsuccessfully, or a source reported failure.
+    Failed,
+    /// A source says there is nothing to do.
+    Quiet,
+}
+
+/// Where a pane's attention state came from.
+///
+/// Mirrors `cloo_core::pane::AttentionSource`. Carried alongside the state
+/// rather than folded into it, so the chrome can show an adapter's advisory
+/// claim as an adapter's claim rather than as fact. Only [`Adapter`](Self::Adapter)
+/// is advisory; the rest are things cloo observed itself.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum AttentionSource {
+    /// Nothing has reported. Pairs with [`AttentionState::Unknown`].
+    #[default]
+    None,
+    /// The child rang the terminal bell.
+    Bell,
+    /// The child started, stopped, or exited.
+    Lifecycle,
+    /// The user marked the pane explicitly.
+    User,
+    /// An opt-in local adapter reported it, named here so the chrome can
+    /// attribute it.
+    Adapter(String),
+}
+
+/// A pane's attention state, its provenance, and whether the user has seen it.
+///
+/// Separate from [`PaneInfo`] on purpose: identity changes only when a pane is
+/// launched, closed, or renamed, while attention changes whenever a source
+/// reports. A state without its source is exactly the claim the chrome must not
+/// make, which is why the source rides along here rather than being flattened
+/// away.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PaneAttention {
+    /// Which pane this describes.
+    pub pane: PaneId,
+    /// The current state.
+    pub state: AttentionState,
+    /// Where the current state came from.
+    pub source: AttentionSource,
+    /// Whether the user has acknowledged the current state.
+    pub acknowledged: bool,
+}
+
 /// Enough about a tab to draw the tab bar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabSummary {
@@ -598,6 +664,16 @@ pub enum ServerMessage {
     /// Sent whole rather than per pane, so a client can replace its map
     /// wholesale and never hold an entry for a pane that no longer exists.
     Panes(Vec<PaneInfo>),
+    /// Every pane's attention state, its provenance, and whether it has been
+    /// acknowledged.
+    ///
+    /// Separate from [`Panes`](Self::Panes) because the two travel on different
+    /// clocks: a rename is not a state change and a state change is not a
+    /// rename. Sent whole, like `Panes`, so a client replaces its map and never
+    /// keeps an entry for a pane that closed. An uninstrumented pane is carried
+    /// as [`AttentionState::Unknown`] rather than omitted — the client renders
+    /// that state too, and never guesses one from the grid.
+    Attention(Vec<PaneAttention>),
     /// A pane's application changed which input modes it has negotiated.
     ///
     /// The client cannot observe this for itself — the modes were set by

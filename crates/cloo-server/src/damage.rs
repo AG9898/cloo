@@ -115,6 +115,9 @@ impl DamageTracker {
         // Identity moves on a different clock from geometry: a resize is not a
         // rename, so a full-screen drag must not resend every pane's name.
         let metas_changed = previous.is_none_or(|before| before.metas != current.metas);
+        // Attention moves on yet another clock: a state change is not a rename
+        // and a rename is not a state change, so each is resent only for itself.
+        let attention_changed = previous.is_none_or(|before| before.attention != current.attention);
         let modes_changed = previous.is_none_or(|before| before.modes != current.modes);
         let cursor_changed =
             previous.is_none_or(|before| before.pane.cursor != current.pane.cursor);
@@ -130,6 +133,9 @@ impl DamageTracker {
         }
         if metas_changed {
             messages.push(ServerMessage::Panes(current.metas.clone()));
+        }
+        if attention_changed {
+            messages.push(ServerMessage::Attention(current.attention.clone()));
         }
         if !rows.is_empty() {
             messages.push(ServerMessage::Damage {
@@ -201,6 +207,12 @@ mod tests {
                 task: None,
                 cwd: "/home/dev".into(),
             }],
+            attention: vec![cloo_proto::PaneAttention {
+                pane,
+                state: cloo_proto::AttentionState::Unknown,
+                source: cloo_proto::AttentionSource::None,
+                acknowledged: false,
+            }],
             focused: pane,
             zoomed: None,
             pane: PaneSnapshot {
@@ -239,15 +251,19 @@ mod tests {
             frame.messages().get(1),
             Some(ServerMessage::Panes(panes)) if panes.len() == 1
         ));
+        assert!(matches!(
+            frame.messages().get(2),
+            Some(ServerMessage::Attention(attention)) if attention.len() == 1
+        ));
         assert!(
-            matches!(frame.messages().get(2), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
+            matches!(frame.messages().get(3), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
         );
         assert!(matches!(
-            frame.messages().get(3),
+            frame.messages().get(4),
             Some(ServerMessage::Modes { .. })
         ));
         assert!(matches!(
-            frame.messages().get(4),
+            frame.messages().get(5),
             Some(ServerMessage::CursorMoved { visible: false, .. })
         ));
     }
@@ -275,6 +291,57 @@ mod tests {
         assert_eq!(
             renamed.messages(),
             &[ServerMessage::Panes(named_snapshot(&["XX"], "api").metas)]
+        );
+    }
+
+    #[test]
+    fn attention_is_resent_only_when_it_changes() {
+        // Attention is on its own clock too: a changed row must not resend a
+        // pane's state, and a changed state must not resend its rows.
+        let with_state = |rows: &[&str], state: cloo_proto::AttentionState| {
+            let mut snap = snapshot(rows);
+            snap.attention[0].state = state;
+            snap.attention[0].source = cloo_proto::AttentionSource::Bell;
+            snap
+        };
+
+        let mut tracker = DamageTracker::default();
+        let _ = tracker.update(
+            TabId::new(1),
+            &with_state(&["ab"], cloo_proto::AttentionState::Unknown),
+        );
+
+        // A row changes, attention does not.
+        let frame = tracker
+            .update(
+                TabId::new(1),
+                &with_state(&["XX"], cloo_proto::AttentionState::Unknown),
+            )
+            .expect("a changed row produces damage");
+        assert!(
+            !frame
+                .messages()
+                .iter()
+                .any(|message| matches!(message, ServerMessage::Attention(_))),
+            "an unchanged state costs no wire frame"
+        );
+
+        // Attention changes, no row does.
+        let frame = tracker
+            .update(
+                TabId::new(1),
+                &with_state(&["XX"], cloo_proto::AttentionState::NeedsInput),
+            )
+            .expect("a state change is a visible change");
+        assert_eq!(
+            frame.messages(),
+            &[ServerMessage::Attention(vec![cloo_proto::PaneAttention {
+                pane: PaneId::new(1),
+                state: cloo_proto::AttentionState::NeedsInput,
+                source: cloo_proto::AttentionSource::Bell,
+                acknowledged: false,
+            }])],
+            "only the attention message, never the unchanged rows"
         );
     }
 

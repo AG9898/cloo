@@ -48,10 +48,10 @@ use std::task::Poll;
 
 use cloo_core::error::LayoutError;
 use cloo_core::layout::{Layout, Side};
-use cloo_core::pane::PaneMeta;
+use cloo_core::pane::{AttentionSource, AttentionState, PaneMeta};
 use cloo_proto::{
     ClipboardTarget, Direction, GraphicsEffect, MouseButton, MouseEvent, MouseKind, MouseTracking,
-    OuterTerminalEffect, PaneId, PaneInfo, PaneModes, PaneRect, ProgressState, Size,
+    OuterTerminalEffect, PaneAttention, PaneId, PaneInfo, PaneModes, PaneRect, ProgressState, Size,
 };
 use cloo_term::TermSize;
 use tokio::sync::{mpsc, oneshot};
@@ -123,6 +123,27 @@ pub enum Command {
     MoveFocus(Side),
     /// Shows the focused pane alone at the full area, or undoes that.
     ToggleZoom,
+    /// Records a pane's attention state and where it came from.
+    ///
+    /// The single serialized path for attention: a bell, a child exit, an
+    /// explicit user mark, and an opt-in adapter all arrive here and are applied
+    /// in arrival order by the one task, so nothing races the coalescing rule in
+    /// [`Attention::set`](cloo_core::pane::Attention::set). An update naming a
+    /// pane that has since closed is dropped, exactly as a stale mouse event is.
+    SetAttention {
+        /// The pane whose state is being reported.
+        pane: PaneId,
+        /// The state the source is claiming.
+        state: AttentionState,
+        /// Who is making the claim.
+        source: AttentionSource,
+    },
+    /// Marks a pane's current attention state as seen, taking it out of the
+    /// attention queue without changing what the state is.
+    AcknowledgeAttention {
+        /// The pane the user has looked at.
+        pane: PaneId,
+    },
     /// Asks for the current picture. The reply channel is how a reader gets
     /// state out without holding a reference to it.
     Snapshot(oneshot::Sender<SessionSnapshot>),
@@ -231,6 +252,15 @@ pub struct SessionSnapshot {
     /// same set. Explicit metadata every time — nothing in this vector is
     /// derived from what a child printed.
     pub metas: Vec<PaneInfo>,
+    /// Every pane's attention state, its provenance, and whether it has been
+    /// acknowledged.
+    ///
+    /// Projected from the same [`Layout::resolve`] pass as [`metas`](Self::metas),
+    /// so a client is never told a pane's attention without also being told who
+    /// the pane is. An uninstrumented pane appears here as
+    /// [`AttentionState::Unknown`](cloo_core::pane::AttentionState::Unknown)
+    /// rather than being omitted.
+    pub attention: Vec<PaneAttention>,
     /// The focused pane's contents.
     pub pane: PaneSnapshot,
     /// The input modes the focused pane's application has negotiated. A client
@@ -391,6 +421,40 @@ impl SessionHandle {
     /// Returns [`SessionGone`] if the session task has ended.
     pub async fn toggle_zoom(&self) -> Result<(), SessionGone> {
         self.send(Command::ToggleZoom).await
+    }
+
+    /// Reports a pane's attention state and where the report came from.
+    ///
+    /// The one serialized path for attention. A report naming a pane that has
+    /// closed is dropped by the session task; re-reporting a state a pane
+    /// already holds keeps any acknowledgment, so a chatty source cannot refill
+    /// a queue the user just cleared. Ordering is the channel's: a
+    /// [`snapshot`](Self::snapshot) sent afterwards sees the update.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn set_attention(
+        &self,
+        pane: PaneId,
+        state: AttentionState,
+        source: AttentionSource,
+    ) -> Result<(), SessionGone> {
+        self.send(Command::SetAttention {
+            pane,
+            state,
+            source,
+        })
+        .await
+    }
+
+    /// Marks a pane's current attention as seen, without changing the state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn acknowledge_attention(&self, pane: PaneId) -> Result<(), SessionGone> {
+        self.send(Command::AcknowledgeAttention { pane }).await
     }
 
     /// Asks for the current picture.
@@ -643,6 +707,26 @@ impl Session {
                 self.toggle_zoom();
                 self.settle(true)
             }
+            Command::SetAttention {
+                pane,
+                state,
+                source,
+            } => {
+                let changed = self.set_attention(pane, state, source);
+                // Only a repaint, never a geometry pass: attention changes what
+                // a pane's chrome says, not where any pane sits.
+                if changed {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
+            Command::AcknowledgeAttention { pane } => {
+                let changed = self.acknowledge_attention(pane);
+                if changed {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
                 Ok(())
@@ -779,6 +863,41 @@ impl Session {
         }
     }
 
+    /// Records a pane's attention state, reporting whether anything changed.
+    ///
+    /// The coalescing rule lives in [`Attention::set`](cloo_core::pane::Attention::set),
+    /// not here: re-reporting a state a pane already holds keeps its
+    /// acknowledgment, so a source that re-announces every second cannot refill
+    /// a queue the user just cleared. A change is reported only when the state,
+    /// its source, or its acknowledgment actually moved, so an idle re-report
+    /// costs no repaint. An unknown pane is a silent no-op.
+    fn set_attention(
+        &mut self,
+        pane: PaneId,
+        state: AttentionState,
+        source: AttentionSource,
+    ) -> bool {
+        let Some(pane) = self.pane_mut(pane) else {
+            return false;
+        };
+        let before = pane.meta.attention.clone();
+        pane.meta.attention.set(state, source);
+        pane.meta.attention != before
+    }
+
+    /// Marks a pane's current attention as seen, reporting whether that changed
+    /// anything. An already-acknowledged or unknown pane is a no-op.
+    fn acknowledge_attention(&mut self, pane: PaneId) -> bool {
+        let Some(pane) = self.pane_mut(pane) else {
+            return false;
+        };
+        if pane.meta.attention.acknowledged {
+            return false;
+        }
+        pane.meta.attention.acknowledge();
+        true
+    }
+
     /// Runs the geometry pass and repaints after a split or close changed the
     /// tree. A command that changed nothing costs nothing.
     fn settle(&mut self, changed: bool) -> Result<(), PtyError> {
@@ -846,10 +965,20 @@ impl Session {
                     .map(|pane| pane.meta.to_wire(pane.id))
             })
             .collect();
+        let attention = panes
+            .iter()
+            .filter_map(|rect| {
+                self.panes
+                    .iter()
+                    .find(|pane| pane.id == rect.pane)
+                    .map(|pane| pane.meta.attention.to_wire(pane.id))
+            })
+            .collect();
         SessionSnapshot {
             area: self.area,
             panes,
             metas,
+            attention,
             focused: self.focused,
             zoomed: self.layout.zoomed(),
             pane: self

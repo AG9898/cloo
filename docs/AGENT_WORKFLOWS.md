@@ -101,6 +101,15 @@ is re-reported, so a harness announcing `needs_input` every second cannot refill
 just cleared. Pane identity (`PaneName`, `TaskLabel`, `WorkingDir`) is validated user text, never
 inferred.
 
+M2-07 persists that model in the session actor. Every report reaches it as a `SetAttention`
+command on the one session channel and is applied in arrival order, so the coalescing rule above
+is enforced by the single writer rather than raced between sources; `AcknowledgeAttention` is its
+own command and moves only the seen flag. A report for a pane that has closed is dropped. Each
+pane's state and provenance cross to the client as `PaneAttention` in a `ServerMessage::Attention`,
+resent only when some pane's attention changes, and an uninstrumented pane is carried as `unknown`
+rather than omitted. The generic sources that feed `SetAttention` land in M2-08 and the opt-in
+adapter interface in M2-09; M2-07 is the plumbing they both target.
+
 ## Compatibility Tiers
 
 | Tier | Contract |

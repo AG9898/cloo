@@ -321,7 +321,12 @@ override rules, and the command and `min_size` surface. M2-06 adds launch covera
 launches through the session actor in `cloo-server/tests/session.rs` — metadata in every snapshot,
 the child's own `pwd` proving the working directory, and a missing program failing with a message
 that names it while the layout rolls back — and pane identity reaching a client in
-`crates/cloo/tests/attach.rs`.
+`crates/cloo/tests/attach.rs`. M2-07 persists attention in the session actor (handshake v5): the
+wire projection and its `ServerMessage::Attention` round-trip in `cloo-proto`, the state/source/
+acknowledgment projection in `cloo-core/src/pane.rs`, attention resent only on change in
+`cloo-server/src/damage.rs`, and attention through the actor in `cloo-server/tests/session.rs` —
+a report reaching the next snapshot with its provenance, acknowledgment moving only the seen flag,
+the coalescing rule proved through the channel, and a report for a closed pane dropped.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -362,6 +367,16 @@ Do not reorganize or rewrite existing entries — append only.
 ---
 
 ## Discoveries
+
+### 2026-07-22 — Attention is a third wire clock, projected from the same layout pass
+Attention crosses as its own `ServerMessage::Attention(Vec<PaneAttention>)` rather than being
+flattened into `PaneInfo`, because a state without its source is exactly the claim the chrome must
+not make, and it is resent only when it changes — a rename is not a state change and vice versa, so
+`DamageTracker` diffs `metas` and `attention` independently. Project both from the *same*
+`Layout::resolve` pass in `Session::snapshot`, or a client can be told a pane's state without being
+told who the pane is. The session actor is the one writer, so `set_attention` leans on
+`Attention::set`'s coalescing instead of re-implementing it, and a report for a closed pane is a
+silent no-op like a stale mouse event.
 
 ### 2026-07-20 — npm rejects `cloo` at publish time, not lookup time
 `npm view cloo` returned 404 and `npm publish --dry-run` passed, but the real publish failed
