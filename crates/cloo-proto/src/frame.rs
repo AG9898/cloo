@@ -20,7 +20,7 @@ use crate::error::ProtoError;
 /// **Bump this on every change to a type in [`crate::message`].** A stale client
 /// attached to a rebuilt server is a routine occurrence, and a clean "version
 /// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 5;
+pub const PROTOCOL_VERSION: u16 = 6;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -126,9 +126,10 @@ mod tests {
     use crate::ids::{PaneId, SessionId, TabId};
     use crate::message::{
         Action, AttentionSource, AttentionState, Cell, CellAttrs, ClientMessage, ClipboardTarget,
-        Color, CursorShape, GraphicsEffect, LayoutSnapshot, MouseButton, MouseEvent, MouseKind,
-        MouseMods, MouseTracking, OuterTerminalEffect, PaneAttention, PaneInfo, PaneModes,
-        PaneRect, Point, ProgressState, RowUpdate, ServerMessage, Size, TabSummary, TermCaps,
+        Color, CopyModeState, CopySelection, CursorShape, GraphicsEffect, LayoutSnapshot,
+        MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, OuterTerminalEffect,
+        PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState, RowUpdate, ScrollPoint,
+        SearchMatch, ServerMessage, Size, TabSummary, TermCaps,
     };
 
     /// Encodes, decodes, and asserts the value survives unchanged.
@@ -360,6 +361,20 @@ mod tests {
                 },
             ]),
             ServerMessage::Attention(Vec::new()),
+            ServerMessage::CopyMode(Some(CopyModeState {
+                pane: PaneId::new(4),
+                cursor: ScrollPoint::new(12, 3),
+                selection: Some(CopySelection {
+                    anchor: ScrollPoint::new(10, 1),
+                    head: ScrollPoint::new(12, 3),
+                }),
+                query: Some("error.*retry".into()),
+                matches: vec![SearchMatch {
+                    start: ScrollPoint::new(12, 0),
+                    end: ScrollPoint::new(12, 5),
+                }],
+            })),
+            ServerMessage::CopyMode(None),
             ServerMessage::Bell(PaneId::new(4)),
             ServerMessage::Tabs(Vec::new()),
             ServerMessage::Detached,
@@ -408,6 +423,13 @@ mod tests {
             state: AttentionState::Ready,
             source: AttentionSource::Lifecycle,
             acknowledged: true,
+        });
+        round_trip(&CopyModeState {
+            pane: PaneId::new(11),
+            cursor: ScrollPoint::new(2, 3),
+            selection: None,
+            query: None,
+            matches: Vec::new(),
         });
     }
 

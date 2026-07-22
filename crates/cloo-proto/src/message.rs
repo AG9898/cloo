@@ -397,6 +397,64 @@ pub struct PaneAttention {
     pub acknowledged: bool,
 }
 
+/// A position in retained pane scrollback, counted from its oldest line.
+///
+/// Separate from [`Point`], whose coordinates are viewport-relative and fit in
+/// one terminal frame. Copy mode needs a stable line position while the
+/// viewport moves through server-owned history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ScrollPoint {
+    /// Zero-based retained line number.
+    pub line: u32,
+    /// Zero-based terminal column.
+    pub column: u16,
+}
+
+impl ScrollPoint {
+    /// Creates one retained-scrollback position.
+    #[must_use]
+    pub const fn new(line: u32, column: u16) -> Self {
+        Self { line, column }
+    }
+}
+
+/// One linear visual selection in retained scrollback.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopySelection {
+    /// Where visual selection began.
+    pub anchor: ScrollPoint,
+    /// Current copy cursor position.
+    pub head: ScrollPoint,
+}
+
+/// One non-empty regex match, ending exclusively for direct highlighting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SearchMatch {
+    /// First matched cell.
+    pub start: ScrollPoint,
+    /// One cell after the match.
+    pub end: ScrollPoint,
+}
+
+/// The copy and regex state for one focused pane.
+///
+/// This travels as its own clock: output can change rows without changing a
+/// selection, and a cursor move must not resend the grid to a newly attached
+/// client.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CopyModeState {
+    /// Pane whose retained scrollback the state addresses.
+    pub pane: PaneId,
+    /// Current copy cursor.
+    pub cursor: ScrollPoint,
+    /// Live visual selection, if any.
+    pub selection: Option<CopySelection>,
+    /// Current regex text, when a search has been issued.
+    pub query: Option<String>,
+    /// Non-empty matches in retained scrollback order.
+    pub matches: Vec<SearchMatch>,
+}
+
 /// Enough about a tab to draw the tab bar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabSummary {
@@ -674,6 +732,9 @@ pub enum ServerMessage {
     /// as [`AttentionState::Unknown`] rather than omitted — the client renders
     /// that state too, and never guesses one from the grid.
     Attention(Vec<PaneAttention>),
+    /// The focused pane's server-owned copy and search state, or `None` when
+    /// copy mode is inactive.
+    CopyMode(Option<CopyModeState>),
     /// A pane's application changed which input modes it has negotiated.
     ///
     /// The client cannot observe this for itself — the modes were set by

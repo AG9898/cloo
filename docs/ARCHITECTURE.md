@@ -107,7 +107,9 @@ character split across two reads still parses.
 
 The surface is exactly what the crate table promises. `feed` takes bytes; `row`, `rows`, and
 `row_text` read the visible grid; `resize` reflows it; `scrollback_len`, `scroll_offset`,
-`scroll`, and `scroll_to_bottom` cover history. `cursor` and `is_alt_screen` report the state a
+`scrollback_text`, `scroll`, and `scroll_to_bottom` cover history. `scrollback_text` reads
+retained history without moving the display offset, so server-side copy mode can search it without
+disturbing the current viewport. `cursor` and `is_alt_screen` report the state a
 renderer needs but cannot derive from cells alone, and `modes` reports the input modes the child
 *application* has negotiated — bracketed paste, focus reporting, mouse tracking and its encoding,
 and the Kitty keyboard protocol. Those come from private mode sets the child wrote, so the
@@ -133,7 +135,8 @@ every event cloo has no allowlisted type for. `OuterTerminalEffect` deliberately
 such as title, clipboard, hyperlink, notification, and progress changes, plus
 `Graphics(Unavailable)`; it contains no raw OSC, DCS, or graphics payload. `cloo-proto` mirrors
 that vocabulary in `ServerMessage::Effect { pane, effect }`, which took the handshake to v3;
-M2-06's `ServerMessage::Panes` took it to v4, and M2-07's `ServerMessage::Attention` to v5.
+M2-06's `ServerMessage::Panes` took it to v4, M2-07's `ServerMessage::Attention` to v5, and
+M5-01's `ServerMessage::CopyMode` to v6.
 M1-09 drains those values through the session actor and fans each one out as its own non-damage
 frame. The server neither chooses nor applies an effect: each client combines its terminal
 capabilities with a default-deny local policy. Title changes are permitted only by the title
@@ -672,6 +675,16 @@ guessed. An explicit user mark reaches the same command with `User` provenance. 
 reads the pane's grid — no transcript or process-name matcher exists. The opt-in adapter control
 interface that may also feed `SetAttention` is M2-09.
 
+M5-01 puts copy mode and regex search in that same actor. A pane owns its `CopyMode` state — a
+retained-scrollback cursor, an optional linear selection, and the current regex results — while
+the emulator retains the text and viewport. Entry, visual selection, vim-like motion, search, and
+exit all cross the one `mpsc`; a malformed regex returns a normal reply and keeps the last valid
+search rather than failing the actor. New output re-reads retained history only when that pane has
+an active copy search, so an inactive copy surface never makes the PTY hot path traverse
+scrollback. `CopyModeState` travels independently of damage, so an attach or resync receives the
+selection and highlights another client left behind without making client chrome an authority over
+scrollback.
+
 ---
 
 ## Concurrency
@@ -712,6 +725,7 @@ Server → Client:  Hello { protocol_version, session, tabs, size }
                   Modes { pane, modes: PaneModes }  Effect { pane, effect }
                   Layout(LayoutSnapshot)  Panes(Vec<PaneInfo>)
                   Attention(Vec<PaneAttention>)
+                  CopyMode(Option<CopyModeState>)
                   Bell(pane)  Tabs(Vec<TabSummary>)
                   Detached  Exit(code)
 ```

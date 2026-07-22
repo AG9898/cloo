@@ -55,6 +55,9 @@ Covered today in `cloo-core`, all as unit tests:
   unknown panes, duplicate panes, and closing the last pane.
 - A shrunken area squeezing panes to a one-cell floor rather than dropping them, and a zero-size
   area resolving without a panic.
+- Copy mode and search (M5-01): vim-like cursor motion over retained text, a linear selection
+  preserving its anchor, selection extraction without a grid mutation, regex matches and wrapped
+  navigation, and an invalid regex returned as a clean error while the prior query remains live.
 - Directional focus over a quad and over an asymmetric tree, table-driven: every side from every
   pane, an edge answering `None` rather than wrapping, a diagonal pane never being a neighbour, an
   unknown pane having none, traversal never answering with the pane it started from, and the case a
@@ -140,6 +143,8 @@ break things, so this coverage is what makes the pinned dependency safe to bump:
 - Scrollback growing to its configured limit and no further, a zero-scrollback grid retaining
   nothing, scrolling clamping at both ends, and the cursor reporting itself invisible once
   scrolled out of the viewport.
+- A complete retained-scrollback text read leaving the current display offset untouched, so a
+  server-side search cannot move another client's viewport.
 - Cursor position under output and absolute positioning, DECTCEM visibility, and DECSCUSR shape.
 - OSC title and OSC 52 clipboard-store sequences turning into typed queued effects, an empty title
   normalizing to a reset, and a backend device-attribute reply producing no outer-terminal effect.
@@ -204,6 +209,12 @@ reap distinguishes them, and — the "no screen scraping" rule made concrete —
 `error: waiting for input... done` whose attention stays `unknown`. The bell itself is covered
 purely in `cloo-term::Emulator`: a `BEL` byte taken exactly once, several bells coalescing to one,
 ordinary text never ringing, and a bell never appearing as an outer-terminal effect.
+
+M5-01 adds copy mode through that same session actor: a retained-scrollback regex and visual
+selection are projected in the next snapshot, a cloned handle representing a reattached client
+moves the same cursor, and a malformed regex is a clean reply that leaves the prior query intact.
+The burst-output attach fixture also proves that an inactive copy surface does not traverse
+scrollback on every PTY read.
 
 Both geometry halves were confirmed non-vacuous the way `AGENTS.md` prescribes: breaking the
 post-split layout pass fails three of these tests, and the survivor's regrowth has no second path
@@ -502,6 +513,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on — geometric directional focus in every direction from every pane, and zoom as a view flag that preserves every ratio |
+| `crates/cloo-core/src/copy_mode.rs` | Copy mode | Retained-scrollback positions, vim-like cursor motion, linear selection and extraction, regex match collection/navigation, and invalid-regex preservation of the prior search |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
 | `crates/cloo-core/src/tab.rs` | Tab model | A tab as a named layout with a focused pane, its name validated like a pane name, and focus refusing a pane the layout does not hold |
 | `crates/cloo-core/src/session.rs` | Session model | The tab lifecycle: create appending and activating, rename and select touching only their target, close with its defined active-tab behaviour (right neighbour, rightmost fallback, non-active left alone), and every rejection changing nothing — unknown tab and the last tab refused with unknown checked first |
@@ -511,11 +523,11 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused, `MetadataError` naming its field and escaping a rejected control character rather than printing it, and `SessionError` naming the tab it refused and explaining the last-tab rule |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-core/src/theme.rs` | Theme model | The four named palette spellings, complete style-guide token tables, and Storm's exact reference values |
-| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, typed title/clipboard effects with backend replies suppressed, one fixture per negotiated input mode — set, read back, and cleared — and the bell taken once, coalesced across several rings, never rung by text, and never surfaced as an effect |
+| `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping including a complete history read that leaves the viewport put, typed title/clipboard effects with backend replies suppressed, one fixture per negotiated input mode — set, read back, and cleared — and the bell taken once, coalesced across several rings, never rung by text, and never surfaced as an effect |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |
 | `crates/cloo-server/src/launch.rs` | Launching | Pure only: a profile's default name kept and the user's overriding it, an invalid profile refused before anything is spawned, argv kept verbatim through `configure`, the session's environment surviving a profile's command, and login-shell resolution with its `/bin/sh` fallback |
 | `crates/cloo-server/tests/pty.rs` | PTY reactor | Scripted-shell output reaching the grid, split reads, `winsize` and controlling terminal, input forwarding, resize seen by the child, EOF and exit status, spawn failure, and drop reaping the child |
-| `crates/cloo-server/tests/session.rs` | Session task | Split, close, focus, and zoom against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, a resize divided between every pane, focus moving across an uneven split with input following it, and a zoom cycle that fills the area, restores the ratio, and leaves both children's pids unchanged; tab switching additionally proves both tab children retain their original pids; plus launching from an explicit profile: metadata reaching every snapshot with the split pane untouched, the child's own `pwd` proving the working directory (not only the metadata), a named profile reaching the pane it launched, a plain split repeating the session's launch, and a missing program failing with a message that names it and `PATH` while the layout rolls back; plus attention through the actor (no PTY): a report reaching the next snapshot with its provenance, acknowledgment moving only the seen flag, a re-report keeping it while a changed state clears it, and a report for a closed pane dropped without touching the survivor; plus the generic sources against real children: a bell reaching `needs_input`/`Bell`, a clean and an error exit reaching `ready`/`failed` with `Lifecycle` provenance, and bait text leaving attention `unknown` |
+| `crates/cloo-server/tests/session.rs` | Session task | Split, close, focus, and zoom against real PTYs: both panes in the layout with the new one focused and its child started at its own geometry, a close collapsing the split and regrowing the survivor's child, a split with no room refused with nothing changed, the last pane and an unknown pane refused with the child still running, a resize divided between every pane, focus moving across an uneven split with input following it, and a zoom cycle that fills the area, restores the ratio, and leaves both children's pids unchanged; tab switching additionally proves both tab children retain their original pids; plus launching from an explicit profile: metadata reaching every snapshot with the split pane untouched, the child's own `pwd` proving the working directory (not only the metadata), a named profile reaching the pane it launched, a plain split repeating the session's launch, and a missing program failing with a message that names it and `PATH` while the layout rolls back; plus attention through the actor (no PTY): a report reaching the next snapshot with its provenance, acknowledgment moving only the seen flag, a re-report keeping it while a changed state clears it, and a report for a closed pane dropped without touching the survivor; plus the generic sources against real children: a bell reaching `needs_input`/`Bell`, a clean and an error exit reaching `ready`/`failed` with `Lifecycle` provenance, and bait text leaving attention `unknown`; plus copy mode: a retained regex and visual selection projected on the session snapshot, a reattached handle moving the same cursor, and a malformed regex retaining the earlier query |
 | `crates/cloo-server/src/config.rs` | Configuration | Pure `CLOO_CONFIG`/`XDG_CONFIG_HOME`/`HOME` path precedence, file reading at the server boundary, atomic `ConfigManager` replacement, and an awaitable `SIGHUP` source |
 | `crates/cloo-server/tests/config.rs` | Configuration | Real-file valid reload without a restart, malformed reload preserving the last valid configuration, missing-file reset to built-ins, per-profile warning with valid neighbours applied, and a `SIGHUP` through the same atomic replacement path |
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, and the lock file path |

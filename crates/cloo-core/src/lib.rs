@@ -5,7 +5,7 @@
 //! belongs in `cloo-server` or `cloo-client` instead. Everything here is pure
 //! and unit-testable without a terminal.
 //!
-//! Nine modules today:
+//! Ten modules today:
 //!
 //! - [`session`] — the top of the model: an ordered set of tabs with one active,
 //!   and the tab lifecycle (create, rename, select, close) over it.
@@ -26,6 +26,8 @@
 //!   [`SessionError`].
 //! - [`theme`] — named semantic chrome palettes and terminal-palette
 //!   inheritance as data; the client resolves them for its terminal.
+//! - [`copy_mode`] — selection, vim-like motion, and regex search state over
+//!   server-owned scrollback text.
 //!
 //! Layout is always stored as ratios, never as cell counts. Cell counts are
 //! derived by [`Layout::resolve`] on every pass, which is what lets a layout
@@ -34,6 +36,7 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod copy_mode;
 pub mod error;
 pub mod grid;
 pub mod id;
@@ -45,6 +48,10 @@ pub mod tab;
 pub mod theme;
 
 pub use config::{Config, ConfigError, ConfigWarning};
+pub use copy_mode::{
+    CopyMode, CopyMotion, CopyPoint, CopySelection, SearchDirection, SearchError, SearchMatch,
+    SearchState,
+};
 pub use error::{LayoutError, MetadataError, SessionError};
 pub use grid::{
     wire_attrs, wire_cell, wire_color, wire_cursor, wire_modes, wire_mouse_tracking, wire_row,

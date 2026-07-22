@@ -117,6 +117,9 @@ impl DamageTracker {
         // Attention moves on yet another clock: a state change is not a rename
         // and a rename is not a state change, so each is resent only for itself.
         let attention_changed = previous.is_none_or(|before| before.attention != current.attention);
+        // Copy mode is another projection clock: moving a selection must reach
+        // a reattaching client without pretending that terminal cells changed.
+        let copy_mode_changed = previous.is_none_or(|before| before.copy_mode != current.copy_mode);
         // Tab identity and selection are their own clock too. A pane write must
         // not redraw the tab row, while a tab switch has to move the active
         // treatment before the new layout's damage is applied.
@@ -142,6 +145,9 @@ impl DamageTracker {
         }
         if attention_changed {
             messages.push(ServerMessage::Attention(current.attention.clone()));
+        }
+        if copy_mode_changed {
+            messages.push(ServerMessage::CopyMode(current.copy_mode.clone()));
         }
         if !rows.is_empty() {
             messages.push(ServerMessage::Damage {
@@ -225,6 +231,7 @@ mod tests {
                 source: cloo_proto::AttentionSource::None,
                 acknowledged: false,
             }],
+            copy_mode: None,
             focused: pane,
             zoomed: None,
             pane: PaneSnapshot {
@@ -271,15 +278,19 @@ mod tests {
             frame.messages().get(3),
             Some(ServerMessage::Attention(attention)) if attention.len() == 1
         ));
+        assert!(matches!(
+            frame.messages().get(4),
+            Some(ServerMessage::CopyMode(None))
+        ));
         assert!(
-            matches!(frame.messages().get(4), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
+            matches!(frame.messages().get(5), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
         );
         assert!(matches!(
-            frame.messages().get(5),
+            frame.messages().get(6),
             Some(ServerMessage::Modes { .. })
         ));
         assert!(matches!(
-            frame.messages().get(6),
+            frame.messages().get(7),
             Some(ServerMessage::CursorMoved { visible: false, .. })
         ));
     }

@@ -47,6 +47,7 @@ pub use damage::{DamageFrame, DamageTracker};
 pub use launch::{Launch, login_shell};
 pub use pty::{PaneSnapshot, Pty, PtyConfig, PtyError, PtyReactor, Pump};
 pub use session::{
-    Command, Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, SpawnedSession,
+    Command, CopyModeError, Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot,
+    SpawnedSession,
 };
 pub use socket::{Listener, NameRejection, SocketError};

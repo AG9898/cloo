@@ -134,8 +134,8 @@ pub async fn refuse<T: AsyncRead + AsyncWrite + Unpin>(
 
 /// The messages that bring a freshly attached client fully up to date.
 ///
-/// Tab state first, then geometry, then who the panes are, then contents, then
-/// the modes, then the cursor. That order
+/// Tab state first, then geometry, then who the panes are, their attention and
+/// copy state, then contents, the modes, and the cursor. That order
 /// is what lets a
 /// client apply the batch without ever holding rows it has nowhere to put: the
 /// [`ServerMessage::Layout`] tells it how big the pane is before a single
@@ -162,6 +162,9 @@ pub fn session_snapshot(snapshot: &SessionSnapshot) -> Vec<ServerMessage> {
         // state and provenance to draw its header, and cannot derive either from
         // the grid.
         ServerMessage::Attention(snapshot.attention.clone()),
+        // Copy positions are server-owned scrollback state too. Sending an
+        // explicit inactive value clears a stale copy view after a resync.
+        ServerMessage::CopyMode(snapshot.copy_mode.clone()),
         ServerMessage::Damage {
             pane,
             rows: snapshot.pane.rows.clone(),
@@ -229,6 +232,7 @@ mod tests {
                 source: cloo_proto::AttentionSource::None,
                 acknowledged: false,
             }],
+            copy_mode: None,
             focused: pane,
             zoomed: None,
             pane: PaneSnapshot {
@@ -362,11 +366,15 @@ mod tests {
         assert!(matches!(messages.get(3), Some(ServerMessage::Attention(_))));
         assert!(matches!(
             messages.get(4),
+            Some(ServerMessage::CopyMode(None))
+        ));
+        assert!(matches!(
+            messages.get(5),
             Some(ServerMessage::Damage { rows, .. }) if rows.len() == 1
         ));
-        assert!(matches!(messages.get(5), Some(ServerMessage::Modes { .. })));
+        assert!(matches!(messages.get(6), Some(ServerMessage::Modes { .. })));
         assert!(matches!(
-            messages.get(6),
+            messages.get(7),
             Some(ServerMessage::CursorMoved { visible: true, .. })
         ));
     }
@@ -405,7 +413,7 @@ mod tests {
         let messages = session_snapshot(&snapshot);
         assert!(
             matches!(
-                messages.get(6),
+                messages.get(7),
                 Some(ServerMessage::CursorMoved { visible: false, .. })
             ),
             "a client with a stale cursor must be told to stop drawing it"

@@ -16,3 +16,4 @@ cloo-proto.workspace = true
 cloo-term.workspace = true
 serde.workspace = true
 toml.workspace = true
+regex.workspace = true

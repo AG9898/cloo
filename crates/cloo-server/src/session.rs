@@ -51,9 +51,11 @@ use cloo_core::layout::Side;
 use cloo_core::pane::{AttentionSource, AttentionState, PaneMeta};
 use cloo_core::session::Session as SessionModel;
 use cloo_core::tab::TabName;
+use cloo_core::{CopyMode, CopyMotion, SearchDirection, SearchError};
 use cloo_proto::{
-    ClipboardTarget, Direction, GraphicsEffect, MouseButton, MouseEvent, MouseKind, MouseTracking,
-    OuterTerminalEffect, PaneAttention, PaneId, PaneInfo, PaneModes, PaneRect, ProgressState,
+    ClipboardTarget, CopyModeState, CopySelection as WireCopySelection, Direction, GraphicsEffect,
+    MouseButton, MouseEvent, MouseKind, MouseTracking, OuterTerminalEffect, PaneAttention, PaneId,
+    PaneInfo, PaneModes, PaneRect, ProgressState, ScrollPoint, SearchMatch as WireSearchMatch,
     SessionId, Size, TabId, TabSummary,
 };
 use cloo_term::TermSize;
@@ -173,6 +175,29 @@ pub enum Command {
         /// The pane the user has looked at.
         pane: PaneId,
     },
+    /// Starts copy mode on the focused pane, keeping its cursor and search
+    /// state in the session actor rather than in one attached client.
+    EnterCopyMode,
+    /// Leaves copy mode on the focused pane and resumes following live output.
+    ExitCopyMode,
+    /// Applies a vim-like copy cursor motion to the focused pane.
+    CopyMotion(CopyMotion),
+    /// Starts a linear visual selection at the copy cursor.
+    BeginCopySelection,
+    /// Clears the focused pane's visual selection without moving its cursor.
+    ClearCopySelection,
+    /// Compiles and runs a regex against the focused pane's retained
+    /// scrollback, reporting parse errors without ending the session task.
+    SearchCopy {
+        /// Regex text supplied by the user.
+        query: String,
+        /// Direction in which the result set is entered.
+        direction: SearchDirection,
+        /// Whether a match was found, or the parse failure.
+        reply: oneshot::Sender<Result<bool, CopyModeError>>,
+    },
+    /// Moves to another result of the active copy-mode search.
+    NextCopyMatch(SearchDirection),
     /// Asks for the current picture. The reply channel is how a reader gets
     /// state out without holding a reference to it.
     Snapshot(oneshot::Sender<SessionSnapshot>),
@@ -202,6 +227,39 @@ pub enum TabError {
     Model(cloo_core::SessionError),
     /// The session task is no longer running.
     Gone,
+}
+
+/// Why a copy-mode operation could not complete.
+#[derive(Debug)]
+pub enum CopyModeError {
+    /// The user-supplied regex did not compile. The prior search state is kept.
+    Search(SearchError),
+    /// The session task ended before applying the operation.
+    Gone,
+}
+
+impl fmt::Display for CopyModeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Search(error) => write!(f, "{error}"),
+            Self::Gone => write!(f, "{SessionGone}"),
+        }
+    }
+}
+
+impl std::error::Error for CopyModeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Search(error) => Some(error),
+            Self::Gone => None,
+        }
+    }
+}
+
+impl From<SessionGone> for CopyModeError {
+    fn from(_: SessionGone) -> Self {
+        Self::Gone
+    }
 }
 
 impl fmt::Display for TabError {
@@ -330,6 +388,11 @@ pub struct SessionSnapshot {
     /// [`AttentionState::Unknown`](cloo_core::pane::AttentionState::Unknown)
     /// rather than being omitted.
     pub attention: Vec<PaneAttention>,
+    /// The active pane's copy and search state, if the server is in copy mode.
+    ///
+    /// It is projection data only: the actor remains the sole owner, and a
+    /// reattaching client receives the same selection and matches it left.
+    pub copy_mode: Option<CopyModeState>,
     /// The focused pane's contents.
     pub pane: PaneSnapshot,
     /// The input modes the focused pane's application has negotiated. A client
@@ -579,6 +642,59 @@ impl SessionHandle {
         self.send(Command::AcknowledgeAttention { pane }).await
     }
 
+    /// Starts copy mode on the focused pane.
+    ///
+    /// The state belongs to the session task and therefore remains live when a
+    /// client detaches or another client attaches.
+    pub async fn enter_copy_mode(&self) -> Result<(), SessionGone> {
+        self.send(Command::EnterCopyMode).await
+    }
+
+    /// Leaves copy mode on the focused pane and returns its viewport to live
+    /// output.
+    pub async fn exit_copy_mode(&self) -> Result<(), SessionGone> {
+        self.send(Command::ExitCopyMode).await
+    }
+
+    /// Moves the focused pane's copy cursor.
+    pub async fn copy_motion(&self, motion: CopyMotion) -> Result<(), SessionGone> {
+        self.send(Command::CopyMotion(motion)).await
+    }
+
+    /// Begins visual selection at the focused pane's copy cursor.
+    pub async fn begin_copy_selection(&self) -> Result<(), SessionGone> {
+        self.send(Command::BeginCopySelection).await
+    }
+
+    /// Clears the focused pane's visual selection.
+    pub async fn clear_copy_selection(&self) -> Result<(), SessionGone> {
+        self.send(Command::ClearCopySelection).await
+    }
+
+    /// Searches the focused pane's retained scrollback with a regex.
+    ///
+    /// An invalid expression returns [`CopyModeError::Search`] through the
+    /// normal reply path; it cannot panic or take the session actor down.
+    pub async fn search_copy(
+        &self,
+        query: impl Into<String>,
+        direction: SearchDirection,
+    ) -> Result<bool, CopyModeError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::SearchCopy {
+            query: query.into(),
+            direction,
+            reply,
+        })
+        .await?;
+        answer.await.map_err(|_| CopyModeError::Gone)?
+    }
+
+    /// Visits the next or previous result of the active copy-mode search.
+    pub async fn next_copy_match(&self, direction: SearchDirection) -> Result<(), SessionGone> {
+        self.send(Command::NextCopyMatch(direction)).await
+    }
+
     /// Asks for the current picture.
     ///
     /// # Errors
@@ -621,6 +737,10 @@ struct Pane {
     /// called it. Explicit from the moment the pane exists, and never revised by
     /// anything the child prints.
     meta: PaneMeta,
+    /// Selection and regex state over this pane's scrollback. The emulator
+    /// keeps the text; this actor-owned value keeps the user's intent across
+    /// client changes without letting a client mutate a grid.
+    copy_mode: Option<CopyMode>,
     /// Set once this pane's PTY reached end of file. Its grid is still drawn —
     /// a child's last words outlive it — but it is never pumped again.
     ended: bool,
@@ -692,6 +812,7 @@ impl Session {
                 id: pane,
                 reactor,
                 meta: launch.meta().clone(),
+                copy_mode: None,
                 ended: false,
             }],
             model: SessionModel::new(
@@ -738,6 +859,7 @@ impl Session {
             match step {
                 Step::Pumped(Some((pane, Ok(Pump::Bytes(_))))) => {
                     self.report_effects(pane).await;
+                    self.refresh_copy_search(pane);
                     // A bell rings in the bytes just fed. It is an attention
                     // source, not something read out of the grid.
                     self.note_bell(pane);
@@ -893,6 +1015,56 @@ impl Session {
                 }
                 Ok(())
             }
+            Command::EnterCopyMode => {
+                if self.enter_copy_mode() {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
+            Command::ExitCopyMode => {
+                if self.exit_copy_mode() {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
+            Command::CopyMotion(motion) => {
+                if self.copy_motion(motion) {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
+            Command::BeginCopySelection => {
+                if self.begin_copy_selection() {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
+            Command::ClearCopySelection => {
+                if self.clear_copy_selection() {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
+            Command::SearchCopy {
+                query,
+                direction,
+                reply,
+            } => {
+                let outcome = self.search_copy(query, direction);
+                if outcome.is_ok() {
+                    // A zero-match search still changed the active query, which
+                    // is state a copy-mode client can render.
+                    self.notify(SessionEvent::Output);
+                }
+                let _ = reply.send(outcome);
+                Ok(())
+            }
+            Command::NextCopyMatch(direction) => {
+                if self.next_copy_match(direction) {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
+            }
             Command::Snapshot(reply) => {
                 let _ = reply.send(self.snapshot());
                 Ok(())
@@ -966,6 +1138,7 @@ impl Session {
             id: pane,
             reactor: PtyReactor::spawn(&config)?,
             meta: launch.meta().clone(),
+            copy_mode: None,
             ended: false,
         })
     }
@@ -1057,6 +1230,7 @@ impl Session {
             id: pane_id,
             reactor,
             meta: self.default_launch.meta().clone(),
+            copy_mode: None,
             ended: false,
         };
         let name = TabName::from_pane_name(&self.default_launch.meta().name);
@@ -1186,6 +1360,167 @@ impl Session {
         true
     }
 
+    /// Starts copy mode over the focused pane's complete retained history.
+    ///
+    /// The emulator owns both history and the viewport, while [`CopyMode`]
+    /// owns only selection/search intent. Keeping them together in this actor
+    /// is what lets a second client inherit the first client's position.
+    fn enter_copy_mode(&mut self) -> bool {
+        let pane_id = self.focused();
+        let Some((lines, columns)) = self.copy_text(pane_id) else {
+            return false;
+        };
+        let Some(pane) = self.pane_mut(pane_id) else {
+            return false;
+        };
+        if pane.copy_mode.is_some() {
+            return false;
+        }
+        pane.copy_mode = Some(CopyMode::new(&lines, columns));
+        reveal_copy_cursor(pane);
+        true
+    }
+
+    /// Leaves copy mode and resumes following live output in the focused pane.
+    fn exit_copy_mode(&mut self) -> bool {
+        let pane_id = self.focused();
+        let Some(pane) = self.pane_mut(pane_id) else {
+            return false;
+        };
+        if pane.copy_mode.take().is_none() {
+            return false;
+        }
+        pane.reactor.emulator_mut().scroll_to_bottom();
+        true
+    }
+
+    /// Moves the focused copy cursor and scrolls only enough to keep it visible.
+    fn copy_motion(&mut self, motion: CopyMotion) -> bool {
+        let pane_id = self.focused();
+        let Some((lines, columns)) = self.copy_text(pane_id) else {
+            return false;
+        };
+        let Some(pane) = self.pane_mut(pane_id) else {
+            return false;
+        };
+        let Some(copy_mode) = pane.copy_mode.as_mut() else {
+            return false;
+        };
+        let changed = copy_mode.move_cursor(motion, &lines, columns);
+        if changed {
+            reveal_copy_cursor(pane);
+        }
+        changed
+    }
+
+    /// Begins visual selection at the focused copy cursor.
+    fn begin_copy_selection(&mut self) -> bool {
+        let Some(copy_mode) = self
+            .pane_mut(self.focused())
+            .and_then(|pane| pane.copy_mode.as_mut())
+        else {
+            return false;
+        };
+        if copy_mode.selection().is_some() {
+            return false;
+        }
+        copy_mode.begin_selection();
+        true
+    }
+
+    /// Clears the focused copy selection while retaining its cursor and query.
+    fn clear_copy_selection(&mut self) -> bool {
+        let Some(copy_mode) = self
+            .pane_mut(self.focused())
+            .and_then(|pane| pane.copy_mode.as_mut())
+        else {
+            return false;
+        };
+        if copy_mode.selection().is_none() {
+            return false;
+        }
+        copy_mode.clear_selection();
+        true
+    }
+
+    /// Searches the focused pane's retained history and keeps the old state on
+    /// a parse failure. Regex validation remains a normal answer, never a
+    /// session-task failure.
+    fn search_copy(
+        &mut self,
+        query: String,
+        direction: SearchDirection,
+    ) -> Result<bool, CopyModeError> {
+        let pane_id = self.focused();
+        let Some((lines, columns)) = self.copy_text(pane_id) else {
+            return Ok(false);
+        };
+        let Some(pane) = self.pane_mut(pane_id) else {
+            return Ok(false);
+        };
+        if pane.copy_mode.is_none() {
+            pane.copy_mode = Some(CopyMode::new(&lines, columns));
+        }
+        let found = match pane.copy_mode.as_mut() {
+            Some(copy_mode) => copy_mode
+                .search(query, direction, &lines, columns)
+                .map_err(CopyModeError::Search)?,
+            // `Some` was installed just above; retain a non-panicking fallback
+            // if that invariant ever changes.
+            None => return Ok(false),
+        };
+        reveal_copy_cursor(pane);
+        Ok(found)
+    }
+
+    /// Visits the next retained match of the focused pane's active query.
+    fn next_copy_match(&mut self, direction: SearchDirection) -> bool {
+        let Some(pane) = self.pane_mut(self.focused()) else {
+            return false;
+        };
+        let Some(copy_mode) = pane.copy_mode.as_mut() else {
+            return false;
+        };
+        let changed = copy_mode.search_next(direction);
+        if changed {
+            reveal_copy_cursor(pane);
+        }
+        changed
+    }
+
+    /// The complete retained text and terminal width for one pane, captured
+    /// before copy-mode mutation borrows it mutably.
+    fn copy_text(&self, pane: PaneId) -> Option<(Vec<String>, u16)> {
+        self.panes.iter().find(|held| held.id == pane).map(|held| {
+            let emulator = held.reactor.emulator();
+            (emulator.scrollback_text(), emulator.size().cols())
+        })
+    }
+
+    /// Re-runs an active copy search after new output enters retained history.
+    fn refresh_copy_search(&mut self, pane: PaneId) {
+        // Most PTY output arrives while no copy search is active. Looking up
+        // the mode first keeps that hot path from cloning every retained grid
+        // line merely to discover there is no regex to refresh.
+        let has_active_search = self
+            .panes
+            .iter()
+            .find(|held| held.id == pane)
+            .and_then(|held| held.copy_mode.as_ref())
+            .and_then(CopyMode::search_state)
+            .is_some();
+        if !has_active_search {
+            return;
+        }
+        let Some((lines, columns)) = self.copy_text(pane) else {
+            return;
+        };
+        let Some(copy_mode) = self.pane_mut(pane).and_then(|held| held.copy_mode.as_mut()) else {
+            return;
+        };
+        copy_mode.refresh_search(&lines, columns);
+    }
+
     /// Runs the geometry pass and repaints after a split or close changed the
     /// tree. A command that changed nothing costs nothing.
     fn settle(&mut self, changed: bool) -> Result<(), PtyError> {
@@ -1272,6 +1607,7 @@ impl Session {
             panes,
             metas,
             attention,
+            copy_mode: self.copy_mode_state(),
             focused: active.focused(),
             zoomed: active.layout().zoomed(),
             pane: self
@@ -1333,6 +1669,45 @@ impl Session {
             .collect()
     }
 
+    /// Projects the focused pane's copy state for clients without giving them
+    /// any mutable handle to scrollback or the selection itself.
+    fn copy_mode_state(&self) -> Option<CopyModeState> {
+        let pane = self.focused();
+        let copy_mode = self
+            .panes
+            .iter()
+            .find(|held| held.id == pane)?
+            .copy_mode
+            .as_ref()?;
+        let selection = copy_mode.selection().map(|selection| WireCopySelection {
+            anchor: wire_scroll_point(selection.anchor),
+            head: wire_scroll_point(selection.head),
+        });
+        let (query, matches) = copy_mode.search_state().map_or_else(
+            || (None, Vec::new()),
+            |search| {
+                (
+                    Some(search.query().to_owned()),
+                    search
+                        .matches()
+                        .iter()
+                        .map(|matched| WireSearchMatch {
+                            start: wire_scroll_point(matched.start),
+                            end: wire_scroll_point(matched.end),
+                        })
+                        .collect(),
+                )
+            },
+        );
+        Some(CopyModeState {
+            pane,
+            cursor: wire_scroll_point(copy_mode.cursor()),
+            selection,
+            query,
+            matches,
+        })
+    }
+
     /// One pane by id, mutably.
     fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
         self.panes.iter_mut().find(|pane| pane.id == id)
@@ -1371,6 +1746,46 @@ impl Session {
             }
         }
     }
+}
+
+/// Converts a core retained-scrollback point to its fixed-width wire form.
+fn wire_scroll_point(point: cloo_core::CopyPoint) -> ScrollPoint {
+    ScrollPoint::new(u32::try_from(point.line).unwrap_or(u32::MAX), point.column)
+}
+
+/// Scrolls a pane's server-owned viewport only enough to include its copy
+/// cursor. The calculation is in retained-line coordinates, while the emulator
+/// exposes a display offset measured back from the live bottom.
+fn reveal_copy_cursor(pane: &mut Pane) {
+    let Some(cursor) = pane.copy_mode.as_ref().map(CopyMode::cursor) else {
+        return;
+    };
+    let emulator = pane.reactor.emulator_mut();
+    let history = emulator.scrollback_len();
+    let rows = usize::from(emulator.size().rows());
+    if rows == 0 {
+        return;
+    }
+    let offset = emulator.scroll_offset();
+    let top = history.saturating_sub(offset);
+    let bottom = top.saturating_add(rows.saturating_sub(1));
+    let desired_top = if cursor.line < top {
+        cursor.line
+    } else if cursor.line > bottom {
+        cursor.line.saturating_add(1).saturating_sub(rows)
+    } else {
+        return;
+    };
+    let desired_offset = history.saturating_sub(desired_top);
+    let delta = i64::try_from(desired_offset)
+        .unwrap_or(i64::MAX)
+        .saturating_sub(i64::try_from(offset).unwrap_or(i64::MAX));
+    let delta = match i32::try_from(delta) {
+        Ok(delta) => delta,
+        Err(_) if delta.is_negative() => i32::MIN,
+        Err(_) => i32::MAX,
+    };
+    emulator.scroll(delta);
 }
 
 /// Converts the emulation crate's leaf-owned effect vocabulary to the wire.

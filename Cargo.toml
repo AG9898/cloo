@@ -44,6 +44,9 @@ toml = { version = "0.9.8", default-features = false, features = [
     "serde",
     "std",
 ] }
+# Regex search is session-owned model work. Keeping it in the workspace table
+# makes the parser version explicit for every crate that needs it.
+regex = "1.12.3"
 
 [profile.release]
 lto = true

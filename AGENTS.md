@@ -741,3 +741,15 @@ its panes — a switch then applies geometry to the selected tab without restart
 to the live value, so a malformed `SIGHUP` reload has no partial state to undo and leaves the last
 valid configuration intact. The parser stays pure in `cloo-core`; path resolution and file I/O live
 in the server, and a missing file is a deliberate reset to the built-ins.
+
+### 2026-07-22 — Copy-mode history reads must not move the viewport
+Copy selection and regex search need the whole retained grid, but scrolling an emulator to collect it
+would move the view a client is drawing. `Emulator::scrollback_text` reads absolute grid lines without
+changing `display_offset`; the session actor owns both that viewport and the copy cursor, and projects
+copy state on its own wire clock so reattachment cannot turn a client cache into an authority.
+
+### 2026-07-22 — Never snapshot scrollback for an inactive copy search
+`scrollback_text` allocates every retained line, so calling it after every `Pump::Bytes` makes a burst
+pay for thousands of history snapshots even when no client entered copy mode. Check for an active
+search first; `crates/cloo/tests/attach.rs`'s burst fixture catches this regression by timing out
+before its final marker otherwise.

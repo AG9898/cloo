@@ -330,6 +330,31 @@ impl Emulator {
         self.term.grid().display_offset()
     }
 
+    /// Reads every retained line from oldest scrollback through the live
+    /// viewport, with trailing blank cells removed.
+    ///
+    /// This does not change the display offset. Copy mode can therefore search
+    /// and select server-owned history without disturbing what a detached or
+    /// second attached client is looking at.
+    #[must_use]
+    pub fn scrollback_text(&self) -> Vec<String> {
+        let grid = self.term.grid();
+        let history = offset_as_i32(grid.history_size());
+        let total = grid
+            .history_size()
+            .saturating_add(usize::from(self.size.rows()));
+        (0..total)
+            .filter_map(|index| {
+                let index = i32::try_from(index).ok()?;
+                let source = &grid[Line(index - history)];
+                let text: String = (0..usize::from(self.size.cols()))
+                    .map(|col| source[Column(col)].c)
+                    .collect();
+                Some(text.trim_end().to_owned())
+            })
+            .collect()
+    }
+
     /// Scrolls the viewport by `delta` lines: positive scrolls back into
     /// history, negative scrolls forward. Clamped to the available scrollback.
     pub fn scroll(&mut self, delta: i32) {
@@ -718,6 +743,22 @@ mod tests {
         term.scroll_to_bottom();
         assert_eq!(term.scroll_offset(), 0);
         assert_eq!(term.row_text(0).as_deref(), Some("line 8"));
+    }
+
+    #[test]
+    fn scrollback_text_reads_history_without_moving_the_viewport() {
+        let mut term = Emulator::new(size(20, 3), 10);
+        for i in 0..6 {
+            term.feed(format!("line {i}\r\n").as_bytes());
+        }
+        term.scroll(2);
+        let offset = term.scroll_offset();
+
+        let retained = term.scrollback_text();
+
+        assert_eq!(term.scroll_offset(), offset);
+        assert_eq!(retained.first().map(String::as_str), Some("line 0"));
+        assert_eq!(retained.get(5).map(String::as_str), Some("line 5"));
     }
 
     #[test]

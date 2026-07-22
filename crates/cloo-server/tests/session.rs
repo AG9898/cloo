@@ -20,11 +20,11 @@ use std::time::Duration;
 
 use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
 use cloo_core::profile::{Profile, ProfileCommand, ProfileId};
-use cloo_core::{LayoutError, Side};
+use cloo_core::{CopyMotion, LayoutError, SearchDirection, Side};
 use cloo_proto::{Direction, PaneId, Size};
 use cloo_server::launch::Launch;
 use cloo_server::pty::PtyConfig;
-use cloo_server::session::{PaneError, Session, SessionHandle, SessionSnapshot};
+use cloo_server::session::{CopyModeError, PaneError, Session, SessionHandle, SessionSnapshot};
 
 /// How long a child gets to answer before a test gives up.
 ///
@@ -947,4 +947,75 @@ async fn ordinary_output_is_never_a_source() {
         "text on the grid is never a source"
     );
     assert_eq!(att.source, cloo_proto::AttentionSource::None);
+}
+
+// --- Copy mode and search through the session actor (M5-01) ----------------
+
+#[tokio::test]
+async fn copy_and_search_state_is_server_owned_and_regex_errors_keep_it_intact() {
+    // The short viewport forces the first needle into retained history. A
+    // client-local cache could no longer find or preserve it after reconnect.
+    let (root, session) = session_running(
+        "printf 'first\\nneedle one\\nneedle two\\nlast\\n'; while read _; do :; done",
+        20,
+        3,
+    );
+    wait_for_line(&session.handle, "last").await;
+
+    session
+        .handle
+        .enter_copy_mode()
+        .await
+        .expect("copy mode reaches the actor");
+    assert!(
+        session
+            .handle
+            .search_copy("needle", SearchDirection::Forward)
+            .await
+            .expect("valid regex searches retained history")
+    );
+    session
+        .handle
+        .begin_copy_selection()
+        .await
+        .expect("selection reaches the actor");
+
+    let before = session.handle.snapshot().await.expect("session is alive");
+    let copy = before.copy_mode.as_ref().expect("copy state is projected");
+    assert_eq!(copy.pane, root);
+    assert_eq!(copy.query.as_deref(), Some("needle"));
+    assert_eq!(copy.matches.len(), 2, "both retained matches are recorded");
+    assert!(
+        copy.selection.is_some(),
+        "selection is not a client overlay"
+    );
+
+    // A second client gets a clone of the actor handle, not access to mutable
+    // state. Its motion observes and advances the first client's copy cursor.
+    let reattached_client = session.handle.clone();
+    reattached_client
+        .copy_motion(CopyMotion::Down)
+        .await
+        .expect("the reattached client reaches the same actor state");
+    let after = session.handle.snapshot().await.expect("session is alive");
+    assert_ne!(
+        after.copy_mode.as_ref().map(|copy| copy.cursor),
+        before.copy_mode.as_ref().map(|copy| copy.cursor),
+        "copy cursor is session state, not private to its first client"
+    );
+
+    let err = reattached_client
+        .search_copy("(", SearchDirection::Forward)
+        .await
+        .expect_err("an invalid regex is a clean reply, not an actor crash");
+    assert!(matches!(err, CopyModeError::Search(_)), "got {err}");
+    let after_error = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(
+        after_error
+            .copy_mode
+            .as_ref()
+            .and_then(|copy| copy.query.as_deref()),
+        Some("needle"),
+        "a parse error leaves the previous successful search intact"
+    );
 }
