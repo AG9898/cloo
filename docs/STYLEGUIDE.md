@@ -88,6 +88,19 @@ default, which cloo cannot know the appearance of. The blend is what keeps a dim
 `needs input` distinguishable from a dimmed grey `quiet`. The no-dim configuration turns the whole
 treatment off and leaves focus to the accent and the marker.
 
+### Tab row
+
+The top row is a compact ordered tab bar, rendered as ` 1 shell >2 build`: positions are one-based
+bar positions rather than stable IDs, and `>` marks the active tab in addition to its accent and
+bold treatment. The text marker is mandatory so selection remains visible without colour. Tabs are
+separated by one space and the row is always filled to the terminal width.
+
+At a narrow width the row keeps a contiguous window around the active tab, yielding inactive tabs
+from the far right and then the far left. If only the active chip fits, its title truncates before
+the `>` or its index do; at the smallest widths the marker is what remains. `tab_row_cells` and
+`tab_row_span` in `cloo-client::chrome` are pure cell functions, so this ladder is byte-for-byte
+testable like the pane header.
+
 ## Agent Workspace States
 
 Pane chrome and the attention queue use the following labels. State text and a glyph are always

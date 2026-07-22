@@ -728,6 +728,13 @@ its provenance is exactly the claim the chrome must not make — and an uninstru
 carried as `Unknown`/`None` rather than omitted, because the client renders that state too and
 never guesses one from the grid.
 
+`Tabs(Vec<TabSummary>)` is a fourth, compact clock. `Hello` and every resync carry the whole
+ordered bar, and a later `Tabs` update replaces the client's cache when creation, close, rename,
+or selection changes it. The session actor projects it from `cloo-core::session::Session` in the
+same turn as the active tab's snapshot; inactive tabs keep their PTYs and continue pumping, but
+only the active tab's layout, grid, metadata, attention, cursor, and modes are sent. A switch
+therefore changes view state and active geometry, never a child's identity or process lifetime.
+
 ### Framing
 
 Each frame is a big-endian `u32` payload length followed by that many bytes of postcard.
@@ -846,6 +853,14 @@ The lifecycle is four operations with defined activation behavior:
   masquerades as the last-tab rule.
 
 Tab IDs come from the same monotonic, never-reused allocators in `cloo-core::id` as pane IDs.
+
+M3-02 makes that model authoritative in the session actor as well. The actor owns one global set
+of pane reactors and the pure `Session` model whose tab-local layouts partition those panes; a
+new tab starts its first child before it enters the model, and closing a tab removes its layout
+before dropping exactly the reactors it named. `NewTab`, `CloseTab`, `NextTab`, `PrevTab`, and
+`RenameTab` cross as `Action` values, so the client sends intent while the actor remains the one
+writer. Switching applies the selected tab's resolved geometry but leaves all other reactors
+alive and pumping, preserving their grids and child processes for a later return.
 
 ---
 

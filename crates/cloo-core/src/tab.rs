@@ -26,7 +26,7 @@ use cloo_proto::{PaneId, TabId};
 
 use crate::error::{LayoutError, MetadataError};
 use crate::layout::Layout;
-use crate::pane::validate_text;
+use crate::pane::{PaneName, validate_text};
 
 /// The longest a tab name may be.
 ///
@@ -53,6 +53,17 @@ impl TabName {
         let name = name.into();
         validate_text("tab name", &name, MAX_TAB_NAME)?;
         Ok(Self(name))
+    }
+
+    /// Reuses a pane name as a tab title without a second fallible validation.
+    ///
+    /// [`PaneName`] and `TabName` deliberately share the same validator and
+    /// character limit. A launch has already proved its pane name safe for
+    /// chrome, so the server can make its initial tab title from that fact
+    /// rather than inventing a panic path while creating a tab.
+    #[must_use]
+    pub fn from_pane_name(name: &PaneName) -> Self {
+        Self(name.as_str().to_owned())
     }
 
     /// The name as a string.
@@ -186,6 +197,12 @@ mod tests {
             Err(MetadataError::TooLong { .. })
         ));
         assert!(TabName::new("日本語").is_ok());
+    }
+
+    #[test]
+    fn a_validated_pane_name_can_become_a_tab_name_without_a_new_rejection() {
+        let pane = PaneName::new("api").expect("valid pane name");
+        assert_eq!(TabName::from_pane_name(&pane).as_str(), "api");
     }
 
     #[test]

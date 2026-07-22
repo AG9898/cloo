@@ -433,6 +433,61 @@ async fn zoom_fills_the_area_and_unzoom_restores_the_split_without_a_restart() {
 }
 
 #[tokio::test]
+async fn switching_tabs_preserves_every_existing_child() {
+    let (_, session) = session_running(PID_THEN_REPORT, 120, 40);
+    let first_pid = wait_for_line(&session.handle, "pid=").await;
+    let first = session
+        .handle
+        .snapshot()
+        .await
+        .expect("session is alive")
+        .tab;
+
+    let second = session
+        .handle
+        .new_tab()
+        .await
+        .expect("a new tab launches its initial pane");
+    let second_pid = wait_for_line(&session.handle, "pid=").await;
+    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(snapshot.tab, second, "a new tab becomes active");
+    assert_eq!(snapshot.tabs.len(), 2, "the tab bar has both tabs");
+    assert_eq!(snapshot.panes.len(), 1, "each tab owns its own layout");
+
+    session
+        .handle
+        .prev_tab()
+        .await
+        .expect("the first tab is still selectable");
+    assert_eq!(
+        session
+            .handle
+            .snapshot()
+            .await
+            .expect("session is alive")
+            .tab,
+        first
+    );
+    assert_eq!(
+        wait_for_line(&session.handle, "pid=").await,
+        first_pid,
+        "returning to a tab must reveal its original child, not a replacement"
+    );
+
+    session
+        .handle
+        .next_tab()
+        .await
+        .expect("the second tab is still selectable");
+    assert_eq!(
+        wait_for_line(&session.handle, "pid=").await,
+        second_pid,
+        "switching tabs must not restart the newly created child either"
+    );
+    assert_ne!(first_pid, second_pid, "the tabs own distinct PTYs");
+}
+
+#[tokio::test]
 async fn a_split_while_zoomed_shows_the_pane_it_created() {
     let (root, session) = session(120, 40);
     session

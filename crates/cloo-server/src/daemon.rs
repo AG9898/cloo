@@ -14,7 +14,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use cloo_proto::{
-    Action, ClientId, ClientMessage, PaneId, ServerMessage, SessionId, Size, StreamError, TabId,
+    Action, ClientId, ClientMessage, PaneId, ServerMessage, SessionId, Size, StreamError,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -34,10 +34,8 @@ const DAMAGE_QUEUE: usize = 8;
 /// Client-to-daemon requests waiting for the coordinator.
 const CLIENT_COMMAND_QUEUE: usize = 64;
 
-/// The single session, tab, and initial pane this milestone's daemon owns.
+/// The single session and initial pane this daemon owns.
 const THE_SESSION: SessionId = SessionId::new(1);
-/// See [`THE_SESSION`].
-const THE_TAB: TabId = TabId::new(1);
 /// See [`THE_SESSION`].
 const THE_PANE: PaneId = PaneId::new(1);
 
@@ -359,9 +357,22 @@ impl Daemon {
                         }
                     }
                 }
+                ClientMessage::Command(Action::NewTab) => {
+                    let _ = self.session()?.new_tab().await;
+                }
+                ClientMessage::Command(Action::CloseTab) => {
+                    let _ = self.session()?.close_tab().await;
+                }
+                ClientMessage::Command(Action::NextTab) => self.session()?.next_tab().await?,
+                ClientMessage::Command(Action::PrevTab) => self.session()?.prev_tab().await?,
+                ClientMessage::Command(Action::RenameTab(name)) => {
+                    if let Ok(name) = cloo_core::tab::TabName::new(name) {
+                        let _ = self.session()?.rename_tab(name).await;
+                    }
+                }
                 // Detach is handled by the connection task so it can send the
-                // acknowledgement before it reports `Gone`. All other actions
-                // still await their own client and layout milestones.
+                // acknowledgement before it reports `Gone`. The remaining
+                // actions wait for their own layout milestones.
                 ClientMessage::Detach
                 | ClientMessage::Attach { .. }
                 | ClientMessage::Command(Action::DetachClient)
@@ -394,7 +405,7 @@ impl Daemon {
 
     /// Pushes `snapshot` through the non-blocking bounded fan-out.
     fn publish_snapshot(&mut self, snapshot: &SessionSnapshot) {
-        if let Some(frame) = self.damage.update(THE_TAB, snapshot) {
+        if let Some(frame) = self.damage.update(snapshot) {
             // With no clients this returns an error carrying the frame. That
             // is expected — a future attach gets a direct full snapshot.
             let _ = self.updates.send(frame);
@@ -474,11 +485,11 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
     let hello = ServerMessage::Hello {
         protocol_version: cloo_proto::PROTOCOL_VERSION,
         session: THE_SESSION,
-        tabs: conn::single_tab(THE_TAB, "shell"),
+        tabs: snapshot.tabs.clone(),
         size,
     };
     if conn.send(&hello).await.is_err()
-        || send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+        || send_all(&mut conn, &conn::session_snapshot(&snapshot))
             .await
             .is_err()
     {
@@ -507,7 +518,7 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
                     let Ok(ClientResync { snapshot, updates: replacement }) = resynced.await else {
                         break;
                     };
-                    if send_all(&mut conn, &conn::session_snapshot(THE_TAB, &snapshot))
+                    if send_all(&mut conn, &conn::session_snapshot(&snapshot))
                         .await
                         .is_err()
                     {
@@ -564,7 +575,6 @@ mod tests {
     #[test]
     fn the_session_ids_are_distinct_newtypes() {
         assert_eq!(THE_SESSION.get(), 1);
-        assert_eq!(THE_TAB.get(), 1);
         assert_eq!(THE_PANE.get(), 1);
     }
 

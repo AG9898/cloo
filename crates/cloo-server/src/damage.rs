@@ -6,9 +6,7 @@
 //! The daemon publishes that frame through a bounded `broadcast` channel; it
 //! never waits for an individual socket while the session task is running.
 
-use cloo_proto::{
-    CursorShape, LayoutSnapshot, OuterTerminalEffect, PaneId, Point, ServerMessage, TabId,
-};
+use cloo_proto::{CursorShape, LayoutSnapshot, OuterTerminalEffect, PaneId, Point, ServerMessage};
 
 use crate::session::SessionSnapshot;
 
@@ -74,10 +72,11 @@ impl DamageTracker {
     /// A new focused pane or pane geometry always produces every row, because
     /// a row comparison across two different grids is not meaningful.
     #[must_use]
-    pub fn update(&mut self, tab: TabId, current: &SessionSnapshot) -> Option<DamageFrame> {
+    pub fn update(&mut self, current: &SessionSnapshot) -> Option<DamageFrame> {
         let previous = self.previous.as_ref();
         let layout_changed = previous.is_none_or(|before| {
-            before.area != current.area
+            before.tab != current.tab
+                || before.area != current.area
                 || before.panes != current.panes
                 || before.focused != current.focused
                 || before.zoomed != current.zoomed
@@ -118,14 +117,21 @@ impl DamageTracker {
         // Attention moves on yet another clock: a state change is not a rename
         // and a rename is not a state change, so each is resent only for itself.
         let attention_changed = previous.is_none_or(|before| before.attention != current.attention);
+        // Tab identity and selection are their own clock too. A pane write must
+        // not redraw the tab row, while a tab switch has to move the active
+        // treatment before the new layout's damage is applied.
+        let tabs_changed = previous.is_none_or(|before| before.tabs != current.tabs);
         let modes_changed = previous.is_none_or(|before| before.modes != current.modes);
         let cursor_changed =
             previous.is_none_or(|before| before.pane.cursor != current.pane.cursor);
 
         let mut messages = Vec::new();
+        if tabs_changed {
+            messages.push(ServerMessage::Tabs(current.tabs.clone()));
+        }
         if layout_changed {
             messages.push(ServerMessage::Layout(LayoutSnapshot {
-                tab,
+                tab: current.tab,
                 panes: current.panes.clone(),
                 focused: Some(current.focused),
                 zoomed: current.zoomed,
@@ -193,6 +199,12 @@ mod tests {
         let cols = u16::try_from(rows.first().map_or(0, |row| row.len())).unwrap_or(0);
         let size = Size::new(cols, u16::try_from(rows.len()).unwrap_or(0));
         SessionSnapshot {
+            tab: cloo_proto::TabId::new(0),
+            tabs: vec![cloo_proto::TabSummary {
+                tab: cloo_proto::TabId::new(0),
+                title: "shell".into(),
+                active: true,
+            }],
             area: size,
             panes: vec![PaneRect {
                 pane,
@@ -241,29 +253,33 @@ mod tests {
     fn the_first_picture_contains_every_row_and_its_metadata() {
         let mut tracker = DamageTracker::default();
         let frame = tracker
-            .update(TabId::new(1), &snapshot(&["ab", "cd"]))
+            .update(&snapshot(&["ab", "cd"]))
             .expect("a first snapshot is a full resync");
         assert!(matches!(
             frame.messages().first(),
-            Some(ServerMessage::Layout(_))
+            Some(ServerMessage::Tabs(tabs)) if tabs.len() == 1
         ));
         assert!(matches!(
             frame.messages().get(1),
-            Some(ServerMessage::Panes(panes)) if panes.len() == 1
+            Some(ServerMessage::Layout(_))
         ));
         assert!(matches!(
             frame.messages().get(2),
+            Some(ServerMessage::Panes(panes)) if panes.len() == 1
+        ));
+        assert!(matches!(
+            frame.messages().get(3),
             Some(ServerMessage::Attention(attention)) if attention.len() == 1
         ));
         assert!(
-            matches!(frame.messages().get(3), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
+            matches!(frame.messages().get(4), Some(ServerMessage::Damage { rows, .. }) if rows.len() == 2)
         );
         assert!(matches!(
-            frame.messages().get(4),
+            frame.messages().get(5),
             Some(ServerMessage::Modes { .. })
         ));
         assert!(matches!(
-            frame.messages().get(5),
+            frame.messages().get(6),
             Some(ServerMessage::CursorMoved { visible: false, .. })
         ));
     }
@@ -273,9 +289,9 @@ mod tests {
         // Geometry and identity move on different clocks: a row that changed
         // must not drag every pane's name across the wire with it.
         let mut tracker = DamageTracker::default();
-        let _ = tracker.update(TabId::new(1), &named_snapshot(&["ab"], "shell"));
+        let _ = tracker.update(&named_snapshot(&["ab"], "shell"));
         let frame = tracker
-            .update(TabId::new(1), &named_snapshot(&["XX"], "shell"))
+            .update(&named_snapshot(&["XX"], "shell"))
             .expect("a changed row produces damage");
         assert!(
             !frame
@@ -286,7 +302,7 @@ mod tests {
         );
 
         let renamed = tracker
-            .update(TabId::new(1), &named_snapshot(&["XX"], "api"))
+            .update(&named_snapshot(&["XX"], "api"))
             .expect("a rename is a visible change");
         assert_eq!(
             renamed.messages(),
@@ -306,17 +322,11 @@ mod tests {
         };
 
         let mut tracker = DamageTracker::default();
-        let _ = tracker.update(
-            TabId::new(1),
-            &with_state(&["ab"], cloo_proto::AttentionState::Unknown),
-        );
+        let _ = tracker.update(&with_state(&["ab"], cloo_proto::AttentionState::Unknown));
 
         // A row changes, attention does not.
         let frame = tracker
-            .update(
-                TabId::new(1),
-                &with_state(&["XX"], cloo_proto::AttentionState::Unknown),
-            )
+            .update(&with_state(&["XX"], cloo_proto::AttentionState::Unknown))
             .expect("a changed row produces damage");
         assert!(
             !frame
@@ -328,10 +338,7 @@ mod tests {
 
         // Attention changes, no row does.
         let frame = tracker
-            .update(
-                TabId::new(1),
-                &with_state(&["XX"], cloo_proto::AttentionState::NeedsInput),
-            )
+            .update(&with_state(&["XX"], cloo_proto::AttentionState::NeedsInput))
             .expect("a state change is a visible change");
         assert_eq!(
             frame.messages(),
@@ -346,11 +353,30 @@ mod tests {
     }
 
     #[test]
+    fn tabs_are_resent_only_when_the_bar_changes() {
+        let mut tracker = DamageTracker::default();
+        let picture = snapshot(&["ab"]);
+        let _ = tracker.update(&picture);
+
+        let mut renamed = picture.clone();
+        renamed.tabs[0].title = "build".into();
+
+        let frame = tracker
+            .update(&renamed)
+            .expect("a tab rename changes the bar");
+        assert_eq!(
+            frame.messages(),
+            &[ServerMessage::Tabs(renamed.tabs.clone())]
+        );
+        assert_eq!(tracker.update(&renamed), None);
+    }
+
+    #[test]
     fn one_changed_row_does_not_resend_its_neighbours() {
         let mut tracker = DamageTracker::default();
-        let _ = tracker.update(TabId::new(1), &snapshot(&["ab", "cd", "ef"]));
+        let _ = tracker.update(&snapshot(&["ab", "cd", "ef"]));
         let frame = tracker
-            .update(TabId::new(1), &snapshot(&["ab", "XX", "ef"]))
+            .update(&snapshot(&["ab", "XX", "ef"]))
             .expect("a changed row produces damage");
         assert_eq!(
             frame.messages(),
@@ -374,8 +400,8 @@ mod tests {
     fn an_unchanged_snapshot_costs_no_wire_frame() {
         let mut tracker = DamageTracker::default();
         let picture = snapshot(&["ab"]);
-        let _ = tracker.update(TabId::new(1), &picture);
-        assert_eq!(tracker.update(TabId::new(1), &picture), None);
+        let _ = tracker.update(&picture);
+        assert_eq!(tracker.update(&picture), None);
     }
 
     #[test]

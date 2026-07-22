@@ -47,11 +47,14 @@ use std::process::ExitStatus;
 use std::task::Poll;
 
 use cloo_core::error::LayoutError;
-use cloo_core::layout::{Layout, Side};
+use cloo_core::layout::Side;
 use cloo_core::pane::{AttentionSource, AttentionState, PaneMeta};
+use cloo_core::session::Session as SessionModel;
+use cloo_core::tab::TabName;
 use cloo_proto::{
     ClipboardTarget, Direction, GraphicsEffect, MouseButton, MouseEvent, MouseKind, MouseTracking,
-    OuterTerminalEffect, PaneAttention, PaneId, PaneInfo, PaneModes, PaneRect, ProgressState, Size,
+    OuterTerminalEffect, PaneAttention, PaneId, PaneInfo, PaneModes, PaneRect, ProgressState,
+    SessionId, Size, TabId, TabSummary,
 };
 use cloo_term::TermSize;
 use tokio::sync::{mpsc, oneshot};
@@ -134,6 +137,21 @@ pub enum Command {
     MoveFocus(Side),
     /// Shows the focused pane alone at the full area, or undoes that.
     ToggleZoom,
+    /// Creates a new tab with one pane running the session's default launch.
+    NewTab(oneshot::Sender<Result<TabId, PaneError>>),
+    /// Closes the active tab and every pane it owns.
+    CloseTab(oneshot::Sender<Result<(), TabError>>),
+    /// Activates the tab after the active one, wrapping at the end.
+    NextTab,
+    /// Activates the tab before the active one, wrapping at the beginning.
+    PrevTab,
+    /// Renames the active tab.
+    RenameTab {
+        /// The validated replacement title.
+        name: TabName,
+        /// Reports a model rejection to the caller.
+        reply: oneshot::Sender<Result<(), TabError>>,
+    },
     /// Records a pane's attention state and where it came from.
     ///
     /// The single serialized path for attention: a bell, a child exit, an
@@ -175,6 +193,39 @@ pub enum PaneError {
     Spawn(PtyError),
     /// The session task is no longer running.
     Gone,
+}
+
+/// Why a tab lifecycle operation could not complete.
+#[derive(Debug)]
+pub enum TabError {
+    /// The pure tab model rejected the operation.
+    Model(cloo_core::SessionError),
+    /// The session task is no longer running.
+    Gone,
+}
+
+impl fmt::Display for TabError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Model(error) => write!(f, "{error}"),
+            Self::Gone => write!(f, "{SessionGone}"),
+        }
+    }
+}
+
+impl std::error::Error for TabError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Model(error) => Some(error),
+            Self::Gone => None,
+        }
+    }
+}
+
+impl From<SessionGone> for TabError {
+    fn from(_: SessionGone) -> Self {
+        Self::Gone
+    }
 }
 
 impl fmt::Display for PaneError {
@@ -241,23 +292,30 @@ impl fmt::Display for SessionGone {
 
 impl std::error::Error for SessionGone {}
 
-/// The whole picture of a session at one instant.
+/// The active-tab picture of a session at one instant.
 ///
 /// Geometry and contents come from the same pass over the same state, which is
 /// what lets a client apply them together without ever holding rows it has
 /// nowhere to put.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionSnapshot {
+    /// The tab whose layout and focused-pane grid this snapshot describes.
+    pub tab: TabId,
+    /// The whole tab bar, in display order. This is projection data: the
+    /// session actor remains the sole owner of tab state.
+    pub tabs: Vec<TabSummary>,
     /// The session's area, in cells.
     pub area: Size,
-    /// Every pane and where it sits, from one [`Layout::resolve`].
+    /// Every visible pane in the active tab and where it sits, from one
+    /// [`Layout::resolve`](cloo_core::Layout::resolve).
     pub panes: Vec<PaneRect>,
     /// The focused pane, which is the one [`pane`](Self::pane) describes.
     pub focused: PaneId,
     /// The pane shown alone at the full area, if any. Always the focused pane
     /// while it is set: zoom follows focus rather than pinning it.
     pub zoomed: Option<PaneId>,
-    /// Who every pane is: profile, name, task label, and working directory.
+    /// Who every visible pane is: profile, name, task label, and working
+    /// directory.
     ///
     /// In the same order as [`panes`](Self::panes), and always describing the
     /// same set. Explicit metadata every time — nothing in this vector is
@@ -400,8 +458,8 @@ impl SessionHandle {
     ///
     /// # Errors
     ///
-    /// Returns [`PaneError::Layout`] if the pane is unknown or is the session's
-    /// last one — a session with no panes is ended, not represented — and
+    /// Returns [`PaneError::Layout`] if the pane is unknown or is its tab's
+    /// last one — a tab with no panes is closed rather than represented — and
     /// [`PaneError::Gone`] if the session task has ended.
     pub async fn close(&self, pane: PaneId) -> Result<(), PaneError> {
         let (reply, answer) = oneshot::channel();
@@ -432,6 +490,59 @@ impl SessionHandle {
     /// Returns [`SessionGone`] if the session task has ended.
     pub async fn toggle_zoom(&self) -> Result<(), SessionGone> {
         self.send(Command::ToggleZoom).await
+    }
+
+    /// Creates a tab running the session's default launch and makes it active.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PaneError::Spawn`] if its child could not start, without
+    /// adding a tab, or [`PaneError::Gone`] if the session task has ended.
+    pub async fn new_tab(&self) -> Result<TabId, PaneError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::NewTab(reply)).await?;
+        answer.await.map_err(|_| PaneError::Gone)?
+    }
+
+    /// Closes the active tab and every PTY it owns.
+    ///
+    /// # Errors
+    ///
+    /// The final tab is refused by the pure session model, and a closed session
+    /// reports [`TabError::Gone`].
+    pub async fn close_tab(&self) -> Result<(), TabError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::CloseTab(reply)).await?;
+        answer.await.map_err(|_| TabError::Gone)?
+    }
+
+    /// Activates the next tab, wrapping at the end of the tab bar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn next_tab(&self) -> Result<(), SessionGone> {
+        self.send(Command::NextTab).await
+    }
+
+    /// Activates the previous tab, wrapping at the beginning of the tab bar.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn prev_tab(&self) -> Result<(), SessionGone> {
+        self.send(Command::PrevTab).await
+    }
+
+    /// Renames the active tab.
+    ///
+    /// # Errors
+    ///
+    /// Returns a model rejection or [`TabError::Gone`] if the session ended.
+    pub async fn rename_tab(&self, name: TabName) -> Result<(), TabError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::RenameTab { name, reply }).await?;
+        answer.await.map_err(|_| TabError::Gone)?
     }
 
     /// Reports a pane's attention state and where the report came from.
@@ -517,17 +628,19 @@ struct Pane {
 
 /// One session's authoritative state, owned by one task.
 ///
-/// The layout tree and [`panes`](Self::panes) are two views of one fact: the
-/// invariant is that they name exactly the same set of panes, and every mutation
-/// here restores it before returning. `panes` is never empty, because closing
-/// the last pane is refused by the layout.
+/// The pure model's tab-local layouts and [`panes`](Self::panes) are two views
+/// of one fact: the union of every tab layout names exactly the reactors held
+/// here, and every mutation restores that relation before returning. `panes` is
+/// never empty, because closing the final tab is refused by the model.
 ///
 /// Not `Debug`: it owns an [`Emulator`](cloo_term::Emulator), whose grid is not,
 /// and printing a session's whole scrollback would not be useful anyway.
 pub struct Session {
     panes: Vec<Pane>,
-    layout: Layout,
-    focused: PaneId,
+    /// The pure tab and layout model. PTYs live beside it in `panes`, while the
+    /// model is the one source of truth for which tab owns each pane and which
+    /// tab is active.
+    model: SessionModel,
     area: Size,
     /// What belongs to the *session* rather than to a profile: the environment
     /// every pane inherits and a fallback geometry. A [`Launch`] is applied over
@@ -581,8 +694,11 @@ impl Session {
                 meta: launch.meta().clone(),
                 ended: false,
             }],
-            layout: Layout::new(pane),
-            focused: pane,
+            model: SessionModel::new(
+                SessionId::new(1),
+                TabName::from_pane_name(&launch.meta().name),
+                pane,
+            ),
             area,
             config: base.clone(),
             default_launch: launch,
@@ -690,7 +806,7 @@ impl Session {
                 // A mouse event names the pane the client hit-tested it into. A
                 // stale one naming some other pane is dropped rather than
                 // delivered to whatever is focused now.
-                if event.pane != self.focused {
+                if event.pane != self.focused() {
                     return Ok(());
                 }
                 match mouse_bytes(self.modes(), &event) {
@@ -724,6 +840,38 @@ impl Session {
             Command::ToggleZoom => {
                 self.toggle_zoom();
                 self.settle(true)
+            }
+            Command::NewTab(reply) => {
+                let outcome = self.new_tab();
+                let changed = outcome.is_ok();
+                let _ = reply.send(outcome);
+                self.settle(changed)
+            }
+            Command::CloseTab(reply) => {
+                let outcome = self.close_tab();
+                let changed = outcome.is_ok();
+                let _ = reply.send(outcome);
+                self.settle(changed)
+            }
+            Command::NextTab => {
+                let changed = self.select_relative_tab(1);
+                self.settle(changed)
+            }
+            Command::PrevTab => {
+                let changed = self.select_relative_tab(-1);
+                self.settle(changed)
+            }
+            Command::RenameTab { name, reply } => {
+                let outcome = self
+                    .model
+                    .rename_tab(self.model.active(), name)
+                    .map_err(TabError::Model);
+                let changed = outcome.is_ok();
+                let _ = reply.send(outcome);
+                if changed {
+                    self.notify(SessionEvent::Output);
+                }
+                Ok(())
             }
             Command::SetAttention {
                 pane,
@@ -768,14 +916,16 @@ impl Session {
         launch: Option<Launch>,
     ) -> Result<PaneId, PaneError> {
         let launch = launch.unwrap_or_else(|| self.default_launch.clone());
-        let target = self.focused;
+        let target = self.focused();
         let new_pane = self.ids.peek();
+        let area = self.area;
         // A successful split unzooms — the new pane is what the user is about
         // to type into, and it cannot be seen behind a zoom. A failed one must
         // put the zoom back, since a rollback restores everything or nothing.
-        let zoomed = self.layout.zoomed();
-        self.layout
-            .split(target, dir, ratio, new_pane, self.area)
+        let zoomed = self.active_tab().layout().zoomed();
+        self.active_tab_mut()
+            .layout_mut()
+            .split(target, dir, ratio, new_pane, area)
             .map_err(PaneError::Layout)?;
 
         match self.spawn_pane(new_pane, &launch) {
@@ -784,15 +934,15 @@ impl Session {
                 let _ = self.ids.allocate();
                 // Focus follows the split: it is what makes splitting and then
                 // typing do what a user means by it.
-                self.focused = new_pane;
+                let _ = self.active_tab_mut().focus(new_pane);
                 Ok(new_pane)
             }
             Err(err) => {
                 // Roll back. Collapsing a split whose second child is a fresh
                 // leaf promotes the first one, which restores the tree exactly.
-                let _ = self.layout.close(new_pane);
+                let _ = self.active_tab_mut().layout_mut().close(new_pane);
                 if let Some(pane) = zoomed {
-                    let _ = self.layout.zoom(pane);
+                    let _ = self.active_tab_mut().layout_mut().zoom(pane);
                 }
                 Err(PaneError::Spawn(err))
             }
@@ -806,7 +956,7 @@ impl Session {
     /// session's whole area and then shrinking it is a spurious `SIGWINCH` and,
     /// for a program that only looks once, a lasting wrong answer.
     fn spawn_pane(&self, pane: PaneId, launch: &Launch) -> Result<Pane, PtyError> {
-        let size = match self.layout.rect_of(pane, self.area) {
+        let size = match self.active_tab().layout().rect_of(pane, self.area) {
             Some(rect) => TermSize::new(rect.size.cols, rect.size.rows)?,
             // Unreachable: the pane was resolved a moment ago.
             None => self.config.term_size(),
@@ -826,13 +976,16 @@ impl Session {
     /// the session's last one — never kills a child. Dropping the [`Pane`] is
     /// what kills and reaps it; there is no separate teardown to forget.
     fn close(&mut self, pane: PaneId) -> Result<(), PaneError> {
-        self.layout.close(pane).map_err(PaneError::Layout)?;
+        self.active_tab_mut()
+            .layout_mut()
+            .close(pane)
+            .map_err(PaneError::Layout)?;
         self.panes.retain(|held| held.id != pane);
-        if self.focused == pane {
+        if self.focused() == pane {
             // The survivor first in traversal order. Directional focus needs a
             // pane to start from, and the one that was just closed is gone.
-            if let Some(next) = self.layout.panes().first() {
-                self.focused = *next;
+            if let Some(next) = self.active_tab().layout().panes().first() {
+                let _ = self.active_tab_mut().focus(*next);
             }
             // `Layout::close` already unzoomed if the closed pane was the
             // zoomed one; this keeps the invariant that a zoom always names the
@@ -849,13 +1002,18 @@ impl Session {
     /// the edge is not an error and does nothing — wrapping around would move
     /// attention somewhere nobody was looking.
     fn move_focus(&mut self, side: Side) -> bool {
-        let Some(next) = self.layout.neighbor(self.focused, side, self.area) else {
+        let focused = self.focused();
+        let Some(next) = self
+            .active_tab()
+            .layout()
+            .neighbor(focused, side, self.area)
+        else {
             return false;
         };
-        if next == self.focused {
+        if next == focused {
             return false;
         }
-        self.focused = next;
+        let _ = self.active_tab_mut().focus(next);
         // Zoom follows focus. The alternative — moving focus to a pane the zoom
         // is hiding — leaves a user typing into something they cannot see.
         self.follow_zoom();
@@ -870,15 +1028,73 @@ impl Session {
     /// gives all of them the ratios that were there the whole time.
     fn toggle_zoom(&mut self) {
         // Unreachable failure: focus always names a pane in the layout.
-        let _ = self.layout.toggle_zoom(self.focused);
+        let focused = self.focused();
+        let _ = self.active_tab_mut().layout_mut().toggle_zoom(focused);
     }
 
     /// Retargets an active zoom at the focused pane. A no-op when nothing is
     /// zoomed, which is why moving focus in an ordinary layout costs nothing.
     fn follow_zoom(&mut self) {
-        if self.layout.zoomed().is_some() {
-            let _ = self.layout.zoom(self.focused);
+        if self.active_tab().layout().zoomed().is_some() {
+            let focused = self.focused();
+            let _ = self.active_tab_mut().layout_mut().zoom(focused);
         }
+    }
+
+    /// Creates a fresh tab only after its initial PTY has started, so a spawn
+    /// failure cannot leave the tab model pointing at a pane that does not
+    /// exist. The tab owns the pane's layout; the session retains its reactor
+    /// and keeps pumping it even while another tab is active.
+    fn new_tab(&mut self) -> Result<TabId, PaneError> {
+        let pane_id = self.ids.peek();
+        let size = TermSize::new(self.area.cols, self.area.rows)
+            .unwrap_or_else(|_| self.config.term_size());
+        let config = self
+            .default_launch
+            .configure(&self.config.clone().size(size));
+        let reactor = PtyReactor::spawn(&config).map_err(PaneError::Spawn)?;
+        let pane = Pane {
+            id: pane_id,
+            reactor,
+            meta: self.default_launch.meta().clone(),
+            ended: false,
+        };
+        let name = TabName::from_pane_name(&self.default_launch.meta().name);
+        let tab = self.model.create_tab(name, pane_id);
+        self.panes.push(pane);
+        let _ = self.ids.allocate();
+        Ok(tab)
+    }
+
+    /// Closes the active tab and drops every PTY its layout owns. The pure
+    /// model refuses its final tab before a reactor is removed, so the two
+    /// ownership records remain in step on every rejection.
+    fn close_tab(&mut self) -> Result<(), TabError> {
+        let tab = self.model.active();
+        let panes = self.active_tab().layout().panes().to_vec();
+        self.model.close_tab(tab).map_err(TabError::Model)?;
+        self.panes.retain(|pane| !panes.contains(&pane.id));
+        Ok(())
+    }
+
+    /// Selects a neighbour in tab-bar order, wrapping at either edge.
+    fn select_relative_tab(&mut self, offset: isize) -> bool {
+        let tabs = self.model.tabs();
+        if tabs.len() < 2 {
+            return false;
+        }
+        let Some(current) = tabs.iter().position(|tab| tab.id() == self.model.active()) else {
+            return false;
+        };
+        let next = match offset {
+            -1 if current == 0 => tabs.len() - 1,
+            -1 => current - 1,
+            1 => (current + 1) % tabs.len(),
+            _ => current,
+        };
+        let tab = tabs[next].id();
+        let _ = self.model.select_tab(tab);
+        true
     }
 
     /// Records a pane's attention state, reporting whether anything changed.
@@ -1005,7 +1221,8 @@ impl Session {
     /// nowhere else, so the rect a client is told about and the winsize its
     /// child is given cannot disagree.
     fn apply_geometry(&mut self) -> Result<(), PtyError> {
-        for rect in self.layout.resolve(self.area) {
+        let rects = self.active_tab().layout().resolve(self.area);
+        for rect in rects {
             // A pane squeezed to nothing by a shrunken area keeps its last
             // usable geometry; the ratios are still there when it grows back.
             let Ok(size) = TermSize::new(rect.size.cols, rect.size.rows) else {
@@ -1027,7 +1244,9 @@ impl Session {
     /// client can never be told about a pane it has no identity for, or given an
     /// identity for a pane that is not on screen.
     fn snapshot(&self) -> SessionSnapshot {
-        let panes = self.layout.resolve(self.area);
+        let tab = self.model.active();
+        let active = self.active_tab();
+        let panes = active.layout().resolve(self.area);
         let metas = panes
             .iter()
             .filter_map(|rect| {
@@ -1047,12 +1266,14 @@ impl Session {
             })
             .collect();
         SessionSnapshot {
+            tab,
+            tabs: self.tab_summaries(),
             area: self.area,
             panes,
             metas,
             attention,
-            focused: self.focused,
-            zoomed: self.layout.zoomed(),
+            focused: active.focused(),
+            zoomed: active.layout().zoomed(),
             pane: self
                 .focused_pane()
                 .map_or_else(PaneSnapshot::default, |pane| pane.reactor.snapshot()),
@@ -1080,7 +1301,36 @@ impl Session {
 
     /// The focused pane, which the invariant says always exists.
     fn focused_pane(&self) -> Option<&Pane> {
-        self.panes.iter().find(|pane| pane.id == self.focused)
+        self.panes.iter().find(|pane| pane.id == self.focused())
+    }
+
+    /// The tab the user is looking at. The pure model guarantees it exists.
+    fn active_tab(&self) -> &cloo_core::tab::Tab {
+        self.model.active_tab()
+    }
+
+    /// The active tab, mutably. See [`Self::active_tab`].
+    fn active_tab_mut(&mut self) -> &mut cloo_core::tab::Tab {
+        self.model.active_tab_mut()
+    }
+
+    /// The current tab's focus, which is always a pane in that tab's layout.
+    fn focused(&self) -> PaneId {
+        self.active_tab().focused()
+    }
+
+    /// Projects the pure tab model onto the wire's compact tab-bar data.
+    fn tab_summaries(&self) -> Vec<TabSummary> {
+        let active = self.model.active();
+        self.model
+            .tabs()
+            .iter()
+            .map(|tab| TabSummary {
+                tab: tab.id(),
+                title: tab.name().as_str().to_owned(),
+                active: tab.id() == active,
+            })
+            .collect()
     }
 
     /// One pane by id, mutably.
@@ -1407,6 +1657,7 @@ fn normalize_newlines(text: &[u8]) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cloo_core::Layout;
 
     // Unit tests never spawn a PTY — see docs/TESTING.md. Resize against a real
     // child is `crates/cloo/tests/attach.rs`.

@@ -718,3 +718,9 @@ closes the window with a short bounded spin of `try_wait`, never a blocking `wai
 that closed its terminal but kept running (a detach) would wedge the actor forever. The reaped
 status is cached in `Pty` so the shutdown `wait` returns it instead of `waitpid`-ing the same pid
 twice and failing with `ECHILD`.
+
+### 2026-07-22 — Tab switches are projections, not PTY ownership changes
+The session actor holds every pane reactor while the pure session model's tab-local layouts partition
+them; a snapshot projects only the active tab, but inactive PTYs must keep pumping. Tab creation starts
+its child before adding the tab to the model, and closing removes the model entry before dropping exactly
+its panes — a switch then applies geometry to the selected tab without restarting either child.

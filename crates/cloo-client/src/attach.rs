@@ -23,8 +23,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use cloo_proto::{
-    ClientMessage, FrameStream, MouseEvent, PROTOCOL_VERSION, ProtoError, ServerMessage, SessionId,
-    Size, StreamError, TabSummary, TermCaps, check_version,
+    Action, ClientMessage, FrameStream, MouseEvent, PROTOCOL_VERSION, ProtoError, ServerMessage,
+    SessionId, Size, StreamError, TabSummary, TermCaps, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
@@ -149,7 +149,11 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
     ///
     /// Returns the transport or framing failure.
     pub async fn recv(&mut self) -> Result<Option<ServerMessage>, StreamError> {
-        self.conn.recv().await
+        let message = self.conn.recv().await?;
+        if let Some(ServerMessage::Tabs(tabs)) = &message {
+            self.tabs = tabs.clone();
+        }
+        Ok(message)
     }
 
     /// Sends keyboard bytes to the focused pane.
@@ -204,6 +208,18 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
     pub async fn send_resize(&mut self, size: Size) -> Result<(), StreamError> {
         self.size = size;
         self.conn.send(&ClientMessage::Resize(size)).await
+    }
+
+    /// Sends a keymap-resolved command to the session actor.
+    ///
+    /// Commands carry intent rather than raw keys, so keymap changes do not
+    /// require a wire-format change.
+    ///
+    /// # Errors
+    ///
+    /// Returns the transport or framing failure.
+    pub async fn send_command(&mut self, action: Action) -> Result<(), StreamError> {
+        self.conn.send(&ClientMessage::Command(action)).await
     }
 
     /// Detaches, leaving the session and its children running.
@@ -369,6 +385,56 @@ mod tests {
         assert_eq!(attached.size(), Size::new(80, 24));
         assert_eq!(attached.tabs().len(), 1);
         scripted.await.expect("the scripted server finishes");
+    }
+
+    #[tokio::test]
+    async fn a_tab_update_replaces_the_cached_bar_and_commands_reach_the_server() {
+        let (client, server) = duplex(4096);
+        let scripted = tokio::spawn(async move {
+            let mut conn = FrameStream::new(server);
+            let _attach = conn.recv::<ClientMessage>().await.expect("attach arrives");
+            conn.send(&hello()).await.expect("hello sends");
+            conn.send(&ServerMessage::Tabs(vec![
+                TabSummary {
+                    tab: TabId::new(1),
+                    title: "shell".into(),
+                    active: false,
+                },
+                TabSummary {
+                    tab: TabId::new(2),
+                    title: "build".into(),
+                    active: true,
+                },
+            ]))
+            .await
+            .expect("tab update sends");
+            conn.recv::<ClientMessage>().await.expect("command arrives")
+        });
+
+        let mut attached = handshake(
+            FrameStream::new(client),
+            Size::new(80, 24),
+            TermCaps::default(),
+            None,
+        )
+        .await
+        .expect("the attach succeeds");
+        assert!(matches!(
+            attached.recv().await,
+            Ok(Some(ServerMessage::Tabs(_)))
+        ));
+        assert_eq!(attached.tabs().len(), 2);
+        assert_eq!(attached.tabs()[1].title, "build");
+        assert!(attached.tabs()[1].active);
+
+        attached
+            .send_command(Action::NextTab)
+            .await
+            .expect("command sends");
+        assert_eq!(
+            scripted.await.expect("the scripted server finishes"),
+            Some(ClientMessage::Command(Action::NextTab))
+        );
     }
 
     #[tokio::test]

@@ -17,8 +17,8 @@
 //! damage stay one code path on the client.
 
 use cloo_proto::{
-    ClientMessage, FrameStream, ProtoError, ServerMessage, SessionId, Size, StreamError, TabId,
-    TabSummary, TermCaps, check_version,
+    ClientMessage, FrameStream, ProtoError, ServerMessage, SessionId, Size, StreamError, TermCaps,
+    check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -134,8 +134,8 @@ pub async fn refuse<T: AsyncRead + AsyncWrite + Unpin>(
 
 /// The messages that bring a freshly attached client fully up to date.
 ///
-/// Geometry first, then who the panes are, then contents, then the modes, then
-/// the cursor. That order
+/// Tab state first, then geometry, then who the panes are, then contents, then
+/// the modes, then the cursor. That order
 /// is what lets a
 /// client apply the batch without ever holding rows it has nowhere to put: the
 /// [`ServerMessage::Layout`] tells it how big the pane is before a single
@@ -147,11 +147,12 @@ pub async fn refuse<T: AsyncRead + AsyncWrite + Unpin>(
 /// untouched. Recomputing it here would be a second answer to a question that
 /// already has one, and the two could disagree mid-resize.
 #[must_use]
-pub fn session_snapshot(tab: TabId, snapshot: &SessionSnapshot) -> Vec<ServerMessage> {
+pub fn session_snapshot(snapshot: &SessionSnapshot) -> Vec<ServerMessage> {
     let pane = snapshot.focused;
     let mut messages = vec![
+        ServerMessage::Tabs(snapshot.tabs.clone()),
         ServerMessage::Layout(cloo_proto::LayoutSnapshot {
-            tab,
+            tab: snapshot.tab,
             panes: snapshot.panes.clone(),
             focused: Some(pane),
             zoomed: snapshot.zoomed,
@@ -190,28 +191,24 @@ pub fn session_snapshot(tab: TabId, snapshot: &SessionSnapshot) -> Vec<ServerMes
     messages
 }
 
-/// The tab bar a single-pane session presents.
-///
-/// One tab, active, named for the session. Real tab lifecycle is M3-01.
-#[must_use]
-pub fn single_tab(tab: TabId, title: &str) -> Vec<TabSummary> {
-    vec![TabSummary {
-        tab,
-        title: title.to_owned(),
-        active: true,
-    }]
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::pty::PaneSnapshot;
-    use cloo_proto::{Cell, CursorShape, PROTOCOL_VERSION, PaneId, PaneRect, Point, RowUpdate};
+    use cloo_proto::{
+        Cell, CursorShape, PROTOCOL_VERSION, PaneId, PaneRect, Point, RowUpdate, TabId, TabSummary,
+    };
     use tokio::io::duplex;
 
     fn snapshot() -> SessionSnapshot {
         let pane = PaneId::new(2);
         SessionSnapshot {
+            tab: TabId::new(0),
+            tabs: vec![TabSummary {
+                tab: TabId::new(0),
+                title: "api".into(),
+                active: true,
+            }],
             area: Size::new(2, 1),
             panes: vec![PaneRect {
                 pane,
@@ -355,20 +352,21 @@ mod tests {
 
     #[test]
     fn a_snapshot_describes_geometry_before_contents() {
-        let messages = session_snapshot(TabId::new(1), &snapshot());
+        let messages = session_snapshot(&snapshot());
         assert!(
-            matches!(messages.first(), Some(ServerMessage::Layout(_))),
-            "layout must come first so rows have somewhere to land"
+            matches!(messages.first(), Some(ServerMessage::Tabs(_))),
+            "tabs must arrive before the active layout"
         );
-        assert!(matches!(messages.get(1), Some(ServerMessage::Panes(_))));
-        assert!(matches!(messages.get(2), Some(ServerMessage::Attention(_))));
+        assert!(matches!(messages.get(1), Some(ServerMessage::Layout(_))));
+        assert!(matches!(messages.get(2), Some(ServerMessage::Panes(_))));
+        assert!(matches!(messages.get(3), Some(ServerMessage::Attention(_))));
         assert!(matches!(
-            messages.get(3),
+            messages.get(4),
             Some(ServerMessage::Damage { rows, .. }) if rows.len() == 1
         ));
-        assert!(matches!(messages.get(4), Some(ServerMessage::Modes { .. })));
+        assert!(matches!(messages.get(5), Some(ServerMessage::Modes { .. })));
         assert!(matches!(
-            messages.get(5),
+            messages.get(6),
             Some(ServerMessage::CursorMoved { visible: true, .. })
         ));
     }
@@ -378,8 +376,8 @@ mod tests {
         // A client caches the visible grid and nothing else, so identity has to
         // arrive with the resync or its chrome has nothing to write.
         let snapshot = snapshot();
-        let messages = session_snapshot(TabId::new(1), &snapshot);
-        let Some(ServerMessage::Panes(panes)) = messages.get(1) else {
+        let messages = session_snapshot(&snapshot);
+        let Some(ServerMessage::Panes(panes)) = messages.get(2) else {
             panic!("the resync must carry pane identity");
         };
         assert_eq!(panes, &snapshot.metas);
@@ -392,8 +390,8 @@ mod tests {
         // Geometry the session resolved that a naive "one pane fills the area"
         // rebuild here would silently discard.
         snapshot.panes[0].x = 7;
-        let messages = session_snapshot(TabId::new(1), &snapshot);
-        let Some(ServerMessage::Layout(layout)) = messages.first() else {
+        let messages = session_snapshot(&snapshot);
+        let Some(ServerMessage::Layout(layout)) = messages.get(1) else {
             panic!("layout must come first");
         };
         assert_eq!(layout.panes, snapshot.panes);
@@ -404,10 +402,10 @@ mod tests {
     fn a_hidden_cursor_is_still_reported() {
         let mut snapshot = snapshot();
         snapshot.pane.cursor = None;
-        let messages = session_snapshot(TabId::new(1), &snapshot);
+        let messages = session_snapshot(&snapshot);
         assert!(
             matches!(
-                messages.get(5),
+                messages.get(6),
                 Some(ServerMessage::CursorMoved { visible: false, .. })
             ),
             "a client with a stale cursor must be told to stop drawing it"

@@ -33,7 +33,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use cloo_proto::{Cell, CellAttrs, Color, Point};
+use cloo_proto::{Cell, CellAttrs, Color, Point, TabSummary};
 
 use crate::renderer::Span;
 
@@ -239,6 +239,89 @@ impl PaneChrome {
         self.zoomed = zoomed;
         self
     }
+}
+
+// ---------------------------------------------------------------------------
+// Tab row
+// ---------------------------------------------------------------------------
+
+/// Builds the compact top tab row, exactly `width` cells wide.
+///
+/// Each tab is shown as a one-based bar position and title. The active tab is
+/// marked with `>` as well as the accent treatment, so a 16-colour or
+/// monochrome terminal still has an unambiguous answer. When the bar is too
+/// narrow for every tab, it yields inactive tabs from the far right and then
+/// the far left, keeping a contiguous window around the active tab. If even
+/// that does not fit, the active title truncates before its marker or index.
+#[must_use]
+pub fn tab_row_cells(tabs: &[TabSummary], width: u16) -> Vec<Cell> {
+    let width = usize::from(width);
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let active = tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let mut first = 0;
+    let mut last = tabs.len();
+    while first < last && tab_row_len(&tabs[first..last], first) > width {
+        if last.saturating_sub(1) != active {
+            last -= 1;
+        } else if first != active {
+            first += 1;
+        } else {
+            break;
+        }
+    }
+
+    let visible = &tabs[first..last];
+    let mut cells = Vec::with_capacity(width);
+    for (offset, tab) in visible.iter().enumerate() {
+        if offset > 0 {
+            push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+        }
+        let index = first + offset + 1;
+        let marker = if tab.active { ">" } else { " " };
+        let prefix = format!("{marker}{index} ");
+        let remaining = width.saturating_sub(cells.len());
+        if remaining == 0 {
+            break;
+        }
+        let title_budget = remaining.saturating_sub(len(&prefix));
+        let title = truncate(&tab.title, title_budget);
+        let (fg, attrs) = if tab.active {
+            (ACCENT, CellAttrs::BOLD)
+        } else {
+            (MUTED, CellAttrs::NONE)
+        };
+        push_str(&mut cells, &prefix, fg, attrs);
+        push_str(&mut cells, title, fg, attrs);
+    }
+    cells.truncate(width);
+    while cells.len() < width {
+        push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
+    }
+    cells
+}
+
+/// Positions a compact tab row for [`Renderer::render_spans`](crate::renderer::Renderer::render_spans).
+#[must_use]
+pub fn tab_row_span(at: Point, tabs: &[TabSummary], width: u16) -> Span {
+    Span::new(at, tab_row_cells(tabs, width))
+}
+
+fn tab_row_len(tabs: &[TabSummary], start: usize) -> usize {
+    tabs.iter()
+        .enumerate()
+        .map(|(offset, tab)| {
+            len(&format!(
+                "{}{} {}",
+                if tab.active { ">" } else { " " },
+                start + offset + 1,
+                tab.title
+            ))
+        })
+        .sum::<usize>()
+        + tabs.len().saturating_sub(1)
 }
 
 // ---------------------------------------------------------------------------
@@ -1154,6 +1237,53 @@ mod tests {
         let span = header_span(Point::new(10, 4), &pane, 12, ChromeOptions::default());
         assert_eq!(span.at, Point::new(10, 4));
         assert_eq!(span.cells.len(), 12);
+    }
+
+    #[test]
+    fn tab_row_marks_the_active_tab_without_reordering_the_bar() {
+        let tabs = vec![
+            TabSummary {
+                tab: cloo_proto::TabId::new(3),
+                title: "shell".into(),
+                active: false,
+            },
+            TabSummary {
+                tab: cloo_proto::TabId::new(8),
+                title: "build".into(),
+                active: true,
+            },
+        ];
+
+        let row = tab_row_cells(&tabs, 20);
+        assert_eq!(text_of(&row), " 1 shell >2 build   ");
+        assert_eq!(row.len(), 20);
+        assert_eq!(fg_of(&row, '>'), ACCENT);
+    }
+
+    #[test]
+    fn a_narrow_tab_row_keeps_the_active_marker_and_index() {
+        let tabs = vec![
+            TabSummary {
+                tab: cloo_proto::TabId::new(0),
+                title: "shell".into(),
+                active: false,
+            },
+            TabSummary {
+                tab: cloo_proto::TabId::new(1),
+                title: "build".into(),
+                active: true,
+            },
+        ];
+
+        assert_eq!(text_of(&tab_row_cells(&tabs, 8)), ">2 build");
+        assert_eq!(text_of(&tab_row_cells(&tabs, 3)), ">2 ");
+    }
+
+    #[test]
+    fn a_tab_row_span_keeps_the_caller_position() {
+        let span = tab_row_span(Point::new(2, 0), &[], 10);
+        assert_eq!(span.at, Point::new(2, 0));
+        assert_eq!(span.cells.len(), 10);
     }
 
     // -- Attention queue --------------------------------------------------
