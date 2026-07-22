@@ -492,6 +492,45 @@ pub fn mouse_owner(modes: PaneModes, report: &MouseReport, over_pane: bool) -> M
     MouseOwner::Application
 }
 
+/// A keyboard action against the attention queue overlay.
+///
+/// The overlay is a navigation surface: the user walks the entries, jumps to the
+/// pane one names, or dismisses one. These are cloo's own actions and never
+/// reach a child — the overlay owns the keyboard while it is open, exactly as
+/// chrome owns a mouse click over a border.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueAction {
+    /// Move the cursor to the next (older) entry.
+    Next,
+    /// Move the cursor to the previous (newer) entry.
+    Prev,
+    /// Focus the pane the selected entry names.
+    Focus,
+    /// Acknowledge and remove the selected entry.
+    Acknowledge,
+    /// Close the overlay.
+    Dismiss,
+}
+
+/// Maps a run of decoded key bytes to a queue action, or `None` if unbound.
+///
+/// The bindings are conventional and deliberately self-contained: arrow keys and
+/// `j`/`k` navigate, Enter focuses, `a` or Space acknowledges, and Escape or `q`
+/// dismisses. The configurable keymap lands in M4 and supersedes them; until
+/// then this is enough to drive the overlay and to test its actions in
+/// isolation.
+#[must_use]
+pub fn queue_action(keys: &[u8]) -> Option<QueueAction> {
+    match keys {
+        b"j" | b"\x1b[B" => Some(QueueAction::Next),
+        b"k" | b"\x1b[A" => Some(QueueAction::Prev),
+        b"\r" | b"\n" => Some(QueueAction::Focus),
+        b"a" | b" " => Some(QueueAction::Acknowledge),
+        b"\x1b" | b"q" => Some(QueueAction::Dismiss),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -825,5 +864,32 @@ mod tests {
             MouseOwner::Application,
             "and without it the application still gets everything"
         );
+    }
+
+    // -- queue actions ------------------------------------------------------
+
+    #[test]
+    fn queue_keys_map_to_navigation_and_actions() {
+        let cases: [(&[u8], QueueAction); 10] = [
+            (b"j", QueueAction::Next),
+            (b"\x1b[B", QueueAction::Next),
+            (b"k", QueueAction::Prev),
+            (b"\x1b[A", QueueAction::Prev),
+            (b"\r", QueueAction::Focus),
+            (b"\n", QueueAction::Focus),
+            (b"a", QueueAction::Acknowledge),
+            (b" ", QueueAction::Acknowledge),
+            (b"\x1b", QueueAction::Dismiss),
+            (b"q", QueueAction::Dismiss),
+        ];
+        for (keys, action) in cases {
+            assert_eq!(queue_action(keys), Some(action), "{keys:?}");
+        }
+    }
+
+    #[test]
+    fn an_unbound_key_is_not_a_queue_action() {
+        assert_eq!(queue_action(b"x"), None);
+        assert_eq!(queue_action(b""), None);
     }
 }

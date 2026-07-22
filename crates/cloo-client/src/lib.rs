@@ -10,8 +10,9 @@
 //!   including panic and signal.
 //! - [`renderer`] — the client-side [`Grid`] cache and the escape sequences
 //!   that draw it, including the positioned [`Span`]s chrome is painted from.
-//! - [`chrome`] — pane headers, the focus and attention treatment, and the
-//!   dimming policy, as pure functions into cells.
+//! - [`chrome`] — pane headers, the focus and attention treatment, the dimming
+//!   policy, and the attention queue, summary, and toast deck, as pure functions
+//!   into cells.
 //! - [`outer`] — the outer terminal's geometry, which is the client's to know
 //!   and never session state.
 //! - [`capabilities`] — what that terminal can do, the documented fallback for
@@ -20,8 +21,9 @@
 //! - [`resize`] — `SIGWINCH`, turned into an awaitable report of the outer
 //!   terminal's new geometry.
 //! - [`input`] — the reporting modes cloo asks the outer terminal for, the
-//!   decoder that splits its byte stream back into typed events, and the rule
-//!   that decides whether a mouse event is chrome's or the application's.
+//!   decoder that splits its byte stream back into typed events, the rule that
+//!   decides whether a mouse event is chrome's or the application's, and the
+//!   keyboard actions that drive the attention queue overlay.
 //! - [`effects`] — client-local policy and safe rendering for allowlisted
 //!   outer-terminal effects.
 //! - [`attach`] — connecting to a daemon, the versioned handshake, and
@@ -48,10 +50,15 @@ pub use capabilities::{
     detect_attach_caps, detect_caps,
 };
 pub use chrome::{
-    Attention, ChromeOptions, PaneChrome, dim_cell, dim_cells, header_cells, header_span,
+    Attention, AttentionQueue, ChromeOptions, PaneChrome, QueueEntry, Toast, ToastDeck, dim_cell,
+    dim_cells, header_cells, header_span, queue_row_cells, queue_row_span, summary_cells,
+    summary_span, toast_cells, toast_span,
 };
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
-pub use input::{InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, mouse_owner};
+pub use input::{
+    InputDecoder, InputEvent, MouseOwner, MouseReport, OuterModes, QueueAction, mouse_owner,
+    queue_action,
+};
 pub use outer::{current_size, window_size};
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, Grid, RenderError, Renderer, Span};

@@ -330,7 +330,12 @@ the coalescing rule proved through the channel, and a report for a closed pane d
 the generic sources into that path: a coalesced bell flag in `cloo-term/src/emulator.rs`, a
 non-blocking reap in `cloo-server/src/pty.rs`, and their mapping in `cloo-server/src/session.rs`
 (bell → `needs_input`/`Bell`, exit → `ready`/`failed`/`Lifecycle`), proved against real children in
-`cloo-server/tests/session.rs` including bait text that leaves attention `unknown`.
+`cloo-server/tests/session.rs` including bait text that leaves attention `unknown`. M2-10 renders
+the attention surfaces client-side in `cloo-client/src/chrome.rs`: the `AttentionQueue`'s
+deterministic order and coalescing (an acknowledged state not refilling it, a lull resetting the
+slate), keyboard navigation with focus and acknowledge, the per-state status-bar summary, every
+state rendered text-glyph-and-colour in a queue row over the header's width ladder, and a bounded,
+per-pane-coalescing `ToastDeck` — with the queue's key bindings in `cloo-client/src/input.rs`.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 

@@ -117,6 +117,16 @@ directly — a control byte, an end-of-file, a command — and never text read o
 grid, so the no-screen-scraping rule is a property of what a source *is*, not a check bolted on
 after. The opt-in adapter interface, the only advisory source, lands in M2-09.
 
+M2-10 renders those two surfaces client-side in `cloo-client`'s `chrome` module. The status bar's
+compact count is `summary_cells`, a per-state tally coloured and glyphed in a fixed urgency order.
+The navigation surface is `AttentionQueue`: the newest unacknowledged actionable event per pane —
+only `needs_input`, `ready`, and `failed` — ordered newest-first, with coalescing and acknowledgment
+rules that mirror `cloo-core`'s `Attention::set`, so a re-announced state neither churns the list
+nor refills a queue the user just cleared. The keyboard drives focus and acknowledge through
+`input::queue_action`. Repeated events also raise a bounded, per-pane-coalescing `ToastDeck`. All of
+it is pure rendering over the attention state the server already owns; nothing here reads the grid.
+The visual contract is in [STYLEGUIDE.md](STYLEGUIDE.md#overlays-and-notifications).
+
 ## Compatibility Tiers
 
 | Tier | Contract |

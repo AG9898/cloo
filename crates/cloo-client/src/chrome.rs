@@ -31,6 +31,8 @@
 //! assert_eq!(text, "  1 claude ! needs input");
 //! ```
 
+use std::collections::{HashMap, VecDeque};
+
 use cloo_proto::{Cell, CellAttrs, Color, Point};
 
 use crate::renderer::Span;
@@ -132,6 +134,19 @@ impl Attention {
             Self::Ready => SUCCESS,
             Self::Failed => ERROR,
         }
+    }
+
+    /// Whether this state is something a human is being asked to act on, and so
+    /// belongs in the attention queue.
+    ///
+    /// Only `needs_input`, `ready`, and `failed` qualify. Progress
+    /// ([`Working`](Self::Working)) and the absence of news
+    /// ([`Unknown`](Self::Unknown), [`Quiet`](Self::Quiet)) are not events a
+    /// person has to navigate to, so they never enter the queue or raise a
+    /// toast.
+    #[must_use]
+    pub const fn is_actionable(self) -> bool {
+        matches!(self, Self::NeedsInput | Self::Ready | Self::Failed)
     }
 }
 
@@ -438,6 +453,395 @@ fn truncate(text: &str, budget: usize) -> &str {
         Some((end, _)) => &text[..end],
         None => text,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Attention summary, queue, and toasts
+// ---------------------------------------------------------------------------
+
+/// The actionable states, most urgent first.
+///
+/// The status-bar summary and the queue both walk this fixed order, which is
+/// what makes their layout deterministic rather than dependent on the order
+/// events happened to arrive.
+const ACTIONABLE: [Attention; 3] = [Attention::NeedsInput, Attention::Failed, Attention::Ready];
+
+/// One pane's place in the attention queue.
+///
+/// Assembled from the pane's identity and its reported attention; never
+/// authoritative and never inferred from the grid. A pane appears at most once,
+/// carrying only its newest unacknowledged actionable state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueEntry {
+    /// The pane's index in the tab, as the user refers to it and as a focus
+    /// action targets it.
+    pub index: u16,
+    /// The pane's name, for the queue row.
+    pub title: String,
+    /// The state that put the pane in the queue.
+    pub attention: Attention,
+}
+
+/// The attention queue: the newest unacknowledged actionable event per pane.
+///
+/// A navigation surface, not a notification log, so its behaviour is defined by
+/// three rules that keep it from becoming a firehose:
+///
+/// - **One entry per pane.** A pane is listed once; a fresh event for a pane
+///   already present updates that entry in place rather than adding a second.
+/// - **Newest first, deterministically.** A new or changed event moves its pane
+///   to the front. A plain repeat of the same live state coalesces and leaves
+///   the order untouched, so a harness re-announcing `needs_input` cannot churn
+///   the list.
+/// - **An acknowledged state does not come back.** Acknowledging a pane records
+///   the state the user dismissed; re-reporting that same state is ignored,
+///   exactly as [`cloo_core::pane::Attention::set`] clears acknowledgment only
+///   when the state actually changes. A pane that returns to a non-actionable
+///   state clears that memory, so its next real event alerts again.
+#[derive(Debug, Clone, Default)]
+pub struct AttentionQueue {
+    /// Entries, front = most recent.
+    entries: Vec<QueueEntry>,
+    /// Per pane, the state the user last acknowledged.
+    acked: HashMap<u16, Attention>,
+    /// The keyboard cursor into `entries`.
+    selected: usize,
+}
+
+impl AttentionQueue {
+    /// An empty queue.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records a pane's current attention, applying the coalescing rules.
+    pub fn record(&mut self, index: u16, title: impl Into<String>, attention: Attention) {
+        if !attention.is_actionable() {
+            // The pane is no longer asking for anything: drop it, and forget the
+            // acknowledgment so its next real event is heard fresh.
+            self.remove_pane(index);
+            self.acked.remove(&index);
+            return;
+        }
+        if self.acked.get(&index) == Some(&attention) {
+            // The user dismissed exactly this; a re-report must not refill it.
+            return;
+        }
+        // A state distinct from any acknowledged one is live again.
+        self.acked.remove(&index);
+        match self.position(index) {
+            Some(pos) if self.entries[pos].attention == attention => {
+                // A plain repeat of the same live state: coalesce, keep order.
+            }
+            Some(pos) => {
+                let mut entry = self.entries.remove(pos);
+                entry.attention = attention;
+                entry.title = title.into();
+                self.entries.insert(0, entry);
+            }
+            None => {
+                self.entries.insert(
+                    0,
+                    QueueEntry {
+                        index,
+                        title: title.into(),
+                        attention,
+                    },
+                );
+            }
+        }
+        self.clamp_selection();
+    }
+
+    /// Acknowledges a pane, removing it and remembering what was dismissed.
+    ///
+    /// Returns the pane index when an entry was present, so a caller can pair
+    /// acknowledgment with any follow-up it wants.
+    pub fn acknowledge(&mut self, index: u16) -> Option<u16> {
+        let pos = self.position(index)?;
+        let entry = self.entries.remove(pos);
+        self.acked.insert(index, entry.attention);
+        self.clamp_selection();
+        Some(index)
+    }
+
+    /// Acknowledges the currently selected entry.
+    pub fn acknowledge_selected(&mut self) -> Option<u16> {
+        let index = self.entries.get(self.selected)?.index;
+        self.acknowledge(index)
+    }
+
+    /// Moves the keyboard cursor one entry toward the older end.
+    pub fn select_next(&mut self) {
+        if self.selected + 1 < self.entries.len() {
+            self.selected += 1;
+        }
+    }
+
+    /// Moves the keyboard cursor one entry toward the newer end.
+    pub fn select_prev(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// The currently selected entry, if any.
+    #[must_use]
+    pub fn selected(&self) -> Option<&QueueEntry> {
+        self.entries.get(self.selected)
+    }
+
+    /// The keyboard cursor's position.
+    #[must_use]
+    pub fn selection(&self) -> usize {
+        self.selected
+    }
+
+    /// The pane a focus action would jump to: the selected entry's pane.
+    #[must_use]
+    pub fn focus_target(&self) -> Option<u16> {
+        self.entries.get(self.selected).map(|entry| entry.index)
+    }
+
+    /// The entries, newest first.
+    #[must_use]
+    pub fn entries(&self) -> &[QueueEntry] {
+        &self.entries
+    }
+
+    /// How many panes are waiting on the user. This is the status bar's count.
+    #[must_use]
+    pub fn count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Whether nothing is waiting.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// How many entries sit in each actionable state, in urgency order.
+    #[must_use]
+    pub fn tally(&self) -> [(Attention, usize); 3] {
+        ACTIONABLE.map(|state| {
+            let count = self
+                .entries
+                .iter()
+                .filter(|entry| entry.attention == state)
+                .count();
+            (state, count)
+        })
+    }
+
+    fn position(&self, index: u16) -> Option<usize> {
+        self.entries.iter().position(|entry| entry.index == index)
+    }
+
+    fn remove_pane(&mut self, index: u16) {
+        if let Some(pos) = self.position(index) {
+            self.entries.remove(pos);
+            self.clamp_selection();
+        }
+    }
+
+    fn clamp_selection(&mut self) {
+        let last = self.entries.len().saturating_sub(1);
+        if self.selected > last {
+            self.selected = last;
+        }
+    }
+}
+
+/// A compact attention tally for the always-on status bar.
+///
+/// Renders `<count><glyph>` for each actionable state that has any waiting
+/// panes, in the fixed [`ACTIONABLE`] order and coloured by state, so the count
+/// is never carried by colour alone. An empty queue renders nothing.
+#[must_use]
+pub fn summary_cells(queue: &AttentionQueue) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for (state, count) in queue.tally() {
+        if count == 0 {
+            continue;
+        }
+        if !cells.is_empty() {
+            push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
+        }
+        push_str(
+            &mut cells,
+            &count.to_string(),
+            state.color(),
+            CellAttrs::BOLD,
+        );
+        push_str(
+            &mut cells,
+            &state.glyph().to_string(),
+            state.color(),
+            CellAttrs::NONE,
+        );
+    }
+    cells
+}
+
+/// The summary as a positioned span.
+#[must_use]
+pub fn summary_span(at: Point, queue: &AttentionQueue) -> Span {
+    Span::new(at, summary_cells(queue))
+}
+
+/// One row of the attention queue overlay, exactly `width` cells wide.
+///
+/// A queue row is the pane header's layout applied to an entry: the same fixed
+/// width-degradation order, the same glyph-is-last rule, and the same accent
+/// treatment for the row the keyboard cursor is on — `selected` maps to a
+/// header's focus. Dimming is off, because an overlay row is never a background
+/// pane. Reusing [`header_cells`] is what keeps a queue row and a pane header
+/// visually identical and keeps the exact-width guarantee in one place.
+#[must_use]
+pub fn queue_row_cells(entry: &QueueEntry, selected: bool, width: u16) -> Vec<Cell> {
+    let chrome = PaneChrome::new(entry.index, entry.title.clone())
+        .attention(entry.attention)
+        .focused(selected);
+    header_cells(&chrome, width, ChromeOptions::no_dim())
+}
+
+/// One queue row as a positioned span.
+#[must_use]
+pub fn queue_row_span(at: Point, entry: &QueueEntry, selected: bool, width: u16) -> Span {
+    Span::new(at, queue_row_cells(entry, selected, width))
+}
+
+// ---------------------------------------------------------------------------
+// Toasts
+// ---------------------------------------------------------------------------
+
+/// A transient notice that a pane raised an actionable event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toast {
+    /// The pane the notice is about.
+    pub index: u16,
+    /// The pane's name.
+    pub title: String,
+    /// The state that raised it.
+    pub attention: Attention,
+    /// How many times this pane's event has coalesced into this notice.
+    pub repeats: u32,
+}
+
+/// A bounded, coalescing stack of toasts.
+///
+/// Two rules from the style guide are the whole point: the stack is *bounded*,
+/// so a burst can never grow it without limit, and repeated events from the
+/// same pane *coalesce* into one notice with a repeat count rather than stacking
+/// copies. When a new pane's toast would exceed capacity, the oldest is dropped.
+#[derive(Debug, Clone)]
+pub struct ToastDeck {
+    /// Front = oldest.
+    toasts: VecDeque<Toast>,
+    capacity: usize,
+}
+
+impl ToastDeck {
+    /// A deck holding at most `capacity` toasts (at least one).
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        Self {
+            toasts: VecDeque::new(),
+            capacity: capacity.max(1),
+        }
+    }
+
+    /// Raises or coalesces a toast for a pane.
+    ///
+    /// A pane already showing coalesces: its state and title refresh, its repeat
+    /// count grows, and it moves to the newest position. A new pane pushes onto
+    /// the back, evicting the oldest toast if the deck is full.
+    pub fn push(&mut self, index: u16, title: impl Into<String>, attention: Attention) {
+        if let Some(pos) = self.toasts.iter().position(|toast| toast.index == index) {
+            let mut toast = self.toasts.remove(pos).expect("position just found");
+            toast.title = title.into();
+            toast.attention = attention;
+            toast.repeats = toast.repeats.saturating_add(1);
+            self.toasts.push_back(toast);
+            return;
+        }
+        if self.toasts.len() == self.capacity {
+            self.toasts.pop_front();
+        }
+        self.toasts.push_back(Toast {
+            index,
+            title: title.into(),
+            attention,
+            repeats: 1,
+        });
+    }
+
+    /// Removes a pane's toast, if it has one.
+    pub fn dismiss(&mut self, index: u16) {
+        self.toasts.retain(|toast| toast.index != index);
+    }
+
+    /// The toasts, oldest first.
+    pub fn toasts(&self) -> impl Iterator<Item = &Toast> {
+        self.toasts.iter()
+    }
+
+    /// How many toasts are showing.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.toasts.len()
+    }
+
+    /// Whether the deck is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.toasts.is_empty()
+    }
+
+    /// The most a deck will hold at once.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+}
+
+/// A concise toast line, truncated to `width`.
+///
+/// Renders `<title> <glyph> <label>` with the state coloured and, when the pane
+/// has coalesced more than once, a muted `(xN)` repeat count. Unlike a header it
+/// is not padded to width: a toast floats over the layout rather than owning a
+/// row.
+#[must_use]
+pub fn toast_cells(toast: &Toast, width: u16) -> Vec<Cell> {
+    let width = usize::from(width);
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut cells = Vec::new();
+    push_str(&mut cells, &toast.title, PRIMARY, CellAttrs::NONE);
+    push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
+    push_str(
+        &mut cells,
+        &format!("{} {}", toast.attention.glyph(), toast.attention.label()),
+        toast.attention.color(),
+        CellAttrs::NONE,
+    );
+    if toast.repeats > 1 {
+        push_str(
+            &mut cells,
+            &format!(" (x{})", toast.repeats),
+            MUTED,
+            CellAttrs::NONE,
+        );
+    }
+    cells.truncate(width);
+    cells
+}
+
+/// A toast as a positioned span.
+#[must_use]
+pub fn toast_span(at: Point, toast: &Toast, width: u16) -> Span {
+    Span::new(at, toast_cells(toast, width))
 }
 
 #[cfg(test)]
@@ -750,5 +1154,310 @@ mod tests {
         let span = header_span(Point::new(10, 4), &pane, 12, ChromeOptions::default());
         assert_eq!(span.at, Point::new(10, 4));
         assert_eq!(span.cells.len(), 12);
+    }
+
+    // -- Attention queue --------------------------------------------------
+
+    /// The pane indices in the queue, newest first.
+    fn order(queue: &AttentionQueue) -> Vec<u16> {
+        queue.entries().iter().map(|entry| entry.index).collect()
+    }
+
+    #[test]
+    fn only_actionable_states_enter_the_queue() {
+        let mut queue = AttentionQueue::new();
+        for state in [Attention::Unknown, Attention::Working, Attention::Quiet] {
+            queue.record(1, "sh", state);
+        }
+        assert!(queue.is_empty(), "progress and no-news are not queued");
+        for state in [Attention::NeedsInput, Attention::Ready, Attention::Failed] {
+            assert!(state.is_actionable(), "{state:?} must be queued");
+        }
+    }
+
+    #[test]
+    fn the_queue_lists_newest_first() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::Ready);
+        queue.record(3, "c", Attention::Failed);
+        assert_eq!(order(&queue), vec![3, 2, 1]);
+        assert_eq!(queue.count(), 3);
+    }
+
+    #[test]
+    fn a_repeat_of_the_same_state_coalesces_without_reordering() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::Ready);
+        // Pane 1 re-announces the same state every tick.
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(1, "a", Attention::NeedsInput);
+        assert_eq!(
+            order(&queue),
+            vec![2, 1],
+            "a repeat must not churn the list"
+        );
+        assert_eq!(queue.count(), 2);
+    }
+
+    #[test]
+    fn a_changed_state_moves_the_pane_to_the_front() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::Ready);
+        queue.record(1, "a", Attention::Failed);
+        assert_eq!(order(&queue), vec![1, 2], "a new event is the newest");
+        assert_eq!(queue.entries()[0].attention, Attention::Failed);
+    }
+
+    #[test]
+    fn acknowledging_removes_a_pane_and_blocks_the_same_state_returning() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        assert_eq!(queue.acknowledge(1), Some(1));
+        assert!(queue.is_empty());
+        // The harness keeps announcing needs_input; the user already cleared it.
+        queue.record(1, "a", Attention::NeedsInput);
+        assert!(
+            queue.is_empty(),
+            "an acknowledged state must not refill the queue"
+        );
+    }
+
+    #[test]
+    fn a_different_state_after_acknowledgment_alerts_again() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.acknowledge(1);
+        queue.record(1, "a", Attention::Failed);
+        assert_eq!(order(&queue), vec![1], "a genuinely new event is heard");
+    }
+
+    #[test]
+    fn returning_to_a_quiet_state_forgets_the_acknowledgment() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.acknowledge(1);
+        // The pane finishes and later needs input again: a fresh event.
+        queue.record(1, "a", Attention::Quiet);
+        queue.record(1, "a", Attention::NeedsInput);
+        assert_eq!(
+            order(&queue),
+            vec![1],
+            "a lull resets the slate for the next real event"
+        );
+    }
+
+    #[test]
+    fn a_pane_leaving_the_queue_drops_its_entry() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::Ready);
+        queue.record(1, "a", Attention::Working);
+        assert_eq!(order(&queue), vec![2], "working is not an ask");
+    }
+
+    #[test]
+    fn navigation_and_focus_track_the_selected_entry() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::Ready);
+        queue.record(3, "c", Attention::Failed);
+        // Order is [3, 2, 1]; the cursor starts at the newest.
+        assert_eq!(queue.focus_target(), Some(3));
+        queue.select_next();
+        assert_eq!(queue.focus_target(), Some(2));
+        queue.select_next();
+        queue.select_next();
+        assert_eq!(queue.focus_target(), Some(1), "selection clamps at the end");
+        queue.select_prev();
+        assert_eq!(queue.focus_target(), Some(2));
+    }
+
+    #[test]
+    fn acknowledge_selected_clears_the_cursor_entry() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::Ready);
+        // Order [2, 1]; cursor on 2.
+        assert_eq!(queue.acknowledge_selected(), Some(2));
+        assert_eq!(order(&queue), vec![1]);
+    }
+
+    // -- Summary rendering ------------------------------------------------
+
+    #[test]
+    fn the_summary_tallies_each_state_with_a_glyph_and_colour() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::NeedsInput);
+        queue.record(2, "b", Attention::NeedsInput);
+        queue.record(3, "c", Attention::Failed);
+        let cells = summary_cells(&queue);
+        // Fixed urgency order: needs_input, then failed.
+        assert_eq!(text_of(&cells), "2! 1x");
+        assert_eq!(fg_of(&cells, '!'), Attention::NeedsInput.color());
+        assert_eq!(fg_of(&cells, 'x'), Attention::Failed.color());
+    }
+
+    #[test]
+    fn an_empty_queue_summarises_to_nothing() {
+        assert!(summary_cells(&AttentionQueue::new()).is_empty());
+    }
+
+    #[test]
+    fn a_summary_span_sits_where_it_is_placed() {
+        let mut queue = AttentionQueue::new();
+        queue.record(1, "a", Attention::Ready);
+        let span = summary_span(Point::new(3, 0), &queue);
+        assert_eq!(span.at, Point::new(3, 0));
+        assert!(!span.cells.is_empty());
+    }
+
+    // -- Queue row rendering ----------------------------------------------
+
+    #[test]
+    fn every_actionable_state_renders_text_glyph_and_colour_in_a_row() {
+        for state in [Attention::NeedsInput, Attention::Ready, Attention::Failed] {
+            // A title free of any state glyph, so the glyph lookup is unambiguous.
+            let entry = QueueEntry {
+                index: 2,
+                title: "agent".into(),
+                attention: state,
+            };
+            let row = queue_row_cells(&entry, false, wide());
+            let text = text_of(&row);
+            assert!(
+                text.contains(state.glyph()) && text.contains(state.label()),
+                "{state:?} rendered as {text:?}"
+            );
+            assert_eq!(
+                fg_of(&row, state.glyph()),
+                state.color(),
+                "{state:?} keeps its semantic colour"
+            );
+        }
+    }
+
+    #[test]
+    fn a_selected_row_wears_the_cursor_marker_and_an_unselected_one_does_not() {
+        let entry = QueueEntry {
+            index: 3,
+            title: "claude".into(),
+            attention: Attention::NeedsInput,
+        };
+        let selected = queue_row_cells(&entry, true, wide());
+        let plain = queue_row_cells(&entry, false, wide());
+        assert!(text_of(&selected).starts_with('>'), "the cursor is visible");
+        assert!(!text_of(&plain).starts_with('>'));
+        assert_eq!(fg_of(&selected, 'c'), ACCENT, "the selected title accents");
+    }
+
+    #[test]
+    fn a_queue_row_is_exactly_the_width_at_every_size() {
+        let entry = QueueEntry {
+            index: 12,
+            title: "claude-code".into(),
+            attention: Attention::Failed,
+        };
+        for width in 0_u16..=40 {
+            assert_eq!(
+                queue_row_cells(&entry, true, width).len(),
+                usize::from(width)
+            );
+        }
+    }
+
+    #[test]
+    fn a_queue_row_span_carries_its_origin() {
+        let entry = QueueEntry {
+            index: 1,
+            title: "sh".into(),
+            attention: Attention::Ready,
+        };
+        let span = queue_row_span(Point::new(5, 7), &entry, false, 20);
+        assert_eq!(span.at, Point::new(5, 7));
+        assert_eq!(span.cells.len(), 20);
+    }
+
+    // -- Toasts -----------------------------------------------------------
+
+    #[test]
+    fn a_toast_deck_is_bounded_and_evicts_the_oldest() {
+        let mut deck = ToastDeck::new(2);
+        deck.push(1, "a", Attention::NeedsInput);
+        deck.push(2, "b", Attention::Ready);
+        deck.push(3, "c", Attention::Failed);
+        assert_eq!(deck.len(), 2, "capacity is never exceeded");
+        let indices: Vec<u16> = deck.toasts().map(|toast| toast.index).collect();
+        assert_eq!(indices, vec![2, 3], "the oldest was dropped");
+    }
+
+    #[test]
+    fn a_repeat_toast_coalesces_and_moves_to_the_newest() {
+        let mut deck = ToastDeck::new(3);
+        deck.push(1, "a", Attention::NeedsInput);
+        deck.push(2, "b", Attention::Ready);
+        deck.push(1, "a", Attention::Failed);
+        assert_eq!(deck.len(), 1 + 1, "a repeat is one notice, not two");
+        let toasts: Vec<&Toast> = deck.toasts().collect();
+        assert_eq!(toasts[0].index, 2, "the untouched toast is now oldest");
+        assert_eq!(toasts[1].index, 1);
+        assert_eq!(toasts[1].repeats, 2);
+        assert_eq!(toasts[1].attention, Attention::Failed, "state refreshes");
+    }
+
+    #[test]
+    fn a_zero_capacity_deck_still_holds_one() {
+        let mut deck = ToastDeck::new(0);
+        deck.push(1, "a", Attention::NeedsInput);
+        assert_eq!(deck.len(), 1);
+    }
+
+    #[test]
+    fn dismissing_removes_a_panes_toast() {
+        let mut deck = ToastDeck::new(3);
+        deck.push(1, "a", Attention::NeedsInput);
+        deck.push(2, "b", Attention::Ready);
+        deck.dismiss(1);
+        let indices: Vec<u16> = deck.toasts().map(|toast| toast.index).collect();
+        assert_eq!(indices, vec![2]);
+    }
+
+    #[test]
+    fn a_toast_line_carries_text_glyph_colour_and_a_repeat_count() {
+        let toast = Toast {
+            index: 2,
+            title: "codex".into(),
+            attention: Attention::NeedsInput,
+            repeats: 3,
+        };
+        let cells = toast_cells(&toast, 40);
+        let text = text_of(&cells);
+        assert_eq!(text, "codex ! needs input (x3)");
+        assert_eq!(fg_of(&cells, '!'), Attention::NeedsInput.color());
+    }
+
+    #[test]
+    fn a_single_toast_omits_the_repeat_count() {
+        let toast = Toast {
+            index: 1,
+            title: "sh".into(),
+            attention: Attention::Ready,
+            repeats: 1,
+        };
+        assert_eq!(text_of(&toast_cells(&toast, 40)), "sh + ready");
+    }
+
+    #[test]
+    fn a_toast_is_truncated_to_width_rather_than_padded() {
+        let toast = Toast {
+            index: 1,
+            title: "sh".into(),
+            attention: Attention::Ready,
+            repeats: 1,
+        };
+        assert_eq!(toast_cells(&toast, 4).len(), 4);
+        assert!(toast_cells(&toast, 0).is_empty());
     }
 }

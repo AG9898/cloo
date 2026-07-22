@@ -334,6 +334,26 @@ covers:
 - Dimming a 24-bit cell by blending rather than by stacking `DIM`, and a palette index dimming with
   the attribute rather than a guess at the user's colour.
 
+M2-10 adds the attention summary, queue, and toast deck to the same file, tested as pure functions
+into cells and into deterministic model state:
+
+- The queue's ordering and coalescing, which are what "deterministic" means here: only the three
+  actionable states enter, entries list newest-first, a repeat of the same live state coalesces
+  without churning the order, a changed state moves its pane to the front, an acknowledged state
+  cannot refill the queue while a genuinely different one alerts again, and a pane returning to a
+  quiet state resets the slate so its next real event is heard.
+- Keyboard navigation and the focus/acknowledge actions: the cursor walking and clamping, the focus
+  target following the selection, and acknowledging the selected entry removing exactly it.
+- The status-bar summary tallying each present state with its glyph and colour in a fixed urgency
+  order, and every actionable state rendering text, glyph, and colour in a queue row that is exactly
+  the width at every size — reusing the header's degradation ladder.
+- The toast deck being bounded (the oldest evicted at capacity, and a zero request still holding
+  one) and coalescing per pane (a repeat becoming one notice with a growing count, moved to newest),
+  plus a toast line carrying text, glyph, colour, and a `(xN)` count only when it repeated.
+
+`src/input.rs` gains the queue's keyboard vocabulary: the conventional bindings mapping to `Next`,
+`Prev`, `Focus`, `Acknowledge`, and `Dismiss`, and an unbound key mapping to nothing.
+
 `src/renderer.rs` gained the positioned `Span` that chrome is painted from: a span drawn at its own
 origin, each span restating its style absolutely so a second one cannot inherit the first's, an
 empty span moving nothing, and spans never clearing the outer terminal.
@@ -411,7 +431,8 @@ The intended shape for the rest, in the order it becomes testable:
   to signal. `SIGWINCH` went the same way at M1-03, for the same reason: a library test that
   signals itself signals the test runner. Incremental row diffing and its byte-exact renderer
   coverage landed with damage coalescing at M1-04, and pane chrome — headers, focus, attention, and
-  dimming — at M2-03.
+  dimming — at M2-03, extended at M2-10 with the attention summary, queue, and toast deck and their
+  keyboard actions, all pure and testable without a terminal.
 
 ### Agent-harness compatibility
 
@@ -458,13 +479,13 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, exit-frame detection, and pane identity and attention each resent only when they change rather than on every damaged row |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling, cursor placement, and grid apply/resize rejections |
-| `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, and dimming by blend with a no-dim fallback |
+| `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, and dimming by blend with a no-dim fallback; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck |
 | `crates/cloo-client/src/effects.rs` | Outer-terminal effects | Default-deny client policy, exact title and OSC 52 rendering, capability checks, safe suppression, and base64 padding |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
 | `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
 | `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, `TermCaps` round-tripping over the handshake, an unresolvable `TERM` surfacing as a capability failure, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
-| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, and the three mouse-ownership rules |
+| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, the three mouse-ownership rules, and the attention-queue key bindings mapping to their actions with an unbound key mapping to none |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/cli.rs` | Binary | The command line as a pure function: every launch option read, options stopping at the program so `sh -c` keeps its own flags, `--` for a program that looks like a flag, an unknown or repeated flag refused, `--profile` and a program refused together, and resolution — a named or configured profile with its defaults, the user's name/task/directory winning, an unknown profile naming the ones that exist, a program running as a generic pane named for itself, a relative directory resolved and a tilde refused, and a control character in a name or task refused |

@@ -112,6 +112,25 @@ share one overlay language: dim the background, retain a clear selected row, pro
 hints, and dismiss with Escape. Toasts are concise, stack in a bounded queue, and never cover a
 focused harness input indefinitely. Coalesce repeated events from the same pane.
 
+The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
+contract concrete:
+
+- **Summary.** The status bar's attention count is `summary_cells`: a `<count><glyph>` group per
+  actionable state that has waiting panes, coloured by state, in the fixed urgency order
+  `needs_input`, `failed`, `ready`. The count is text and the glyph is a shape, so the tally never
+  rests on colour alone; an empty queue renders nothing.
+- **Queue.** `AttentionQueue` holds the newest unacknowledged actionable event per pane —
+  `needs_input`, `ready`, or `failed`; progress and the absence of news never enter. Its order is
+  deterministic: newest first, a repeat of the same live state coalesces in place, a changed state
+  moves its pane to the front, and an acknowledged state does not return until the pane's state
+  actually changes (a lull resets that memory). A queue row reuses the pane header's exact-width
+  degradation ladder, so a row and a header look identical and the selected row wears the same
+  accent a focused pane does. The keyboard drives it through `input::queue_action`: navigate,
+  focus the selected pane, acknowledge, or dismiss.
+- **Toasts.** `ToastDeck` is bounded and coalesces per pane — a repeated event becomes one notice
+  with a growing `(xN)` count moved to newest, and a new pane's toast evicts the oldest when the
+  deck is full, so a burst can never grow the stack without limit.
+
 ## Density and Accessibility
 
 Many agent panes make space scarce. cloo must offer pane zoom and compact chrome before hiding
