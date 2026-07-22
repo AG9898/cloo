@@ -347,6 +347,12 @@ named palette supplies every style-guide token, Storm is pinned to the handoff v
 terminal-palette theme emits basic ANSI semantic colours rather than RGB or 256-colour guesses.
 The chrome fixture proves focus's `>` and attention's `!` remain textually and colour-wise distinct
 without truecolor.
+M5-02 adds the client half of copy mode in `cloo-client/src/copy_mode.rs` — selection, match, and
+cursor spans painted from the grid cache with that cache asserted unchanged, role precedence with
+each role distinct by attribute as well as colour, off-viewport positions dropped rather than
+clamped, the status row exactly its width at every width, and a denied clipboard policy that
+writes nothing and does not even send the request — plus the explicit copy through the actor in
+`cloo-server/tests/session.rs` and the whole loop end to end in `crates/cloo/tests/attach.rs`.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -753,3 +759,19 @@ copy state on its own wire clock so reattachment cannot turn a client cache into
 pay for thousands of history snapshots even when no client entered copy mode. Check for an active
 search first; `crates/cloo/tests/attach.rs`'s burst fixture catches this regression by timing out
 before its final marker otherwise.
+
+### 2026-07-22 — A client cannot place a scrollback position without being told the viewport
+Copy-mode positions are absolute in server-owned history while a client caches only the visible
+grid, so `CopyModeState` carries `viewport_top` (handshake v7) — the retained line drawn on the
+pane's first row — and every highlight is computed in retained-line coordinates rather than by
+guessing an offset. Never clamp an off-screen position onto the nearest visible row: that
+highlights text the user did not select, and the test that catches it selects across a line that
+has already scrolled out.
+
+### 2026-07-22 — An explicit copy is answered to one client, not broadcast
+`Action::CopySelection` is handled in the *socket* task rather than the daemon coordinator, so the
+resulting `ClipboardStore` reaches only the terminal whose user pressed the key — fanning it out
+through the damage broadcast would store one user's selection in every attached clipboard. The
+client-side gate runs before the request too: `EffectPolicy::permits_clipboard` decides whether to
+ask at all, so a client that would refuse the store never makes the server put scrollback on the
+wire.

@@ -216,6 +216,12 @@ moves the same cursor, and a malformed regex is a clean reply that leaves the pr
 The burst-output attach fixture also proves that an inactive copy surface does not traverse
 scrollback on every PTY read.
 
+M5-02 adds the explicit copy to the same file: a selection made over a line that has already
+scrolled into history is returned as a typed `ClipboardStore` naming the pane it came from, the
+projected `viewport_top` is proved to contain the cursor the server just revealed, the snapshot is
+identical before and after so a copy is shown to mutate nothing, and a cleared selection yields
+`None` rather than an empty clipboard store.
+
 Both geometry halves were confirmed non-vacuous the way `AGENTS.md` prescribes: breaking the
 post-split layout pass fails three of these tests, and the survivor's regrowth has no second path
 to pass by. The rollback a failed spawn depends on cannot be reached from here — the session's
@@ -319,6 +325,16 @@ one worth keeping honest: a child that enabled neither focus reporting nor mouse
 both and then four typed bytes, and it must read exactly those four. Those children run under
 `stty -echo -icanon` — without `-icanon` a report with no newline in it is never delivered at all,
 and the test hangs rather than failing.
+
+Copy-mode rendering (M5-02) is covered the same way, at both ends. The *client* half is pure and
+unit tested in `cloo-client::copy_mode`: spans are built from the grid cache and the cache is
+compared against a clone taken before the call, because "a selection does not mutate the grid" is
+exactly the property a lazy implementation breaks. The end-to-end fixture in
+`crates/cloo/tests/attach.rs` drives copy mode over the wire, applies every damage frame into a
+real client `Grid` — starting with the attach snapshot, or the cache is empty and the highlight
+assertion passes on blanks — and then asserts the selected text is what the highlight covers and
+that the copy's OSC 52 bytes are written under a permitting policy and not written at all under
+the default one.
 
 The `SIGWINCH` end of the same path is covered from `crates/cloo/tests/cli.rs`, because the signal
 has to be delivered to a *process*: the test resizes the outer pseudoterminal, sends the real
@@ -539,6 +555,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, and grid apply/resize rejections |
 | `crates/cloo-client/src/theme.rs` | Theme resolution | Named theme RGB tokens, deliberate ANSI semantic fallback below truecolor, and outer-terminal palette inheritance |
 | `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck; plus the always-on status row's session, active tab, attention, and prefix forms yielding to ASCII markers |
+| `crates/cloo-client/src/copy_mode.rs` | Copy-mode rendering | Selection, match, and cursor spans painted from the grid cache with the cache asserted unchanged, role precedence with each role distinct by attribute as well as colour, positions outside the viewport dropped rather than clamped, the status row exactly its width at every width in one fixed degradation order, and the explicit copy: a denied policy or an incapable terminal writing nothing and not even sending the request, a permitted one writing exact OSC 52, and a non-clipboard effect refused on the copy path |
 | `crates/cloo-client/src/effects.rs` | Outer-terminal effects | Default-deny client policy, exact title and OSC 52 rendering, capability checks, safe suppression, and base64 padding |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
@@ -550,7 +567,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo/src/cli.rs` | Binary | The command line as a pure function: every launch option read, options stopping at the program so `sh -c` keeps its own flags, `--` for a program that looks like a flag, an unknown or repeated flag refused, `--profile` and a program refused together, and resolution — a named or configured profile with its defaults, the user's name/task/directory winning, an unknown profile naming the ones that exist, a program running as a generic pane named for itself, a relative directory resolved and a tilde refused, and a control character in a name or task refused |
 | `crates/cloo/src/local.rs` | Binary | The frame-rate cap |
 | `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, a `SIGWINCH` resizing the pane all the way down to the child's own pty, and the launch surface end to end: the help naming the options and the built-in profiles, an unknown profile and a control-character task label refused as usage errors, a `CLOO_CONFIG` profile resolved before terminal setup, and a profile whose program is missing failing with a message that names it |
-| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and clients over real sockets: hello and snapshot, detach leaving the child alive and its state intact, then reattaching and reaping it after exit; a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, bounded burst damage with lagged-client recovery, concurrent-client fan-out, a typed OSC 52 effect reaching a capable, permitted client once, and a resync telling a client who every pane is — profile, name, task label, and working directory; plus input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not |
+| `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and clients over real sockets: hello and snapshot, detach leaving the child alive and its state intact, then reattaching and reaping it after exit; a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, bounded burst damage with lagged-client recovery, concurrent-client fan-out, a typed OSC 52 effect reaching a capable, permitted client once, and a resync telling a client who every pane is — profile, name, task label, and working directory; plus input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not; plus copy mode end to end: copy-mode actions reaching the session over the wire, the projected copy state turning into highlight spans over the client's own damage-applied grid cache without changing it, and the explicit copy returning one typed clipboard store that the default policy refuses byte for byte and a permitting one writes |
 
 ---
 

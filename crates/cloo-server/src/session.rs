@@ -198,6 +198,20 @@ pub enum Command {
     },
     /// Moves to another result of the active copy-mode search.
     NextCopyMatch(SearchDirection),
+    /// Extracts the focused pane's copy-mode selection as a typed clipboard
+    /// effect for the one client that asked.
+    ///
+    /// It replies rather than broadcasting: a copy is one user's explicit act
+    /// on one terminal, and fanning the text out would store one client's
+    /// selection in every attached terminal's clipboard. Reading a selection
+    /// changes no session state at all.
+    CopySelection {
+        /// Which clipboard the user asked for.
+        target: ClipboardTarget,
+        /// The pane copied from and the effect to apply, or `None` when
+        /// nothing is selected.
+        reply: oneshot::Sender<Option<(PaneId, OuterTerminalEffect)>>,
+    },
     /// Asks for the current picture. The reply channel is how a reader gets
     /// state out without holding a reference to it.
     Snapshot(oneshot::Sender<SessionSnapshot>),
@@ -695,6 +709,25 @@ impl SessionHandle {
         self.send(Command::NextCopyMatch(direction)).await
     }
 
+    /// Reads the focused pane's copy-mode selection as a typed clipboard
+    /// effect, for the caller to hand to exactly one client.
+    ///
+    /// `None` means there was nothing selected to copy — an ordinary answer,
+    /// not a failure. The caller still applies its own policy and capability
+    /// gate before anything reaches a terminal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task ended before replying.
+    pub async fn copy_selection(
+        &self,
+        target: ClipboardTarget,
+    ) -> Result<Option<(PaneId, OuterTerminalEffect)>, SessionGone> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::CopySelection { target, reply }).await?;
+        answer.await.map_err(|_| SessionGone)
+    }
+
     /// Asks for the current picture.
     ///
     /// # Errors
@@ -1063,6 +1096,12 @@ impl Session {
                 if self.next_copy_match(direction) {
                     self.notify(SessionEvent::Output);
                 }
+                Ok(())
+            }
+            Command::CopySelection { target, reply } => {
+                // A read, so nothing is notified: copying does not move the
+                // cursor, clear the selection, or change a single grid cell.
+                let _ = reply.send(self.copy_selection(target));
                 Ok(())
             }
             Command::Snapshot(reply) => {
@@ -1488,6 +1527,28 @@ impl Session {
         changed
     }
 
+    /// Extracts the focused pane's selection as a typed clipboard effect.
+    ///
+    /// The selection is read out of retained scrollback, which is why this
+    /// answer can only come from here: a client caches the visible grid alone
+    /// and a selection routinely reaches above it. Nothing is mutated, and an
+    /// empty selection produces no effect rather than an empty clipboard store.
+    fn copy_selection(&self, target: ClipboardTarget) -> Option<(PaneId, OuterTerminalEffect)> {
+        let pane = self.focused();
+        let (lines, columns) = self.copy_text(pane)?;
+        let text = self
+            .panes
+            .iter()
+            .find(|held| held.id == pane)?
+            .copy_mode
+            .as_ref()?
+            .selected_text(&lines, columns)?;
+        if text.is_empty() {
+            return None;
+        }
+        Some((pane, OuterTerminalEffect::ClipboardStore { target, text }))
+    }
+
     /// The complete retained text and terminal width for one pane, captured
     /// before copy-mode mutation borrows it mutably.
     fn copy_text(&self, pane: PaneId) -> Option<(Vec<String>, u16)> {
@@ -1673,12 +1734,16 @@ impl Session {
     /// any mutable handle to scrollback or the selection itself.
     fn copy_mode_state(&self) -> Option<CopyModeState> {
         let pane = self.focused();
-        let copy_mode = self
-            .panes
-            .iter()
-            .find(|held| held.id == pane)?
-            .copy_mode
-            .as_ref()?;
+        let held = self.panes.iter().find(|held| held.id == pane)?;
+        let copy_mode = held.copy_mode.as_ref()?;
+        // The client caches only the visible grid, so it needs the retained
+        // line its first row is showing to place any of the positions below.
+        // Both halves come from this one borrow, which is what stops a
+        // highlight from being placed against a viewport it never described.
+        let emulator = held.reactor.emulator();
+        let viewport_top = emulator
+            .scrollback_len()
+            .saturating_sub(emulator.scroll_offset());
         let selection = copy_mode.selection().map(|selection| WireCopySelection {
             anchor: wire_scroll_point(selection.anchor),
             head: wire_scroll_point(selection.head),
@@ -1701,6 +1766,7 @@ impl Session {
         );
         Some(CopyModeState {
             pane,
+            viewport_top: u32::try_from(viewport_top).unwrap_or(u32::MAX),
             cursor: wire_scroll_point(copy_mode.cursor()),
             selection,
             query,

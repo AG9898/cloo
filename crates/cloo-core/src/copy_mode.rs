@@ -94,6 +94,38 @@ pub enum CopyMotion {
     LastLine,
 }
 
+/// Converts a client's wire motion into the model's own.
+///
+/// `cloo-core` owns this the way it owns the cell and mode conversions: the
+/// wire vocabulary and the model vocabulary are deliberately separate types, so
+/// a protocol change cannot silently redefine a motion the layout model runs.
+impl From<cloo_proto::CopyMotion> for CopyMotion {
+    fn from(motion: cloo_proto::CopyMotion) -> Self {
+        match motion {
+            cloo_proto::CopyMotion::Left => Self::Left,
+            cloo_proto::CopyMotion::Down => Self::Down,
+            cloo_proto::CopyMotion::Up => Self::Up,
+            cloo_proto::CopyMotion::Right => Self::Right,
+            cloo_proto::CopyMotion::WordForward => Self::WordForward,
+            cloo_proto::CopyMotion::WordBackward => Self::WordBackward,
+            cloo_proto::CopyMotion::LineStart => Self::LineStart,
+            cloo_proto::CopyMotion::LineEnd => Self::LineEnd,
+            cloo_proto::CopyMotion::FirstLine => Self::FirstLine,
+            cloo_proto::CopyMotion::LastLine => Self::LastLine,
+        }
+    }
+}
+
+/// Converts a client's wire search direction into the model's own.
+impl From<cloo_proto::SearchDirection> for SearchDirection {
+    fn from(direction: cloo_proto::SearchDirection) -> Self {
+        match direction {
+            cloo_proto::SearchDirection::Forward => Self::Forward,
+            cloo_proto::SearchDirection::Backward => Self::Backward,
+        }
+    }
+}
+
 /// A validated regex search and its current result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchState {

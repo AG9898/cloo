@@ -167,6 +167,12 @@ then lets every client apply its own default-deny policy: titles require title p
 standalone renderer stay suppressed, so a harness cannot alter the outer terminal by emitting a
 control string.
 
+M5-02 routes the user's own copy through that same gate rather than around it. A copy in
+copy mode is an explicit `Action`, answered privately to the one client that asked with an
+ordinary `ClipboardStore` effect; a client whose policy or terminal cannot store a clipboard
+writes nothing and never asks for the text, so a harness pane's scrollback is not put on the wire
+for a terminal that would discard it.
+
 Claude Code documents that tmux needs extended keys and passthrough for some of its terminal
 features; cloo's required and negotiated tiers cover the equivalent responsibilities. Codex
 documents that its terminal pets need graphics support and are unavailable inside tmux and Zellij;

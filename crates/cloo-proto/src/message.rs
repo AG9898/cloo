@@ -445,6 +445,13 @@ pub struct SearchMatch {
 pub struct CopyModeState {
     /// Pane whose retained scrollback the state addresses.
     pub pane: PaneId,
+    /// Retained line currently drawn on the pane's first visible row.
+    ///
+    /// Every other position here is absolute in server-owned history, and a
+    /// client holds only the visible grid. This is the one number that maps the
+    /// two together, so a highlight lands on the row the text is actually on
+    /// rather than on the row a client guessed.
+    pub viewport_top: u32,
     /// Current copy cursor.
     pub cursor: ScrollPoint,
     /// Live visual selection, if any.
@@ -584,6 +591,43 @@ pub enum CursorShape {
     Underline,
 }
 
+/// One vim-like copy-mode cursor motion.
+///
+/// Named after the key a default keymap binds it to, because the *motion* is
+/// the intent and the key is not: a rebound `h` still means "one cell left".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CopyMotion {
+    /// One cell left.
+    Left,
+    /// One line down.
+    Down,
+    /// One line up.
+    Up,
+    /// One cell right.
+    Right,
+    /// To the start of the next word.
+    WordForward,
+    /// To the start of the previous word.
+    WordBackward,
+    /// To the first column.
+    LineStart,
+    /// To the last occupied column.
+    LineEnd,
+    /// To the oldest retained line.
+    FirstLine,
+    /// To the newest retained line.
+    LastLine,
+}
+
+/// Which way a copy-mode search walks its results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SearchDirection {
+    /// Toward newer retained lines.
+    Forward,
+    /// Toward older retained lines.
+    Backward,
+}
+
 /// A bound command, resolved by the client's keymap and sent by name.
 ///
 /// The client sends the *intent*, never the raw key. This is what keeps keymap
@@ -616,6 +660,38 @@ pub enum Action {
     PrevTab,
     /// Rename the active tab.
     RenameTab(String),
+    /// Enter copy mode on the focused pane.
+    ///
+    /// Copy mode is session state, not a client mode: the scrollback it moves
+    /// through belongs to the server, and a second client attaching finds the
+    /// same cursor, selection, and search.
+    EnterCopyMode,
+    /// Leave copy mode and resume following live output.
+    ExitCopyMode,
+    /// Move the copy cursor.
+    CopyMotion(CopyMotion),
+    /// Begin a visual selection at the copy cursor.
+    BeginCopySelection,
+    /// Drop the visual selection without moving the copy cursor.
+    ClearCopySelection,
+    /// Run a regex over the focused pane's retained scrollback.
+    CopySearch {
+        /// The user's regex text, compiled by the server.
+        query: String,
+        /// Which way to enter the result set.
+        direction: SearchDirection,
+    },
+    /// Visit another result of the active copy-mode search.
+    NextCopyMatch(SearchDirection),
+    /// Copy the focused pane's copy-mode selection to a clipboard target.
+    ///
+    /// Explicit by construction. Selected text is server-owned scrollback, so
+    /// it crosses the wire only when a user asks for it, and it comes back as a
+    /// typed [`OuterTerminalEffect::ClipboardStore`] to the one client that
+    /// asked — never as a broadcast, which would put one user's selection in
+    /// every attached terminal's clipboard. That client's own policy and
+    /// capabilities are still the final gate.
+    CopySelection(ClipboardTarget),
     /// Detach this client, leaving the session running.
     DetachClient,
 }

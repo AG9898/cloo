@@ -4,7 +4,7 @@
 //! session state. **All chrome is rendered here**, which is why theming never
 //! touches the server.
 //!
-//! Nine modules today:
+//! Ten modules today:
 //!
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
@@ -24,6 +24,8 @@
 //!   decoder that splits its byte stream back into typed events, the rule that
 //!   decides whether a mouse event is chrome's or the application's, and the
 //!   keyboard actions that drive the attention queue overlay.
+//! - [`copy_mode`] — highlights and the status row for server-owned copy mode,
+//!   plus the explicit, policy-gated OSC 52 copy.
 //! - [`effects`] — client-local policy and safe rendering for allowlisted
 //!   outer-terminal effects.
 //! - [`attach`] — connecting to a daemon, the versioned handshake, and
@@ -37,6 +39,7 @@
 pub mod attach;
 pub mod capabilities;
 pub mod chrome;
+pub mod copy_mode;
 pub mod effects;
 pub mod input;
 pub mod outer;
@@ -55,6 +58,10 @@ pub use chrome::{
     ToastDeck, dim_cell, dim_cell_with_theme, dim_cells, header_cells, header_span,
     queue_row_cells, queue_row_span, status_bar_cells, status_bar_span, summary_cells,
     summary_span, tab_row_cells, tab_row_span, toast_cells, toast_span,
+};
+pub use copy_mode::{
+    Highlight, apply_copy, copy_request, highlight_spans, status_cells as copy_status_cells,
+    status_span as copy_status_span, viewport_row,
 };
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{

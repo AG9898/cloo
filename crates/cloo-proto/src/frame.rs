@@ -20,7 +20,7 @@ use crate::error::ProtoError;
 /// **Bump this on every change to a type in [`crate::message`].** A stale client
 /// attached to a rebuilt server is a routine occurrence, and a clean "version
 /// mismatch, reattach" beats a desync that presents as a rendering bug.
-pub const PROTOCOL_VERSION: u16 = 6;
+pub const PROTOCOL_VERSION: u16 = 7;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -126,10 +126,11 @@ mod tests {
     use crate::ids::{PaneId, SessionId, TabId};
     use crate::message::{
         Action, AttentionSource, AttentionState, Cell, CellAttrs, ClientMessage, ClipboardTarget,
-        Color, CopyModeState, CopySelection, CursorShape, GraphicsEffect, LayoutSnapshot,
-        MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, OuterTerminalEffect,
-        PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState, RowUpdate, ScrollPoint,
-        SearchMatch, ServerMessage, Size, TabSummary, TermCaps,
+        Color, CopyModeState, CopyMotion, CopySelection, CursorShape, GraphicsEffect,
+        LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
+        OuterTerminalEffect, PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState,
+        RowUpdate, ScrollPoint, SearchDirection, SearchMatch, ServerMessage, Size, TabSummary,
+        TermCaps,
     };
 
     /// Encodes, decodes, and asserts the value survives unchanged.
@@ -246,6 +247,19 @@ mod tests {
             ClientMessage::Command(Action::NextTab),
             ClientMessage::Command(Action::PrevTab),
             ClientMessage::Command(Action::RenameTab("agents".into())),
+            ClientMessage::Command(Action::EnterCopyMode),
+            ClientMessage::Command(Action::ExitCopyMode),
+            ClientMessage::Command(Action::CopyMotion(CopyMotion::WordForward)),
+            ClientMessage::Command(Action::CopyMotion(CopyMotion::LastLine)),
+            ClientMessage::Command(Action::BeginCopySelection),
+            ClientMessage::Command(Action::ClearCopySelection),
+            ClientMessage::Command(Action::CopySearch {
+                query: "error.*retry".into(),
+                direction: SearchDirection::Backward,
+            }),
+            ClientMessage::Command(Action::NextCopyMatch(SearchDirection::Forward)),
+            ClientMessage::Command(Action::CopySelection(ClipboardTarget::Clipboard)),
+            ClientMessage::Command(Action::CopySelection(ClipboardTarget::PrimarySelection)),
             ClientMessage::Command(Action::DetachClient),
         ]
     }
@@ -363,6 +377,7 @@ mod tests {
             ServerMessage::Attention(Vec::new()),
             ServerMessage::CopyMode(Some(CopyModeState {
                 pane: PaneId::new(4),
+                viewport_top: 8,
                 cursor: ScrollPoint::new(12, 3),
                 selection: Some(CopySelection {
                     anchor: ScrollPoint::new(10, 1),
@@ -426,6 +441,7 @@ mod tests {
         });
         round_trip(&CopyModeState {
             pane: PaneId::new(11),
+            viewport_top: 0,
             cursor: ScrollPoint::new(2, 3),
             selection: None,
             query: None,

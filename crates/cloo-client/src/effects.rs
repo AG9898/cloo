@@ -44,6 +44,17 @@ impl EffectPolicy {
             clipboard: true,
         }
     }
+
+    /// Whether this client could store a clipboard at all.
+    ///
+    /// Both gates in one place, so a caller can decide *before* asking for
+    /// text — an explicit copy on a client that would refuse the store should
+    /// not put a user's scrollback on the wire to be discarded. The rendering
+    /// path below asks the same question.
+    #[must_use]
+    pub const fn permits_clipboard(self, caps: TermCaps) -> bool {
+        self.clipboard && caps.clipboard_osc52
+    }
 }
 
 /// Renders one permitted effect to `output`.
@@ -84,9 +95,7 @@ pub fn effect_bytes(
             Some(osc(format!("2;{title}")))
         }
         OuterTerminalEffect::ResetTitle if policy.title => Some(osc("2;")),
-        OuterTerminalEffect::ClipboardStore { target, text }
-            if policy.clipboard && caps.clipboard_osc52 =>
-        {
+        OuterTerminalEffect::ClipboardStore { target, text } if policy.permits_clipboard(caps) => {
             let selection = match target {
                 ClipboardTarget::Clipboard => 'c',
                 ClipboardTarget::PrimarySelection => 'p',

@@ -138,6 +138,20 @@ from that compact form rather than making up a different layout. `status_bar_cel
 `status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
 non-truecolor fallback down-samples colours while leaving these ASCII signals intact.
 
+### Copy mode
+
+Copy mode paints three roles over a pane's own cells and never replaces a character: a search
+`match` is the info colour with an underline, the `selection` is the accent, and the copy `cursor`
+is the selection reversed. Precedence runs match, then selection, then cursor, so a cursor inside a
+selected match is still visible. Each role differs from the others by an *attribute* as well as a
+colour, which is what keeps the three apart when colour is unavailable — the same rule the
+attention glyphs follow.
+
+Its status row is `COPY 1234:7 SEL /retry 1 matches`: the mode label, the copy cursor's retained
+line and column, a selection marker, the active regex, and the match count. Width yields in one
+fixed order — drop the match count, then the query, then the selection marker, then the position —
+leaving `COPY` as the last thing standing, truncated only on a pane too narrow to hold it.
+
 ## Agent Workspace States
 
 Pane chrome and the attention queue use the following labels. State text and a glyph are always

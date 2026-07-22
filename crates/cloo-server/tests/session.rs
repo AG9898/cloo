@@ -1019,3 +1019,88 @@ async fn copy_and_search_state_is_server_owned_and_regex_errors_keep_it_intact()
         "a parse error leaves the previous successful search intact"
     );
 }
+
+// --- The explicit copy and the client's viewport mapping (M5-02) -----------
+
+#[tokio::test]
+async fn an_explicit_copy_reads_retained_text_without_changing_anything() {
+    // Three visible rows over four printed lines, so the selected line is in
+    // retained history rather than on the grid a client caches. Only the server
+    // can answer this copy, which is the whole reason the request exists.
+    let (root, session) = session_running(
+        "printf 'first\\nneedle one\\nneedle two\\nlast\\n'; while read _; do :; done",
+        20,
+        3,
+    );
+    wait_for_line(&session.handle, "last").await;
+
+    session
+        .handle
+        .enter_copy_mode()
+        .await
+        .expect("copy mode reaches the actor");
+    assert!(
+        session
+            .handle
+            .search_copy("needle one", SearchDirection::Forward)
+            .await
+            .expect("valid regex searches retained history")
+    );
+    session
+        .handle
+        .begin_copy_selection()
+        .await
+        .expect("selection reaches the actor");
+    session
+        .handle
+        .copy_motion(CopyMotion::LineEnd)
+        .await
+        .expect("motion reaches the actor");
+
+    let before = session.handle.snapshot().await.expect("session is alive");
+    let copy = before.copy_mode.as_ref().expect("copy state is projected");
+    // The viewport line the client would draw the copy cursor on. The server
+    // revealed the cursor when it moved, so it must be inside the three rows a
+    // client actually holds — a client that guessed this would highlight a row
+    // of live output instead.
+    assert!(
+        (copy.viewport_top..copy.viewport_top + 3).contains(&copy.cursor.line),
+        "the revealed cursor must sit inside the viewport it is projected with"
+    );
+
+    let (pane, effect) = session
+        .handle
+        .copy_selection(cloo_proto::ClipboardTarget::Clipboard)
+        .await
+        .expect("session is alive")
+        .expect("a live selection yields a clipboard effect");
+    assert_eq!(pane, root);
+    assert_eq!(
+        effect,
+        cloo_proto::OuterTerminalEffect::ClipboardStore {
+            target: cloo_proto::ClipboardTarget::Clipboard,
+            text: "needle one".into(),
+        }
+    );
+
+    // Copying is a read: not one grid cell, cursor, or selection moved.
+    let after = session.handle.snapshot().await.expect("session is alive");
+    assert_eq!(after.pane, before.pane, "a copy must not touch the grid");
+    assert_eq!(after.copy_mode, before.copy_mode);
+
+    // With nothing selected there is nothing to copy, which is an ordinary
+    // answer rather than an empty clipboard store.
+    session
+        .handle
+        .clear_copy_selection()
+        .await
+        .expect("clearing reaches the actor");
+    assert_eq!(
+        session
+            .handle
+            .copy_selection(cloo_proto::ClipboardTarget::PrimarySelection)
+            .await
+            .expect("session is alive"),
+        None
+    );
+}

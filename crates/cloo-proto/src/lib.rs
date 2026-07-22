@@ -35,9 +35,10 @@ pub use frame::{
 pub use ids::{ClientId, PaneId, SessionId, TabId};
 pub use message::{
     Action, AttentionSource, AttentionState, Cell, CellAttrs, ClientMessage, ClipboardTarget,
-    Color, CopyModeState, CopySelection, CursorShape, Direction, GraphicsEffect, LayoutSnapshot,
-    MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, OuterTerminalEffect,
-    PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState, RowUpdate, ScrollPoint,
-    SearchMatch, ServerMessage, Size, TabSummary, TermCaps,
+    Color, CopyModeState, CopyMotion, CopySelection, CursorShape, Direction, GraphicsEffect,
+    LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
+    OuterTerminalEffect, PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState,
+    RowUpdate, ScrollPoint, SearchDirection, SearchMatch, ServerMessage, Size, TabSummary,
+    TermCaps,
 };
 pub use stream::{FrameStream, StreamError};

@@ -14,7 +14,8 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use cloo_proto::{
-    Action, ClientId, ClientMessage, PaneId, ServerMessage, SessionId, Size, StreamError,
+    Action, ClientId, ClientMessage, ClipboardTarget, OuterTerminalEffect, PaneId, ServerMessage,
+    SessionId, Size, StreamError,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -112,6 +113,13 @@ enum ClientCommand {
     /// A broadcast receiver fell behind and needs a fresh baseline.
     Resync {
         reply: oneshot::Sender<ClientResync>,
+    },
+    /// One client asked for the current copy-mode selection as a clipboard
+    /// effect. Answered privately rather than broadcast: a copy belongs to the
+    /// terminal whose user pressed the key.
+    Copy {
+        target: ClipboardTarget,
+        reply: oneshot::Sender<Option<(PaneId, OuterTerminalEffect)>>,
     },
     /// The connection ended, so it no longer contributes to the minimum size.
     Gone { client: ClientId },
@@ -370,6 +378,33 @@ impl Daemon {
                         let _ = self.session()?.rename_tab(name).await;
                     }
                 }
+                // Copy mode is server state, so every one of these is a command
+                // on the session actor rather than a client-local mode. The
+                // copy itself is answered by the socket task instead, because
+                // its reply belongs to one terminal.
+                ClientMessage::Command(Action::EnterCopyMode) => {
+                    self.session()?.enter_copy_mode().await?;
+                }
+                ClientMessage::Command(Action::ExitCopyMode) => {
+                    self.session()?.exit_copy_mode().await?;
+                }
+                ClientMessage::Command(Action::CopyMotion(motion)) => {
+                    self.session()?.copy_motion(motion.into()).await?;
+                }
+                ClientMessage::Command(Action::BeginCopySelection) => {
+                    self.session()?.begin_copy_selection().await?;
+                }
+                ClientMessage::Command(Action::ClearCopySelection) => {
+                    self.session()?.clear_copy_selection().await?;
+                }
+                ClientMessage::Command(Action::CopySearch { query, direction }) => {
+                    // A regex the user mistyped is a normal reply, not a
+                    // reason to disturb the session or this client.
+                    let _ = self.session()?.search_copy(query, direction.into()).await;
+                }
+                ClientMessage::Command(Action::NextCopyMatch(direction)) => {
+                    self.session()?.next_copy_match(direction.into()).await?;
+                }
                 // Detach is handled by the connection task so it can send the
                 // acknowledgement before it reports `Gone`. The remaining
                 // actions wait for their own layout milestones.
@@ -386,6 +421,10 @@ impl Daemon {
                 self.publish_snapshot(&snapshot);
                 let updates = self.updates.subscribe();
                 let _ = reply.send(ClientResync { snapshot, updates });
+            }
+            ClientCommand::Copy { target, reply } => {
+                let effect = self.session()?.copy_selection(target).await?;
+                let _ = reply.send(effect);
             }
             ClientCommand::Gone { client } => {
                 if self.client_sizes.remove(&client).is_some() && self.resize_to_clients().await? {
@@ -537,6 +576,27 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
                 Ok(Some(ClientMessage::Attach { .. })) => {
                     let _ = conn::refuse(&mut conn, "this connection is already attached").await;
                     break;
+                }
+                // Handled here rather than by the coordinator so the reply goes
+                // to this socket alone. The client still decides whether its
+                // policy and terminal permit an OSC 52 store.
+                Ok(Some(ClientMessage::Command(Action::CopySelection(target)))) => {
+                    let (reply, copied) = oneshot::channel();
+                    if commands.send(ClientCommand::Copy { target, reply }).await.is_err() {
+                        break;
+                    }
+                    match copied.await {
+                        Ok(Some((pane, effect))) => {
+                            let message = ServerMessage::Effect { pane, effect };
+                            if conn.send(&message).await.is_err() {
+                                break;
+                            }
+                        }
+                        // Nothing selected is an ordinary answer, and a dropped
+                        // reply means the session is gone.
+                        Ok(None) => {}
+                        Err(_) => break,
+                    }
                 }
                 Ok(Some(message)) => {
                     if commands.send(ClientCommand::Message { client, message }).await.is_err() {

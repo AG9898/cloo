@@ -135,8 +135,9 @@ every event cloo has no allowlisted type for. `OuterTerminalEffect` deliberately
 such as title, clipboard, hyperlink, notification, and progress changes, plus
 `Graphics(Unavailable)`; it contains no raw OSC, DCS, or graphics payload. `cloo-proto` mirrors
 that vocabulary in `ServerMessage::Effect { pane, effect }`, which took the handshake to v3;
-M2-06's `ServerMessage::Panes` took it to v4, M2-07's `ServerMessage::Attention` to v5, and
-M5-01's `ServerMessage::CopyMode` to v6.
+M2-06's `ServerMessage::Panes` took it to v4, M2-07's `ServerMessage::Attention` to v5,
+M5-01's `ServerMessage::CopyMode` to v6, and M5-02's copy-mode `Action`s plus
+`CopyModeState::viewport_top` to v7.
 M1-09 drains those values through the session actor and fans each one out as its own non-damage
 frame. The server neither chooses nor applies an effect: each client combines its terminal
 capabilities with a default-deny local policy. Title changes are permitted only by the title
@@ -684,6 +685,27 @@ an active copy search, so an inactive copy surface never makes the PTY hot path 
 scrollback. `CopyModeState` travels independently of damage, so an attach or resync receives the
 selection and highlights another client left behind without making client chrome an authority over
 scrollback.
+
+M5-02 adds the client half and the copy itself. Every copy-mode command is an `Action` on the
+wire — entry, exit, motion, selection, search, and match navigation — routed by the daemon
+coordinator into the session handle that already existed, so a rebound key is still not a protocol
+change. `CopyModeState::viewport_top` carries the retained line drawn on the pane's first visible
+row: server positions are absolute in history while a client holds only the visible grid, and that
+one number is what joins them rather than a client-side guess. `cloo-client::copy_mode` projects
+the state into positioned highlight spans and one status row, reading the client's `Grid` and never
+writing to it — a selection is a rendition, and a client that wrote one into its cache would
+disagree with the next damage frame about what the pane says. Match, selection, and cursor each
+differ in *attributes* as well as colour, so the three stay apart on a terminal without a palette,
+and a position outside the viewport is dropped rather than clamped onto the nearest visible row.
+
+The copy is explicit and answered privately. `Action::CopySelection(target)` is handled by the
+socket task, not the coordinator: the session extracts the selected text from retained scrollback
+and the effect is written back to the one client that asked, because broadcasting it would put one
+user's selection in every attached terminal's clipboard. It arrives as an ordinary
+`OuterTerminalEffect::ClipboardStore`, so the M1-09 gate is unchanged — a client whose policy or
+terminal cannot store a clipboard writes nothing, and it does not even send the request, so a
+user's scrollback never crosses the wire to be discarded. Copying mutates nothing: not a grid cell,
+not the cursor, not the selection.
 
 ---
 

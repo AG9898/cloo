@@ -21,13 +21,16 @@ use std::time::Duration;
 use std::{fs, io};
 
 use cloo_client::attach::{AttachError, Attached, attach};
+use cloo_client::copy_mode::{apply_copy, highlight_spans};
 use cloo_client::effects::{EffectPolicy, apply_effect};
+use cloo_client::renderer::Grid;
+use cloo_client::theme::Theme;
 use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
 use cloo_core::profile::{Profile, ProfileCommand};
 use cloo_proto::{
-    ClientMessage, ClipboardTarget, FrameStream, MouseButton, MouseEvent, MouseKind, MouseMods,
-    MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId, PaneModes, Point, RowUpdate,
-    ServerMessage, Size, TermCaps,
+    Action, ClientMessage, ClipboardTarget, CopyMotion, FrameStream, MouseButton, MouseEvent,
+    MouseKind, MouseMods, MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId, PaneModes,
+    Point, RowUpdate, SearchDirection, ServerMessage, Size, TermCaps,
 };
 use cloo_server::daemon::Daemon;
 use cloo_server::launch::Launch;
@@ -781,4 +784,148 @@ async fn attaching_where_no_daemon_is_listening_says_so() {
         .await
         .expect_err("a stale socket is not a daemon");
     assert!(matches!(err, AttachError::NoDaemon(_)), "got {err}");
+}
+
+#[tokio::test]
+async fn copy_mode_highlights_reach_a_client_and_its_copy_is_policy_gated() {
+    // The whole loop in one test: server-owned copy state crosses the wire,
+    // the client turns it into highlights over its own cached grid without
+    // changing a cell, and the explicit copy comes back as one typed clipboard
+    // effect that local policy can still refuse.
+    let dir = TempDir::new("copy-mode");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(
+        &socket,
+        "printf 'first\\nneedle one\\nneedle two\\nlast\\n'; read _; exit 0",
+    );
+    let caps = TermCaps {
+        clipboard_osc52: true,
+        ..TermCaps::default()
+    };
+    let mut attached = client_with_caps(&socket, caps).await;
+
+    // A client caches the visible grid and nothing else, so it applies damage
+    // exactly as the real render loop does — starting with the attach snapshot,
+    // which is why the cache is filled before any copy command is sent.
+    let mut grid = Grid::new(Size::new(80, 24));
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Damage { rows, .. }) => {
+                    for row in &rows {
+                        grid.apply(row).expect("the server's rows fit its geometry");
+                    }
+                    if rows.iter().any(|row| row_text(row) == "last") {
+                        return;
+                    }
+                }
+                Some(_) => {}
+                None => panic!("the server closed before the fixture printed"),
+            }
+        }
+    })
+    .await
+    .expect("the fixture's output must reach the client");
+
+    for action in [
+        Action::EnterCopyMode,
+        Action::CopySearch {
+            query: "needle one".into(),
+            direction: SearchDirection::Forward,
+        },
+        Action::BeginCopySelection,
+        Action::CopyMotion(CopyMotion::LineEnd),
+        Action::CopySelection(ClipboardTarget::Clipboard),
+    ] {
+        attached
+            .send_command(action)
+            .await
+            .expect("a copy-mode command must reach the daemon");
+    }
+
+    let mut copy_state: Option<cloo_proto::CopyModeState> = None;
+    let mut copied: Option<OuterTerminalEffect> = None;
+    tokio::time::timeout(PATIENCE, async {
+        while copy_state.is_none() || copied.is_none() {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Damage { rows, .. }) => {
+                    for row in &rows {
+                        grid.apply(row).expect("the server's rows fit its geometry");
+                    }
+                }
+                Some(ServerMessage::CopyMode(Some(state))) => {
+                    if state.selection.is_some() {
+                        copy_state = Some(state);
+                    }
+                }
+                Some(ServerMessage::Effect { effect, .. }) => copied = Some(effect),
+                Some(_) => {}
+                None => panic!("the server closed during copy mode"),
+            }
+        }
+    })
+    .await
+    .expect("copy state and the copied text must both reach the client");
+
+    let state = copy_state.expect("the loop only exits with copy state");
+    assert_eq!(state.query.as_deref(), Some("needle one"));
+    assert_eq!(state.matches.len(), 1);
+
+    // The client renders the selection as positioned spans and leaves its cache
+    // exactly as the server described it.
+    let before = grid.clone();
+    let spans = highlight_spans(Point::new(0, 0), &grid, &state, Theme::storm());
+    let selected: String = spans
+        .iter()
+        .flat_map(|span| span.cells.iter().map(|cell| cell.ch))
+        .collect();
+    assert!(
+        selected.contains("needle one"),
+        "the highlight must cover the selected text, got {selected:?}"
+    );
+    assert_eq!(
+        grid, before,
+        "rendering a selection must not mutate the grid"
+    );
+
+    // The copy itself: one typed effect, refused by the default policy and
+    // written byte for byte by a permitting one.
+    let effect = copied.expect("the loop only exits with a copied effect");
+    assert_eq!(
+        effect,
+        OuterTerminalEffect::ClipboardStore {
+            target: ClipboardTarget::Clipboard,
+            text: "needle one".into(),
+        }
+    );
+    let mut terminal = b"rendered frame".to_vec();
+    let before = terminal.clone();
+    assert!(
+        !apply_copy(&mut terminal, caps, EffectPolicy::default(), &effect)
+            .expect("a denied copy does not write")
+    );
+    assert_eq!(terminal, before, "a denied copy is a no-op");
+
+    let mut terminal = Vec::new();
+    assert!(
+        apply_copy(
+            &mut terminal,
+            caps,
+            EffectPolicy::allow_supported(),
+            &effect,
+        )
+        .expect("the in-memory terminal accepts one store")
+    );
+    assert_eq!(terminal, b"\x1b]52;c;bmVlZGxlIG9uZQ==\x1b\\");
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    drop(attached);
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
 }
