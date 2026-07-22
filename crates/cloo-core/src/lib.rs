@@ -5,8 +5,11 @@
 //! belongs in `cloo-server` or `cloo-client` instead. Everything here is pure
 //! and unit-testable without a terminal.
 //!
-//! Seven modules today:
+//! Nine modules today:
 //!
+//! - [`session`] — the top of the model: an ordered set of tabs with one active,
+//!   and the tab lifecycle (create, rename, select, close) over it.
+//! - [`tab`] — one tab: a named [`Layout`] with a focused pane, owned tab-locally.
 //! - [`layout`] — the ratio-based binary layout tree, its single layout pass,
 //!   geometric directional focus, and zoom as a view flag over an untouched tree.
 //! - [`profile`] — launch profiles: the built-in `generic`, `codex`, and
@@ -19,7 +22,8 @@
 //! - [`grid`] — the emulator-cell to wire-cell conversion, the only place the
 //!   `cloo-term` and `cloo-proto` vocabularies meet.
 //! - [`id`] — monotonic allocators for the `cloo-proto` newtype IDs.
-//! - [`error`] — the crate-local [`LayoutError`] and [`MetadataError`].
+//! - [`error`] — the crate-local [`LayoutError`], [`MetadataError`], and
+//!   [`SessionError`].
 //!
 //! Layout is always stored as ratios, never as cell counts. Cell counts are
 //! derived by [`Layout::resolve`] on every pass, which is what lets a layout
@@ -34,9 +38,11 @@ pub mod id;
 pub mod layout;
 pub mod pane;
 pub mod profile;
+pub mod session;
+pub mod tab;
 
 pub use config::{Config, ConfigError, ConfigWarning};
-pub use error::{LayoutError, MetadataError};
+pub use error::{LayoutError, MetadataError, SessionError};
 pub use grid::{
     wire_attrs, wire_cell, wire_color, wire_cursor, wire_modes, wire_mouse_tracking, wire_row,
     wire_size,
@@ -47,3 +53,5 @@ pub use pane::{
     Attention, AttentionSource, AttentionState, PaneMeta, PaneName, TaskLabel, WorkingDir,
 };
 pub use profile::{AdapterId, Profile, ProfileCommand, ProfileId};
+pub use session::Session;
+pub use tab::{MAX_TAB_NAME, Tab, TabName};

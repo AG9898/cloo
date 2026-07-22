@@ -377,6 +377,15 @@ Do not reorganize or rewrite existing entries — append only.
 
 ## Discoveries
 
+### 2026-07-22 — A session is never empty and its active tab always exists
+`cloo-core::session::Session` mirrors the layout's "at least one pane" rule one level up: it is born
+with one tab, refuses to close the last (`SessionError::LastTab`), and keeps `active` on a tab that
+still exists so `active_tab()` returns a reference, not an `Option`. Closing the active tab activates
+the tab that slid into its index (right neighbour, or the new rightmost when it was last); `close_tab`
+checks unknown-tab *before* last-tab so a bad ID is never reported as the last-tab rule. `TabName`
+reuses `pane::validate_text` (now `pub(crate)`) — one validator, so a tab title cannot smuggle a
+control char a pane name could not.
+
 ### 2026-07-22 — Attention is a third wire clock, projected from the same layout pass
 Attention crosses as its own `ServerMessage::Attention(Vec<PaneAttention>)` rather than being
 flattened into `PaneInfo`, because a state without its source is exactly the claim the chrome must

@@ -91,6 +91,14 @@ Covered today in `cloo-core`, all as unit tests:
   rejected rather than read as one, arguments kept verbatim so a space is never word-split, a
   recommendation below the layout floor dropping the profile, and a configured profile able to
   rebuild `codex` field for field.
+- The tab and session lifecycle (M3-01): a tab as a named layout with a focused pane, its name
+  validated exactly as a pane name and focus refusing a pane the layout does not hold. Over that,
+  the session lifecycle — create appending a tab and activating it, rename touching only its tab,
+  select moving activation without reordering the bar, and close with its defined active-tab
+  behaviour: closing the active tab activating its right neighbour, falling back to the new
+  rightmost when it was last, and leaving activation alone when some other tab closes. Every
+  rejection is proved to change nothing — an unknown tab on rename/select/close, and the last tab
+  refused with unknown checked first so a bad ID never masquerades as the last-tab rule.
 - The emulator-cell to wire-cell conversion in `grid.rs`: every colour form and rendition flag
   crossing intact, an invisible cursor becoming "nothing to draw" rather than a hidden shape, and
   `HollowBlock` degrading to a block. One assertion compares the two crates' attribute bit values
@@ -420,9 +428,10 @@ tested in `src/local.rs`.
 
 The intended shape for the rest, in the order it becomes testable:
 
-- **`cloo-core`** — profile and pane-metadata models joined layout at M2-04 and profile
-  configuration parsing at M2-05; keymap resolution and the rest of the configuration surface are
-  still to come. Like layout, all of them are pure and testable without a terminal.
+- **`cloo-core`** — profile and pane-metadata models joined layout at M2-04, profile
+  configuration parsing at M2-05, and the tab and session lifecycle at M3-01; keymap resolution and
+  the rest of the configuration surface are still to come. Like layout, all of them are pure and
+  testable without a terminal.
 - **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01, handshake and attach
   coverage at M1-02, the session task at M1-03, and split and close at M2-01. Slower; keep the
   count deliberate.
@@ -462,10 +471,12 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
 | `crates/cloo-core/src/layout.rs` | Layout tree | Split, close, collapse, resize, the layout pass, exact tiling, every rejection leaving the tree unchanged, closing a freshly split pane restoring the previous tree exactly — the rollback a failed pane spawn depends on — geometric directional focus in every direction from every pane, and zoom as a view flag that preserves every ratio |
 | `crates/cloo-core/src/id.rs` | Session model | Monotonic non-reusing ID allocation, resume, and saturation |
+| `crates/cloo-core/src/tab.rs` | Tab model | A tab as a named layout with a focused pane, its name validated like a pane name, and focus refusing a pane the layout does not hold |
+| `crates/cloo-core/src/session.rs` | Session model | The tab lifecycle: create appending and activating, rename and select touching only their target, close with its defined active-tab behaviour (right neighbour, rightmost fallback, non-active left alone), and every rejection changing nothing — unknown tab and the last tab refused with unknown checked first |
 | `crates/cloo-core/src/profile.rs` | Profiles | The three built-ins as data — launcher order, each validating, none carrying an adapter, `codex` reconstructible field for field — plus every shape rejection: ID alphabet and bound, default name, command NUL or control character, and a recommendation below the layout floor |
 | `crates/cloo-core/src/pane.rs` | Pane metadata | Validated names, labels, and an absolute-only working directory (a path that does not exist still validating, which is what pins validation to being pure), attention as state plus provenance: `unknown` by default, only three states queueing, acknowledgment cleared on change but kept on a repeat, only an adapter advisory, and the wire projection carrying what the user supplied with an absent task staying absent, plus attention's own wire projection: `unknown`/`None`/unseen by default, state, provenance, and acknowledgment kept together, and every state mapping to a distinct wire form |
 | `crates/cloo-core/src/config.rs` | Configuration | Profile definitions parsed from `config.toml` text: a document error keeping the defaults and an unknown key refusing rather than being ignored, one invalid profile dropped with a warning while its neighbours load, built-in override in place, duplicate IDs keeping the first, and the command and `min_size` surface — omitted command as login shell, empty array refused, arguments verbatim, a recommendation below the layout floor rejected |
-| `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused, and `MetadataError` naming its field and escaping a rejected control character rather than printing it |
+| `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused, `MetadataError` naming its field and escaping a rejected control character rather than printing it, and `SessionError` naming the tab it refused and explaining the last-tab rule |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-term/src/emulator.rs` | Emulation | Feed across read boundaries, every SGR flag and colour form, alternate screen, cursor position/visibility/shape, resize and reflow, scrollback growth and clamping, typed title/clipboard effects with backend replies suppressed, one fixture per negotiated input mode — set, read back, and cleared — and the bell taken once, coalesced across several rings, never rung by text, and never surfaced as an effect |
 | `crates/cloo-server/src/pty.rs` | PTY reactor | Pure only: config defaults and builder, `winsize` conversion, `TermError` to `PtyError` conversion |

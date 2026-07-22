@@ -820,6 +820,35 @@ inside tmux and Zellij according to the upstream documentation.
 
 ---
 
+## Session and tabs
+
+The top of the pure model, in `cloo-core::session` and `cloo-core::tab` as of M3-01. A `Session`
+owns an ordered set of `Tab`s and tracks exactly one active tab; each `Tab` owns one `Layout` — its
+own tree of panes — and a focused pane within it. Splitting, zooming, or focusing is tab-local, so
+one tab never disturbs another. All of it is pure: the server drives PTYs and the client renders,
+but "what tabs exist and which is showing" lives in this one place.
+
+Two invariants mirror the layout tree one level up. A session is **never empty** — it is born with
+one tab and always keeps at least one, so closing the last tab is refused (`SessionError::LastTab`)
+rather than being a way to reach a session with nothing to render. And the **active tab always
+exists** — every removal leaves the active pointer on a tab still present, so `Session::active_tab`
+returns a reference rather than an `Option`.
+
+The lifecycle is four operations with defined activation behavior:
+
+- **create** appends a tab holding one full-area pane and makes it active — the tmux `new-window`
+  reflex.
+- **rename** and **select** touch only their target tab; select never reorders the bar.
+- **close** removes a tab. When the closed tab was active, activation moves to the tab that slid
+  into its place — the former right neighbour, or the new rightmost tab when the closed one was
+  last. Closing any other tab leaves the active one untouched. Every rejection (an unknown tab, or
+  the last tab) leaves the session unchanged, with the unknown check first so a bad ID never
+  masquerades as the last-tab rule.
+
+Tab IDs come from the same monotonic, never-reused allocators in `cloo-core::id` as pane IDs.
+
+---
+
 ## Layout
 
 Binary tree of containers and leaves, implemented in `cloo-core::layout` as of M0-03:

@@ -2,7 +2,7 @@
 
 use core::fmt;
 
-use cloo_proto::{Direction, PaneId, Size};
+use cloo_proto::{Direction, PaneId, Size, TabId};
 
 /// Everything a layout operation can refuse to do.
 ///
@@ -140,6 +140,33 @@ impl fmt::Display for MetadataError {
 
 impl std::error::Error for MetadataError {}
 
+/// Everything a session's tab lifecycle can refuse to do.
+///
+/// Like the others here, every variant is a *rejection*: the session is left
+/// exactly as it was, so a caller can surface the message and carry on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SessionError {
+    /// The named tab is not in this session.
+    UnknownTab(TabId),
+    /// Closing the only tab in a session. A session with no tabs has no active
+    /// tab and nothing to render, so the last tab is kept rather than allowing
+    /// an empty session to be reached.
+    LastTab(TabId),
+}
+
+impl fmt::Display for SessionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::UnknownTab(tab) => write!(f, "no such tab in this session: {tab}"),
+            Self::LastTab(tab) => {
+                write!(f, "cannot close {tab}: it is the last tab in the session")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,6 +198,19 @@ mod tests {
         }
         .to_string();
         assert!(msg.contains("vertical"), "{msg}");
+    }
+
+    #[test]
+    fn the_last_tab_error_explains_why() {
+        let msg = SessionError::LastTab(TabId::new(0)).to_string();
+        assert!(msg.contains("tab:0"), "{msg}");
+        assert!(msg.contains("last tab"), "{msg}");
+    }
+
+    #[test]
+    fn the_unknown_tab_error_names_the_tab() {
+        let msg = SessionError::UnknownTab(TabId::new(4)).to_string();
+        assert!(msg.contains("tab:4"), "{msg}");
     }
 
     #[test]

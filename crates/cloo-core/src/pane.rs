@@ -57,7 +57,11 @@ pub const MAX_TASK_LABEL: usize = 96;
 /// sequence in a name would not currently execute — but it would be smuggled
 /// into every future surface that formats a name as text, so the boundary that
 /// keeps it out is this one.
-fn validate_text(field: &'static str, text: &str, max: usize) -> Result<(), MetadataError> {
+pub(crate) fn validate_text(
+    field: &'static str,
+    text: &str,
+    max: usize,
+) -> Result<(), MetadataError> {
     if text.is_empty() {
         return Err(MetadataError::Empty(field));
     }
