@@ -27,7 +27,8 @@ many concurrent coding-agent panes without turning the multiplexer into a dashbo
 - **Themes:** `storm` is the reference built-in theme. Theme inheritance follows the user's
   terminal palette when configured, and every treatment has a deliberate 16-color fallback.
 - **Motion:** split, close, focus, and overlay transitions target 120ms, are frame-budgeted and
-  interruptible, and obey reduce-motion. Motion must never delay input or a resize.
+  interruptible, and obey reduce-motion. Motion must never delay input or a resize. See
+  [Motion](#motion) below for the implemented contract.
 
 ## Storm Palette
 
@@ -223,6 +224,35 @@ contract concrete:
 - **Toasts.** `ToastDeck` is bounded and coalesces per pane — a repeated event becomes one notice
   with a growing `(xN)` count moved to newest, and a new pane's toast evicts the oldest when the
   deck is full, so a burst can never grow the stack without limit.
+
+## Motion
+
+Motion exists to make a *layout* change legible: focus moving, a pane split, a pane closed, and an
+overlay opening or dismissing. Nothing that arrives on a data clock — output, an attention report,
+a resize — is ever animated, so a busy session has exactly as much motion as a quiet one.
+
+`cloo-client`'s `motion` module is that vocabulary as of M4-04, and it is described in *frames*
+rather than in milliseconds: a transition is seven whole 16ms render ticks, which fits inside the
+120ms target without ever asking for a repaint the ~60fps cap would refuse. A phase is a step, not
+a duration, so two clients ticking together paint the same cells.
+
+- **Motion is a contrast ramp, never an appearance or a movement.** A transition starts recessed
+  toward the frame background — the same blend dimming uses, so text stays readable at every step —
+  and settles on the chrome's own colours. Chrome never slides: a header drawn somewhere it was not
+  hit-tested would route a click to the wrong pane. A colour that cannot be blended, a palette index
+  or the terminal's own default, takes the terminal's `DIM` rendition for the duration instead.
+- **A settled phase is the chrome unchanged.** The final frame of a transition is byte-identical to
+  the frame a client that animates nothing would draw, which is what makes an interruption safe.
+- **Input, a resize, and a state change interrupt by settling.** They never wait for a transition
+  and never rewind one: the in-flight transition ends at its end state, which is the frame the
+  client was about to draw for the event anyway. No half-finished ramp is ever left on screen.
+- **Reduce-motion draws one frame.** With the setting on, a transition settles where it started;
+  nothing extra is requested and nothing extra is painted. The setting is client-local, like the
+  theme and the effect policy, so two terminals attached to one session may disagree.
+
+Because a transition advances only on the render tick, and a tick that lands on a step already
+drawn produces no frame at all, sampling faster than the frame budget costs nothing: a whole
+transition is at most eight frames however often a busy loop asks.
 
 ## Density and Accessibility
 

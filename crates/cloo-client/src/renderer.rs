@@ -27,6 +27,8 @@ use std::fmt;
 
 use cloo_proto::{Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, Size, TermCaps};
 
+use crate::motion::{MotionKind, Phase, phase_cell};
+
 /// Everything the renderer can refuse to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RenderError {
@@ -317,15 +319,55 @@ impl Renderer {
         self.output()
     }
 
+    /// Draws one frame of an in-flight transition.
+    ///
+    /// The same chrome spans [`render_spans`](Self::render_spans) takes, with
+    /// [`Phase`] applied to every cell on the way out — the colours ramp toward
+    /// `frame` early in a transition and land exactly on the chrome's own by the
+    /// end. Two properties follow, and both are tested here rather than trusted:
+    /// a settled phase produces bytes *identical* to an ordinary chrome frame,
+    /// which is what makes an interrupted transition indistinguishable from a
+    /// client that animates nothing; and a transition frame paints chrome only,
+    /// so motion can never repaint a pane's contents or clear the screen.
+    ///
+    /// `frame` is the theme's frame background, resolved by the caller — the
+    /// renderer knows about capabilities, never about themes.
+    pub fn render_transition(
+        &mut self,
+        spans: &[Span],
+        phase: Phase,
+        frame: Color,
+        cursor: Option<Cursor>,
+    ) -> &[u8] {
+        self.out.clear();
+        self.out.push_str("\x1b[?25l");
+        for span in spans {
+            self.paint_span_in_phase(span, phase, frame);
+        }
+        self.finish(cursor);
+
+        self.output()
+    }
+
     /// Draws one positioned run of chrome cells.
     fn paint_span(&mut self, span: &Span) {
+        self.paint_span_in_phase(span, Phase::settled(MotionKind::Focus), Color::Default);
+    }
+
+    /// Draws one positioned run of chrome cells at a point in a transition.
+    ///
+    /// A settled phase returns each cell unchanged, so this is also the ordinary
+    /// span path — one painter, which is why a transition frame cannot drift
+    /// from the frame it settles into.
+    fn paint_span_in_phase(&mut self, span: &Span, phase: Phase, frame: Color) {
         if span.cells.is_empty() {
             return;
         }
         let mut style = None;
         move_to(&mut self.out, span.at.row, span.at.col);
         for cell in &span.cells {
-            let wanted = Style::of(cell);
+            let cell = phase_cell(*cell, phase, frame);
+            let wanted = Style::of(&cell);
             if style != Some(wanted) {
                 push_sgr(&mut self.out, wanted, self.caps);
                 style = Some(wanted);
@@ -938,6 +980,71 @@ mod tests {
                 std::str::from_utf8(token).expect("test tokens are UTF-8")
             );
         }
+    }
+
+    // -- Transitions ------------------------------------------------------
+
+    #[test]
+    fn a_settled_transition_frame_is_byte_identical_to_an_ordinary_one() {
+        let spans = [Span::new(
+            Point::new(0, 0),
+            row_of("claude", Color::Rgb(0xbb, 0x9a, 0xf7), CellAttrs::BOLD),
+        )];
+        let mut renderer = Renderer::new(truecolor());
+        let ordinary = renderer.render_spans(&spans, None).to_vec();
+        let settled = renderer
+            .render_transition(
+                &spans,
+                Phase::settled(MotionKind::Focus),
+                Color::Rgb(0x0f, 0x0f, 0x16),
+                None,
+            )
+            .to_vec();
+        assert_eq!(
+            settled, ordinary,
+            "an interrupted transition must draw what no motion would"
+        );
+    }
+
+    #[test]
+    fn a_mid_transition_frame_ramps_the_colour_without_touching_the_text() {
+        let spans = [Span::new(
+            Point::new(0, 0),
+            row_of("hi", Color::Rgb(0xbb, 0x9a, 0xf7), CellAttrs::NONE),
+        )];
+        let mut renderer = Renderer::new(truecolor());
+        let mut motion = crate::motion::Motion::default();
+        let phase = motion.start(MotionKind::Focus, std::time::Instant::now());
+        let frame = renderer
+            .render_transition(&spans, phase, Color::Rgb(0x0f, 0x0f, 0x16), None)
+            .to_vec();
+        let text = String::from_utf8(frame.clone()).expect("output is valid utf-8");
+        assert!(text.ends_with("hi\x1b[0m"), "the characters are untouched");
+        assert!(
+            !text.contains("38;2;187;154;247"),
+            "the accent has not landed yet"
+        );
+    }
+
+    #[test]
+    fn a_transition_frame_never_clears_the_outer_terminal() {
+        let spans = [Span::new(
+            Point::new(0, 0),
+            row_of("x", Color::Default, CellAttrs::NONE),
+        )];
+        let mut renderer = Renderer::new(TermCaps::default());
+        let frame = renderer
+            .render_transition(
+                &spans,
+                Phase::settled(MotionKind::Split),
+                Color::Rgb(0x0f, 0x0f, 0x16),
+                None,
+            )
+            .to_vec();
+        assert!(
+            !frame.windows(3).any(|bytes| bytes == b"\x1b[2J"),
+            "motion paints chrome, never a full repaint"
+        );
     }
 
     #[test]

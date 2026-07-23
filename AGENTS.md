@@ -381,6 +381,11 @@ binding in place while an alias is not a conflict), the `[keys]` document surfac
 `C-b`, and a bad line dropped alone), and the prefix state machine in `cloo-client/src/input.rs` —
 one fixture per encoding a terminal sends decoded to its spelling, and every default-bound chord
 still reaching the pane byte for byte when no prefix is pending.
+M4-04 adds the motion model in `cloo-client/src/motion.rs` — a 120ms transition stepped frame by
+frame from an injected `Instant`: an interruption settling at the end state rather than rewinding,
+a bounded frame count however often the transition is sampled, reduce-motion drawing exactly one
+settled frame, and a contrast ramp that keeps every character readable — plus the transition frame
+in `cloo-client/src/renderer.rs`, whose settled phase is byte-identical to an ordinary span frame.
 M3-04 adds the keyboard-first overlays in `cloo-client/src/overlay.rs` — every overlay dismissible
 from every state including an empty one, navigation clamping at both ends, a confirmed launcher row
 naming a profile the caller supplied with an unvalidatable profile never becoming a row, pane
@@ -874,6 +879,14 @@ slice that arrived rather than a re-encoding of a decoded chord, and a sequence 
 name is the pane's, exactly as a mode that was never negotiated is. Confirm any fixture here by
 reverting to a router that looks a chord up without the prefix — five tests fail, and a keymap that
 ate `c` in vim would otherwise ship.
+
+### 2026-07-23 — Interruptible motion means settling, not rewinding
+`cloo-client::motion` ends an in-flight transition at its *end* state when input, a resize, or a
+state change arrives, so the interrupting event's own frame is the one drawn and no half-finished
+ramp is left on screen; a settled `Phase` returns each cell unchanged, which makes that frame
+byte-identical to a client that animates nothing (and to reduce-motion). The frame cap is the other
+half: a transition is seven whole 16ms steps and `Motion::tick` answers `None` on a step it already
+drew, so even a caller sampling once per PTY read costs at most eight frames.
 
 ### 2026-07-23 — A vocabulary is how a binding is stopped from naming an impossible command
 `Action::RenameTab` and `Action::CopySearch` carry text a keypress does not, so they have no

@@ -4,7 +4,7 @@
 //! session state. **All chrome is rendered here**, which is why theming never
 //! touches the server.
 //!
-//! Eleven modules today:
+//! Twelve modules today:
 //!
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
@@ -26,6 +26,10 @@
 //!   application's, the prefix state machine that resolves a `cloo-core`
 //!   keymap against decoded chords, and the keyboard actions that drive the
 //!   attention queue overlay.
+//! - [`motion`] — the 120ms focus, split, close, and overlay transitions:
+//!   quantized into the render loop's own frame budget, settled rather than
+//!   reverted when input or a resize interrupts them, and drawn away entirely
+//!   by the reduce-motion setting.
 //! - [`overlay`] — the keyboard-first session switcher, profile launcher, and
 //!   pane-details view, as one model and one renderer over the shared chrome
 //!   rules.
@@ -47,6 +51,7 @@ pub mod chrome;
 pub mod copy_mode;
 pub mod effects;
 pub mod input;
+pub mod motion;
 pub mod outer;
 pub mod overlay;
 pub mod raw_mode;
@@ -74,6 +79,10 @@ pub use input::{
     ChromeTarget, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseOwner, MouseReport,
     MouseRoute, MouseTarget, OuterModes, OverlayAction, PaneArea, QueueAction, ScreenLayout,
     decode_key, mouse_owner, overlay_action, queue_action, route_mouse,
+};
+pub use motion::{
+    FRAME_BUDGET, MOTION_DURATION, MOTION_STEPS, Motion, MotionKind, MotionSettings, Phase,
+    phase_cell, phase_cells, phase_span,
 };
 pub use outer::{current_size, window_size};
 pub use overlay::{

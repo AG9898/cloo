@@ -511,6 +511,35 @@ terminal-palette inheritance leaves default foreground/background alone while re
 semantic colours. A chrome-and-renderer fixture proves a focused `>` and `needs input` `!` remain
 different ANSI colours and textual signals without truecolor; it asserts no RGB SGR is emitted.
 
+M4-04 adds the transition model in `src/motion.rs`, tested without sleeping: time is passed in, so
+a whole 120ms transition is stepped frame by frame from one `Instant`. The fixtures are the two
+properties the acceptance criteria name, plus the arithmetic that keeps them honest:
+
+- **Interruption settles, never rewinds.** One fixture per motion kind interrupts mid-ramp and
+  asserts the returned phase is the *end* state, that nothing is left in flight, and that a later
+  tick asks for no further frame. A second fixture closes the loop through the cells: a mid-frame
+  cell is visibly different, and the interrupted frame is the chrome's own cells unchanged.
+  Reverting `interrupt` to return the step it had reached fails both.
+- **Motion cannot become a per-read repaint.** A thousand samples inside one frame budget produce
+  no frame at all, and a thousand samples spread across a whole transition — eighty times the
+  budget's rate, which is what a large `cat` looks like — produce at most `MOTION_STEPS + 1`.
+  Deleting the already-drawn-step check fails both.
+- **The budget itself.** Seven whole 16ms frames fit inside 120ms and an eighth would not, and the
+  frame budget is asserted to be the render loop's own.
+- **Reduce-motion.** Every kind starts already settled, nothing is left active, a tick answers
+  nothing, and the painted cell is the chrome's own — one frame for a layout change, exactly what a
+  client with no motion at all would draw.
+- **The ramp.** Every step keeps its character, its attributes, and a foreground that is never the
+  frame colour, so an interruption at any step leaves readable text; the distance to the chrome's
+  own colour closes monotonically and lands exactly on it. A palette index or the terminal's own
+  default takes the `DIM` attribute instead of an invented colour, and drops it again when settled.
+  A span keeps its origin, because motion ramps contrast and never moves chrome.
+
+`src/renderer.rs` gains the transition frame those phases are painted through: a settled phase
+produces bytes *byte-identical* to an ordinary `render_spans` frame, a mid-transition frame keeps
+its characters while the accent has not landed yet, and a transition frame never clears the outer
+terminal — motion paints chrome, never a pane's contents.
+
 M3-03 adds the always-on minimal status row through the same pure chrome-and-renderer seam:
 
 - A wide row carries its session, active one-based tab and title, per-state actionable tally, and
@@ -597,7 +626,8 @@ The intended shape for the rest, in the order it becomes testable:
   signals itself signals the test runner. Incremental row diffing and its byte-exact renderer
   coverage landed with damage coalescing at M1-04, and pane chrome — headers, focus, attention, and
   dimming — at M2-03, extended at M2-10 with the attention summary, queue, and toast deck and their
-  keyboard actions, all pure and testable without a terminal.
+  keyboard actions, all pure and testable without a terminal. Motion joined them at M4-04 on the
+  same terms: time is an argument, so a transition is stepped rather than slept through.
 
 ### Agent-harness compatibility
 
@@ -651,7 +681,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
 | `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, exit-frame detection, and pane identity, attention, and tab selection each resent only when they change rather than on every damaged row |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
-| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, and grid apply/resize rejections |
+| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, grid apply/resize rejections, and the transition frame: a settled phase byte-identical to an ordinary span frame, a mid-transition frame keeping its characters before the accent lands, and no clear of the outer terminal |
+| `crates/cloo-client/src/motion.rs` | Motion | The 120ms transition stepped frame by frame from an injected `Instant`: an interruption settling at the end state rather than rewinding for every motion kind, a bounded frame count however often the transition is sampled, seven whole frames fitting the style guide's budget, reduce-motion drawing exactly one settled frame, a late tick settling rather than overshooting and a backwards clock reading as the start, a second transition replacing the one in flight, and the contrast ramp keeping every character, attribute, and readable colour with the `DIM` fallback for a non-blendable palette entry |
 | `crates/cloo-client/src/theme.rs` | Theme resolution | Named theme RGB tokens, deliberate ANSI semantic fallback below truecolor, and outer-terminal palette inheritance |
 | `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck; plus the always-on status row's session, active tab, attention, and prefix forms yielding to ASCII markers |
 | `crates/cloo-client/src/copy_mode.rs` | Copy-mode rendering | Selection, match, and cursor spans painted from the grid cache with the cache asserted unchanged, role precedence with each role distinct by attribute as well as colour, positions outside the viewport dropped rather than clamped, the status row exactly its width at every width in one fixed degradation order, and the explicit copy: a denied policy or an incapable terminal writing nothing and not even sending the request, a permitted one writing exact OSC 52, and a non-clipboard effect refused on the copy path |

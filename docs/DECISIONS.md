@@ -281,6 +281,13 @@ visible renderer backlog.
 uninterruptible animations make a terminal multiplexer feel slow.
 
 **Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), `cloo-client`, M2 and M4 implementation.
+Implemented in M4-04 as `cloo-client`'s `motion` module: a transition is quantized into seven whole
+render frames rather than measured in milliseconds, so it cannot ask for a repaint the ~60fps cap
+would refuse, and a tick landing on a step already drawn produces no frame at all. "Interruptible"
+is implemented as *settling*, never rewinding — an interruption returns the transition's end state,
+which is the frame the client was about to draw for the input, resize, or state change anyway, and
+which is byte-identical to a client that animates nothing. Reduce-motion is client-local, like the
+theme and the effect policy, and starts every transition already settled.
 
 ---
 

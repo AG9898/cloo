@@ -488,6 +488,24 @@ keyboard exactly as chrome owns a mouse click over a border; none of it reaches 
 visual contract — the shared width ladder, the text selection marker, the dimmed backdrop — is in
 [`STYLEGUIDE.md`](STYLEGUIDE.md#overlays-and-notifications).
 
+#### Motion
+
+`cloo-client::motion`, as of M4-04, is the style guide's transition vocabulary: focus, split,
+close, and overlay, and nothing that arrives on a data clock. A transition is described in *frames*
+rather than milliseconds — seven whole render ticks, which fits the 120ms target without asking for
+a repaint the frame cap would refuse — and `Motion::tick` answers nothing on a step it already
+drew, so sampling faster than the budget costs nothing at all.
+
+Interruption is settling, not rewinding: `Motion::interrupt`, called for input, a resize, or a
+state change, ends the transition at its end state, and a settled `Phase` leaves every cell
+unchanged. A frame drawn after an interruption — or under reduce-motion, which starts every
+transition settled — is therefore byte-identical to one from a client that animates nothing.
+Motion changes contrast and never position or character: chrome that slid would be hit-tested where
+it was not drawn, and a ramp that faded to nothing would fail the readability rule dimming follows.
+Time is a parameter rather than a clock the module reads, which is what makes a transition testable
+frame by frame. `Renderer::render_transition` is the only place a phase becomes bytes, and it
+paints chrome spans alone — motion can never repaint a pane's contents.
+
 #### Raw mode
 
 `cloo-client::raw_mode::RawMode` is an RAII guard over one terminal descriptor. Restoration is by
