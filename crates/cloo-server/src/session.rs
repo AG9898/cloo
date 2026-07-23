@@ -161,8 +161,28 @@ pub enum Command {
     /// around to the far side — moves a user's attention somewhere they were
     /// not looking.
     MoveFocus(Side),
+    /// Moves focus to the pane the user named, which is what a click does.
+    ///
+    /// No reply, for the same reason [`MoveFocus`](Self::MoveFocus) has none: a
+    /// pane that has closed or is hidden behind a zoom is a stale click, and a
+    /// stale click is dropped exactly as a stale mouse event is.
+    FocusPane(PaneId),
     /// Shows the focused pane alone at the full area, or undoes that.
     ToggleZoom,
+    /// Moves the divider next to a pane, growing it by `delta` cells.
+    ///
+    /// The whole of a gutter drag. It changes one ratio in the layout tree and
+    /// then runs the ordinary geometry pass, so no pane is created, closed,
+    /// reordered, or restarted — a drag costs each affected child one
+    /// `TIOCSWINSZ` and nothing else.
+    ResizePane {
+        /// The pane that grows on a positive delta.
+        pane: PaneId,
+        /// The axis the divider divides along.
+        dir: Direction,
+        /// How far to move it, in cells, signed toward `pane` growing.
+        delta: i16,
+    },
     /// Creates a new tab with one pane running the session's default launch.
     NewTab(oneshot::Sender<Result<TabId, PaneError>>),
     /// Closes the active tab and every pane it owns.
@@ -599,6 +619,38 @@ impl SessionHandle {
     /// Returns [`SessionGone`] if the session task has ended.
     pub async fn move_focus(&self, side: Side) -> Result<(), SessionGone> {
         self.send(Command::MoveFocus(side)).await
+    }
+
+    /// Moves focus to a named pane — the mouse's half of focus.
+    ///
+    /// A pane that is not visible in the active tab is ignored, which is the
+    /// same answer a mouse event naming one gets: by the time a click crosses
+    /// the wire the pane may have closed, and a client's screen is at most one
+    /// frame old.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn focus_pane(&self, pane: PaneId) -> Result<(), SessionGone> {
+        self.send(Command::FocusPane(pane)).await
+    }
+
+    /// Moves the divider next to `pane`, growing that pane by `delta` cells.
+    ///
+    /// Exactly one split ratio changes. No pane is created, closed, or
+    /// restarted, and a drag past the end stops at the minimum pane size rather
+    /// than being refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SessionGone`] if the session task has ended.
+    pub async fn resize_pane(
+        &self,
+        pane: PaneId,
+        dir: Direction,
+        delta: i16,
+    ) -> Result<(), SessionGone> {
+        self.send(Command::ResizePane { pane, dir, delta }).await
     }
 
     /// Shows the focused pane alone at the full area, or undoes that.
@@ -1088,9 +1140,17 @@ impl Session {
                 let changed = self.move_focus(side);
                 self.settle(changed)
             }
+            Command::FocusPane(pane) => {
+                let changed = self.focus_pane(pane);
+                self.settle(changed)
+            }
             Command::ToggleZoom => {
                 self.toggle_zoom();
                 self.settle(true)
+            }
+            Command::ResizePane { pane, dir, delta } => {
+                let changed = self.resize_pane(pane, dir, delta);
+                self.settle(changed)
             }
             Command::NewTab(reply) => {
                 let outcome = self.new_tab();
@@ -1342,6 +1402,40 @@ impl Session {
         // is hiding — leaves a user typing into something they cannot see.
         self.follow_zoom();
         true
+    }
+
+    /// Moves focus to a named pane, reporting whether it moved.
+    ///
+    /// The click that produced this crossed the wire against a screen at most
+    /// one frame old, so a pane that has since closed — or that a zoom is
+    /// hiding — is dropped rather than refused, exactly as a stale mouse event
+    /// is. Refusing would be a message about a pane the user can no longer see.
+    fn focus_pane(&mut self, pane: PaneId) -> bool {
+        if pane == self.focused() || !self.is_visible(pane) {
+            return false;
+        }
+        if self.active_tab_mut().focus(pane).is_err() {
+            return false;
+        }
+        // The same rule directional focus follows: a zoom always names the
+        // focused pane, or a user ends up typing into something hidden.
+        self.follow_zoom();
+        true
+    }
+
+    /// Moves the divider next to `pane` by `delta` cells, reporting whether the
+    /// layout changed.
+    ///
+    /// One ratio, and then the ordinary geometry pass. A pane that has closed,
+    /// or one with no ancestor split along that axis, is dropped for the same
+    /// reason a stale click is: the drag was aimed at a picture that has moved
+    /// on, and there is nothing a user could do about a refusal.
+    fn resize_pane(&mut self, pane: PaneId, dir: Direction, delta: i16) -> bool {
+        let area = self.area;
+        self.active_tab_mut()
+            .layout_mut()
+            .resize(pane, dir, delta, area)
+            .is_ok()
     }
 
     /// Shows the focused pane alone at the full area, or undoes that.

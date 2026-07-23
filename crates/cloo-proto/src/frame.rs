@@ -23,7 +23,7 @@ use crate::error::ProtoError;
 /// that presents as a rendering bug. Adapters share the number rather than
 /// carrying one of their own: both protocols are built from this one crate, so
 /// two versions could only ever disagree by accident.
-pub const PROTOCOL_VERSION: u16 = 8;
+pub const PROTOCOL_VERSION: u16 = 9;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -129,7 +129,7 @@ mod tests {
     use crate::ids::{PaneId, SessionId, TabId};
     use crate::message::{
         Action, AttentionSource, AttentionState, Cell, CellAttrs, ClientMessage, ClipboardTarget,
-        Color, CopyModeState, CopyMotion, CopySelection, CursorShape, GraphicsEffect,
+        Color, CopyModeState, CopyMotion, CopySelection, CursorShape, Direction, GraphicsEffect,
         LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
         OuterTerminalEffect, PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState,
         RowUpdate, ScrollPoint, SearchDirection, SearchMatch, ServerMessage, Size, TabSummary,
@@ -244,7 +244,20 @@ mod tests {
             ClientMessage::Command(Action::FocusRight),
             ClientMessage::Command(Action::FocusUp),
             ClientMessage::Command(Action::FocusDown),
+            ClientMessage::Command(Action::FocusPane(PaneId::new(4))),
             ClientMessage::Command(Action::ToggleZoom),
+            // Both signs, because a drag toward the origin is the one that would
+            // be lost by an unsigned width.
+            ClientMessage::Command(Action::ResizePane {
+                pane: PaneId::new(2),
+                dir: Direction::Horizontal,
+                delta: 7,
+            }),
+            ClientMessage::Command(Action::ResizePane {
+                pane: PaneId::new(2),
+                dir: Direction::Vertical,
+                delta: -7,
+            }),
             ClientMessage::Command(Action::NewTab),
             ClientMessage::Command(Action::CloseTab),
             ClientMessage::Command(Action::NextTab),

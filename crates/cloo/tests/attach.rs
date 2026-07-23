@@ -23,6 +23,9 @@ use std::{fs, io};
 use cloo_client::attach::{AttachError, Attached, attach};
 use cloo_client::copy_mode::{apply_copy, highlight_spans};
 use cloo_client::effects::{EffectPolicy, apply_effect};
+use cloo_client::input::{
+    ChromeMouse, MouseReport, MouseRoute, ScreenLayout, WHEEL_LINES, route_mouse,
+};
 use cloo_client::renderer::Grid;
 use cloo_client::theme::Theme;
 use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
@@ -1002,6 +1005,123 @@ async fn copy_mode_highlights_reach_a_client_and_its_copy_is_policy_gated() {
         .expect("the in-memory terminal accepts one store")
     );
     assert_eq!(terminal, b"\x1b]52;c;bmVlZGxlIG9uZQ==\x1b\\");
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    drop(attached);
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+/// Reads frames until the focused pane's copy cursor sits on `line`, or until
+/// any copy state arrives when `line` is `None`.
+async fn await_copy_cursor(
+    attached: &mut Attached<UnixStream>,
+    line: Option<u32>,
+) -> cloo_proto::CopyModeState {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::CopyMode(Some(state)))
+                    if line.is_none_or(|want| state.cursor.line == want) =>
+                {
+                    return state;
+                }
+                Some(_) => {}
+                None => panic!("the server closed before answering with copy state"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no copy state ever put the cursor on {line:?}"))
+}
+
+/// The wheel's whole loop, over a real socket. A report the client's own screen
+/// says is chrome's becomes a `ChromeAction`, that becomes the copy-mode commands
+/// the *keyboard* already sends, and the server answers with copy state whose
+/// cursor moved — which is the point of the equivalence, not a detail of it.
+#[tokio::test]
+async fn a_wheel_over_a_pane_walks_scrollback_through_the_copy_mode_commands() {
+    let dir = TempDir::new("wheel");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(
+        &socket,
+        "printf 'one\\ntwo\\nthree\\nfour\\nlast\\n'; read _; exit 0",
+    );
+    let mut attached = client(&socket).await;
+    let pane = PaneId::new(1);
+    await_text(&mut attached, "last").await;
+
+    // The client describes the screen it drew and hit-tests the report against
+    // it. A shell that never asked for the mouse owns nothing, so this is
+    // chrome's — and a chrome route has no wire event at all.
+    let screen = ScreenLayout::single(Size::new(80, 24), pane);
+    let report = MouseReport {
+        kind: MouseKind::ScrollUp,
+        mods: MouseMods::NONE,
+        col: 10,
+        row: 4,
+    };
+    let route = route_mouse(&screen, PaneModes::default(), &report);
+    assert_eq!(route.wire_event(), None, "a wheel here is not the child's");
+    let MouseRoute::Chrome(target) = route else {
+        panic!("expected a chrome route, got {route:?}");
+    };
+
+    let mut chrome = ChromeMouse::new();
+    let action = chrome
+        .feed(&screen, target, &report)
+        .expect("a wheel over a pane scrolls it");
+    let commands = action.commands(None);
+    assert_eq!(
+        commands
+            .iter()
+            .filter(|action| matches!(action, Action::CopyMotion(CopyMotion::Up)))
+            .count(),
+        usize::from(WHEEL_LINES),
+        "the wheel is copy-mode motions and nothing else: {commands:?}"
+    );
+    // Sent in two halves only so the test has a baseline to measure against: a
+    // real client sends the whole list, and the server coalesces the frames it
+    // answers with, which would leave nothing to compare the final cursor to.
+    // Copy mode starts on the newest retained line, so the notch is proved by
+    // the cursor landing exactly `WHEEL_LINES` above it rather than by copy mode
+    // merely being on.
+    let split = commands
+        .iter()
+        .position(|action| matches!(action, Action::EnterCopyMode))
+        .expect("a pane not in copy mode is asked to enter it")
+        + 1;
+    for command in &commands[..split] {
+        attached
+            .send_command(command.clone())
+            .await
+            .expect("a wheel command must reach the daemon");
+    }
+    let entered = await_copy_cursor(&mut attached, None).await.cursor.line;
+    for command in &commands[split..] {
+        attached
+            .send_command(command.clone())
+            .await
+            .expect("a wheel command must reach the daemon");
+    }
+    let state = await_copy_cursor(
+        &mut attached,
+        Some(entered.saturating_sub(u32::from(WHEEL_LINES))),
+    )
+    .await;
+
+    assert_eq!(state.pane, pane);
+    assert!(
+        state.selection.is_none(),
+        "scrolling selects nothing; it only moves the view"
+    );
+    assert_eq!(state.cursor.line + u32::from(WHEEL_LINES), entered);
 
     attached
         .send_input(b"\n".to_vec())

@@ -386,6 +386,16 @@ frame from an injected `Instant`: an interruption settling at the end state rath
 a bounded frame count however often the transition is sampled, reduce-motion drawing exactly one
 settled frame, and a contrast ramp that keeps every character readable — plus the transition frame
 in `cloo-client/src/renderer.rs`, whose settled phase is byte-identical to an ordinary span frame.
+M6-02 covers the chrome's own mouse actions (handshake v9) at three layers: `cloo-core/src/layout.rs`
+proves a drag changes ratios only by comparing the tree's *shape* with every ratio erased as well as
+the rectangles, with the clamp tested from both ends and an undividable extent leaving the ratio
+alone; `cloo-client/src/input.rs` finds a divider from the pane rectangles for both a gutter column
+and a header row, emits relative deltas with nothing on the press or after the release, and maps the
+wheel onto the copy-mode commands the keyboard already sends; `cloo-core/src/keymap.rs` asserts
+`FocusPane` and `ResizePane` have no spelling while the four directional focus actions stay bindable;
+and `cloo-server/tests/session.rs` proves against real children that a drag moves one divider without
+restarting anything and that a stale or zoom-hidden click is dropped — with the wheel end to end in
+`crates/cloo/tests/attach.rs`.
 M3-04 adds the keyboard-first overlays in `cloo-client/src/overlay.rs` — every overlay dismissible
 from every state including an empty one, navigation clamping at both ends, a confirmed launcher row
 naming a profile the caller supplied with an unvalidatable profile never becoming a row, pane
@@ -895,3 +905,26 @@ answers `None`. That is the same shape as `LaunchRequest` having no constructor 
 launcher row: the impossible case is absent from the vocabulary rather than rejected by a branch
 someone has to remember. Relatedly, `S-a` is refused because a terminal reports a shifted `a` as
 `A`, so accepting it would store a binding that could never fire.
+
+### 2026-07-23 — A gutter drag crosses the wire in cells, never as a ratio
+"Ratios never cross the wire" and "a drag lands on a column" meet in `Action::ResizePane { pane,
+dir, delta: i16 }`: the client sends the cells the pointer moved and `Layout::resize` turns them into
+exactly one new ratio on that pane's nearest ancestor split. A ratio on the wire would also have made
+`Action` un-`Eq`, which every existing round-trip test relies on — an `f32` field is a tell that the
+arithmetic belongs on the other side of the socket. The delta is signed and the pane names the
+divider's *leading* side, so the server works out whether it is the split's first or second child.
+
+### 2026-07-23 — A chrome gesture is only allowed to spend commands that already exist
+`ChromeAction::commands` is the whole mouse vocabulary, and it returns `Action`s the keyboard sends,
+because a gesture reachable only with a mouse would be unreachable on a terminal whose `sgr_mouse`
+fallback is "keyboard-driven chrome". That is why the wheel is `FocusPane` + `EnterCopyMode` + three
+`CopyMotion`s rather than a scroll command of its own, and why `FocusPane`/`ResizePane` have no
+keymap spelling — they name a pane, which a pointer supplies and a chord cannot. A press on a divider
+begins a drag and commands *nothing*, which is what keeps a drag from also focusing.
+
+### 2026-07-23 — Coalesced copy-mode frames leave an end-to-end test no baseline
+`crates/cloo/tests/attach.rs`'s wheel fixture sends `EnterCopyMode` and then the motions in two
+separate batches, because the damage tracker sends copy state only when it changed: a client that
+sent the whole list at once sees one frame, already at the final cursor, and any assertion against
+"where entering put it" passes vacuously. Split the batch when a fixture needs to measure a delta
+through a coalescing channel.

@@ -389,6 +389,46 @@ impl Layout {
             Search::Applied => Ok(()),
         }
     }
+
+    /// Moves the divider next to `pane`, growing it by `delta` cells along `dir`.
+    ///
+    /// The dragging form of [`Layout::set_ratio`], and it changes exactly the
+    /// same one thing: the ratio of `pane`'s nearest ancestor split along `dir`.
+    /// No pane is created, closed, reordered, or moved to another split — a drag
+    /// is a ratio and nothing else, which is why the tree of a resized layout is
+    /// the tree it had, node for node.
+    ///
+    /// `delta` is in cells because a pointer is: a drag lands on a column, not on
+    /// a fraction. `area` is what turns the two into each other, so the caller
+    /// must pass the area the layout is currently resolved against — the same one
+    /// [`Layout::resolve`] was given — or the cells will mean something else.
+    /// Which side of the divider `pane` sits on is worked out here, so a caller
+    /// never has to know whether it is the split's first or second child.
+    ///
+    /// The result is clamped so both halves keep [`MIN_PANE_SIZE`] on that axis
+    /// when the extent can hold two of them, and to one cell each when it cannot.
+    /// A drag past the end therefore stops at the end rather than being refused:
+    /// a pointer that ran off the screen is not an error a user can act on. Only
+    /// the two halves of *this* split are checked, exactly as [`Layout::split`]
+    /// checks only the two halves it creates.
+    ///
+    /// # Errors
+    ///
+    /// - [`LayoutError::UnknownPane`] if `pane` is not in the layout.
+    /// - [`LayoutError::NoSplit`] if no ancestor splits along `dir`.
+    pub fn resize(
+        &mut self,
+        pane: PaneId,
+        dir: Direction,
+        delta: i16,
+        area: Size,
+    ) -> Result<(), LayoutError> {
+        match drag(&mut self.root, pane, dir, delta, area) {
+            Search::Missing => Err(LayoutError::UnknownPane(pane)),
+            Search::Found => Err(LayoutError::NoSplit { pane, dir }),
+            Search::Applied => Ok(()),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -591,6 +631,81 @@ fn adjust(node: &mut Node, pane: PaneId, dir: Direction, ratio: f32) -> Search {
             }
             if matches!(found, Search::Found) && *node_dir == dir {
                 *node_ratio = ratio;
+                return Search::Applied;
+            }
+            found
+        }
+    }
+}
+
+/// The extent of `size` along `dir` — the axis a split on `dir` divides.
+const fn extent_along(size: Size, dir: Direction) -> u16 {
+    match dir {
+        Direction::Horizontal => size.cols,
+        Direction::Vertical => size.rows,
+    }
+}
+
+/// Finds `pane`, then moves the first ancestor divider along `dir` by `delta`
+/// cells in whichever direction grows `pane`.
+///
+/// `size` is the area this node resolves into, carried down the same way
+/// [`assign`] carries it, because a ratio only means cells relative to the split
+/// it belongs to. Everything above that split is untouched: the divider moves
+/// inside its own extent, so the panes on the far side of an outer split do not
+/// shift by a cell.
+fn drag(node: &mut Node, pane: PaneId, dir: Direction, delta: i16, size: Size) -> Search {
+    match node {
+        Node::Leaf(p) => {
+            if *p == pane {
+                Search::Found
+            } else {
+                Search::Missing
+            }
+        }
+        Node::Split {
+            dir: node_dir,
+            ratio: node_ratio,
+            first,
+            second,
+        } => {
+            let (a, b) = halves(size, *node_dir, *node_ratio);
+            let mut in_first = true;
+            let mut found = drag(first, pane, dir, delta, a);
+            if matches!(found, Search::Missing) {
+                in_first = false;
+                found = drag(second, pane, dir, delta, b);
+            }
+            if matches!(found, Search::Found) && *node_dir == dir {
+                let extent = extent_along(size, dir);
+                if extent >= 2 {
+                    let held = extent_along(a, dir);
+                    // Growing the second child means shrinking the first, which
+                    // is the only asymmetry in a drag: the ratio always names
+                    // the first child's share.
+                    let signed = if in_first {
+                        i32::from(delta)
+                    } else {
+                        -i32::from(delta)
+                    };
+                    let minimum = extent_along(MIN_PANE_SIZE, dir);
+                    let (low, high) = if extent >= minimum.saturating_mul(2) {
+                        (i32::from(minimum), i32::from(extent - minimum))
+                    } else {
+                        (1, i32::from(extent) - 1)
+                    };
+                    let target = (i32::from(held) + signed).clamp(low, high);
+                    // `target` is inside `[1, extent - 1]`, so the quotient is
+                    // strictly inside `(0.0, 1.0)` — the same interval `split`
+                    // and `set_ratio` refuse anything outside of.
+                    #[allow(clippy::cast_precision_loss)]
+                    let next = target as f32 / f32::from(extent);
+                    *node_ratio = next;
+                }
+                // An extent too small to divide leaves the ratio alone. The
+                // layout pass squeezes such an area anyway, and inventing a
+                // ratio for it would survive into the resize that gives the
+                // split room again.
                 return Search::Applied;
             }
             found
@@ -1008,6 +1123,143 @@ mod tests {
             LayoutError::InvalidRatio(_)
         ));
         assert_eq!(layout, before);
+    }
+
+    /// A drag is a ratio and nothing else. The whole point of the gutter is that
+    /// dragging it can never do what a split or a close does, so this asserts on
+    /// the *shape* of the tree as well as on the cells it resolves into.
+    #[test]
+    fn a_resize_moves_one_divider_and_changes_nothing_else() {
+        let mut layout = build(&[(0, Direction::Horizontal, 1), (1, Direction::Vertical, 2)]);
+        let before = layout.clone();
+
+        layout
+            .resize(pane(0), Direction::Horizontal, 12, AREA)
+            .expect("pane 0 has a horizontal ancestor");
+
+        assert_eq!(
+            layout.resolve(AREA),
+            vec![
+                rect(0, 0, 0, 72, 40),
+                rect(1, 72, 0, 48, 20),
+                rect(2, 72, 20, 48, 20),
+            ],
+            "the divider moves by exactly the cells asked for, and the far side keeps its own"
+        );
+        assert_eq!(layout.panes(), before.panes(), "no pane may move or vanish");
+        assert_eq!(
+            shape(layout.root()),
+            shape(before.root()),
+            "a drag may not reshape the tree"
+        );
+        assert_eq!(layout.zoomed(), before.zoomed());
+    }
+
+    /// The one asymmetry: the ratio names the *first* child's share, so a pane on
+    /// the second side of the divider grows when the ratio falls.
+    #[test]
+    fn resizing_from_either_side_of_a_divider_moves_it_the_same_way() {
+        let mut left = build(&[(0, Direction::Horizontal, 1)]);
+        let mut right = left.clone();
+
+        left.resize(pane(0), Direction::Horizontal, 10, AREA)
+            .expect("pane 0 grows");
+        right
+            .resize(pane(1), Direction::Horizontal, -10, AREA)
+            .expect("pane 1 shrinks by as much");
+
+        assert_eq!(left.resolve(AREA), right.resolve(AREA));
+        assert_eq!(left.resolve(AREA)[0].size.cols, 70);
+    }
+
+    /// Vertical stacks are the header-row drag, and they must respect the same
+    /// minimum a split does rather than letting a pointer squeeze a pane to
+    /// nothing.
+    #[test]
+    fn a_resize_stops_at_the_minimum_pane_size_rather_than_being_refused() {
+        let mut layout = build(&[(0, Direction::Vertical, 1)]);
+
+        layout
+            .resize(pane(0), Direction::Vertical, 500, AREA)
+            .expect("a drag past the end still applies");
+        let rects = layout.resolve(AREA);
+        assert_eq!(rects[0].size.rows, AREA.rows - MIN_PANE_SIZE.rows);
+        assert_eq!(rects[1].size.rows, MIN_PANE_SIZE.rows);
+
+        layout
+            .resize(pane(0), Direction::Vertical, -500, AREA)
+            .expect("and so does one past the other end");
+        let rects = layout.resolve(AREA);
+        assert_eq!(rects[0].size.rows, MIN_PANE_SIZE.rows);
+        assert_eq!(rects[1].size.rows, AREA.rows - MIN_PANE_SIZE.rows);
+    }
+
+    /// An area no split could have been made in still has to answer. The floor
+    /// drops to one cell a side, which is what `resolve` squeezes to anyway.
+    #[test]
+    fn a_resize_in_an_area_below_the_minimum_keeps_every_pane_drawable() {
+        let mut layout = build(&[(0, Direction::Horizontal, 1)]);
+        let tiny = Size::new(5, 2);
+
+        layout
+            .resize(pane(0), Direction::Horizontal, 99, tiny)
+            .expect("a cramped area still resizes");
+
+        let rects = layout.resolve(tiny);
+        assert_eq!(rects.len(), 2);
+        for r in &rects {
+            assert!(
+                r.size.cols >= 1,
+                "no pane may resolve to zero columns: {r:?}"
+            );
+        }
+    }
+
+    /// A zero-column area cannot express a divider at all, and the ratio it had
+    /// must survive so the next resize draws what it did before.
+    #[test]
+    fn a_resize_in_an_undividable_extent_leaves_the_ratio_alone() {
+        let mut layout = build(&[(0, Direction::Horizontal, 1)]);
+        let before = layout.clone();
+
+        layout
+            .resize(pane(0), Direction::Horizontal, 4, Size::new(1, 40))
+            .expect("an undividable extent is not an error");
+
+        assert_eq!(layout, before);
+    }
+
+    #[test]
+    fn a_resize_rejects_missing_panes_and_missing_axes() {
+        let mut layout = build(&[(0, Direction::Horizontal, 1)]);
+        let before = layout.clone();
+
+        assert_eq!(
+            layout
+                .resize(pane(9), Direction::Horizontal, 3, AREA)
+                .expect_err("pane 9 does not exist"),
+            LayoutError::UnknownPane(pane(9))
+        );
+        assert_eq!(
+            layout
+                .resize(pane(0), Direction::Vertical, 3, AREA)
+                .expect_err("no vertical ancestor"),
+            LayoutError::NoSplit {
+                pane: pane(0),
+                dir: Direction::Vertical
+            }
+        );
+        assert_eq!(layout, before);
+    }
+
+    /// The tree's shape with every ratio erased: what a drag must not change.
+    fn shape(node: &Node) -> String {
+        match node {
+            Node::Leaf(pane) => format!("{pane}"),
+            Node::Split {
+                dir, first, second, ..
+            } => format!("({dir:?} {} {})", shape(first), shape(second)),
+        }
     }
 
     #[test]

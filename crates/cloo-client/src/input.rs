@@ -15,7 +15,12 @@
 //!    whether that place belongs to the pane's application or to cloo's own
 //!    chrome. [`mouse_owner`] is the ownership rule on its own, for a caller
 //!    that has already done its own hit testing.
-//! 4. [`decode_key`] and [`KeyRouter`] — the keyboard's half of the same
+//! 4. [`ChromeMouse`] — what cloo *does* with the reports it kept. Click to
+//!    focus, drag a divider, roll the wheel through scrollback; each one becomes
+//!    a [`ChromeAction`] and then commands that already exist, because a gesture
+//!    reachable only with a mouse would be unreachable on a terminal that
+//!    reports none.
+//! 5. [`decode_key`] and [`KeyRouter`] — the keyboard's half of the same
 //!    ownership question. `cloo-core` owns what a chord is *called* and what it
 //!    is bound to; this is where a run of bytes becomes a [`Key`] and where the
 //!    prefix state machine decides whether a chord is cloo's at all.
@@ -45,8 +50,8 @@
 
 use cloo_core::keymap::{Key, KeyCode, KeyMods, Keymap};
 use cloo_proto::{
-    Action, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, PaneId, PaneModes, Point,
-    Size, TermCaps,
+    Action, CopyMotion, Direction, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
+    PaneId, PaneModes, Point, Size, TermCaps,
 };
 
 /// Turns on bracketed paste in the outer terminal.
@@ -719,6 +724,81 @@ impl ScreenLayout {
         }
         MouseTarget::Chrome(ChromeTarget::Gutter)
     }
+
+    /// The divider `(col, row)` sits on, if it sits on one.
+    ///
+    /// A divider is a *drawn* cell between two panes: the one-cell gutter the
+    /// style guide puts between side-by-side panes, and the header row between
+    /// stacked ones — the header row **is** the lower pane's top border, so it is
+    /// the same cell either way. Both are found the same way, from the pane
+    /// rectangles alone: a pane's trailing edge one cell before the cell asked
+    /// about, another pane's leading edge one cell after it, and some shared
+    /// extent on the perpendicular axis so a divider elsewhere on the screen is
+    /// not mistaken for this one.
+    ///
+    /// A cell inside a pane's grid is never a divider, and neither is a header at
+    /// the top of the screen with nothing above it: the border of the outermost
+    /// pane divides that pane from the terminal, and no ratio describes it.
+    #[must_use]
+    pub fn divider(&self, col: u16, row: u16) -> Option<Divider> {
+        if self.panes.iter().any(|area| area.contains(col, row)) {
+            return None;
+        }
+        // Vertical divider first, and the order matters no more than that: the
+        // two cases are disjoint, because a cell cannot be both a pane's right
+        // edge with a neighbour beside it and its bottom edge with one below.
+        let vertical = self.panes.iter().find(|left| {
+            left.x.saturating_add(left.size.cols) == col
+                && (left.y..left.y.saturating_add(left.size.rows)).contains(&row)
+                && self
+                    .panes
+                    .iter()
+                    .any(|right| right.x == col.saturating_add(1) && overlaps_rows(left, right))
+        });
+        if let Some(left) = vertical {
+            return Some(Divider {
+                pane: left.pane,
+                dir: Direction::Horizontal,
+            });
+        }
+        let horizontal = self.panes.iter().find(|above| {
+            above.y.saturating_add(above.size.rows) == row
+                && (above.x..above.x.saturating_add(above.size.cols)).contains(&col)
+                && self
+                    .panes
+                    .iter()
+                    .any(|below| below.y == row.saturating_add(1) && overlaps_cols(above, below))
+        });
+        horizontal.map(|above| Divider {
+            pane: above.pane,
+            dir: Direction::Vertical,
+        })
+    }
+}
+
+/// Whether two pane rectangles share any row.
+fn overlaps_rows(a: &PaneArea, b: &PaneArea) -> bool {
+    a.y < b.y.saturating_add(b.size.rows) && b.y < a.y.saturating_add(a.size.rows)
+}
+
+/// Whether two pane rectangles share any column.
+fn overlaps_cols(a: &PaneArea, b: &PaneArea) -> bool {
+    a.x < b.x.saturating_add(b.size.cols) && b.x < a.x.saturating_add(a.size.cols)
+}
+
+/// One divider between two panes, named by the pane on its leading side.
+///
+/// `pane` is the pane *before* the divider — above it or to its left — because
+/// that is the one a drag toward the far side grows, and naming one side is what
+/// lets a delta carry a sign instead of a direction. The server resolves the
+/// divider from the pane and the axis, so a client never has to know which child
+/// of which split it is looking at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Divider {
+    /// The pane on the divider's leading side.
+    pub pane: PaneId,
+    /// The axis the divider divides along.
+    pub dir: Direction,
 }
 
 /// Where a mouse report landed on the screen.
@@ -844,6 +924,225 @@ pub fn route_mouse(layout: &ScreenLayout, modes: PaneModes, report: &MouseReport
                 MouseRoute::Chrome(ChromeTarget::PaneBody { pane, at })
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chrome gestures
+// ---------------------------------------------------------------------------
+
+/// How many retained lines one wheel notch moves.
+///
+/// Three, the conventional notch, and it is a count of *copy-mode motions* — the
+/// wheel has no command of its own, which is what makes its keyboard equivalent
+/// exact rather than approximate.
+pub const WHEEL_LINES: u16 = 3;
+
+/// One thing a chrome mouse gesture asks cloo to do.
+///
+/// Every variant maps onto commands that already exist, and that is the rule
+/// rather than a coincidence: a gesture cloo could do only with a mouse would be
+/// unreachable on a terminal that reports no mouse at all, which the capability
+/// fallback makes an ordinary case rather than an exotic one. Use
+/// [`commands`](Self::commands) to get the wire form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromeAction {
+    /// Focus the pane the user clicked. The keyboard reaches the same state
+    /// through the four directional focus actions.
+    Focus(PaneId),
+    /// Move a divider, growing `pane` by `delta` cells along `dir`.
+    Resize {
+        /// The pane on the divider's leading side.
+        pane: PaneId,
+        /// The axis the divider divides along.
+        dir: Direction,
+        /// How far it moved, in cells, signed toward `pane` growing.
+        delta: i16,
+    },
+    /// Walk a pane's retained scrollback. The keyboard reaches the same state
+    /// through `enter-copy-mode` and `copy-up`/`copy-down`.
+    Scroll {
+        /// The pane pointed at, which the wheel focuses before it scrolls —
+        /// copy mode is the *focused* pane's, so scrolling an unfocused one
+        /// without focusing it would move a view nobody was pointing at.
+        pane: PaneId,
+        /// Toward older lines rather than newer ones.
+        up: bool,
+        /// How many retained lines to move.
+        lines: u16,
+    },
+}
+
+impl ChromeAction {
+    /// The commands this gesture sends, in order.
+    ///
+    /// `copy_mode` is the pane the server last said copy mode was active on, from
+    /// `ServerMessage::CopyMode`, because copy mode is *session* state: a second
+    /// client may already have entered it, and a client that assumed either way
+    /// would be guessing at something it does not own. A wheel over a pane that
+    /// is not already in copy mode enters it first, which is exactly what the
+    /// keyboard user types.
+    #[must_use]
+    pub fn commands(self, copy_mode: Option<PaneId>) -> Vec<Action> {
+        match self {
+            Self::Focus(pane) => vec![Action::FocusPane(pane)],
+            Self::Resize { pane, dir, delta } => vec![Action::ResizePane { pane, dir, delta }],
+            Self::Scroll { pane, up, lines } => {
+                let motion = if up { CopyMotion::Up } else { CopyMotion::Down };
+                let mut out = Vec::with_capacity(usize::from(lines) + 2);
+                out.push(Action::FocusPane(pane));
+                if copy_mode != Some(pane) {
+                    out.push(Action::EnterCopyMode);
+                }
+                out.extend(std::iter::repeat_n(
+                    Action::CopyMotion(motion),
+                    lines.into(),
+                ));
+                out
+            }
+        }
+    }
+}
+
+/// A divider drag in flight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Drag {
+    /// The divider being moved.
+    divider: Divider,
+    /// Where the pointer was when the last delta was emitted, on the divider's
+    /// own axis. Advancing it as the drag moves is what keeps the deltas
+    /// relative and stops one drag from applying its distance twice.
+    anchor: u16,
+}
+
+/// Turns chrome-owned mouse reports into the commands cloo already has.
+///
+/// Stateful for exactly one reason: a drag is three reports — a press, some
+/// motion, a release — and only the press knows which divider is being moved.
+/// Everything else is a pure function of one report.
+///
+/// The press is also what makes a drag and a click distinguishable without a
+/// timer: a press on a divider begins a drag and commands nothing, while a press
+/// anywhere else focuses at once. That is why dragging a gutter can never focus
+/// a pane, and why a click can never move a divider by zero cells.
+#[derive(Debug, Clone, Default)]
+pub struct ChromeMouse {
+    drag: Option<Drag>,
+}
+
+impl ChromeMouse {
+    /// A machine with no drag in flight.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self { drag: None }
+    }
+
+    /// Whether a divider drag is in flight.
+    #[must_use]
+    pub const fn is_dragging(&self) -> bool {
+        self.drag.is_some()
+    }
+
+    /// Interprets one chrome-owned report against the screen it landed on.
+    ///
+    /// `target` must be the [`ChromeTarget`] [`route_mouse`] answered with, which
+    /// is what keeps an application's own event out of here: a pane that is
+    /// tracking the mouse never produces one, so its scroll wheel stays its own.
+    pub fn feed(
+        &mut self,
+        layout: &ScreenLayout,
+        target: ChromeTarget,
+        report: &MouseReport,
+    ) -> Option<ChromeAction> {
+        match report.kind {
+            MouseKind::Press(MouseButton::Left) => self.press(layout, target, report),
+            MouseKind::Motion(Some(MouseButton::Left)) => self.motion(report),
+            // Any release ends the drag. A terminal that reports a release
+            // without a button — some do, in the legacy encoding — would
+            // otherwise leave a drag pinned to the pointer forever.
+            MouseKind::Release(_) => {
+                self.drag = None;
+                None
+            }
+            MouseKind::ScrollUp => scroll(target, true),
+            MouseKind::ScrollDown => scroll(target, false),
+            MouseKind::Press(_) | MouseKind::Motion(_) => None,
+        }
+    }
+
+    /// A left press: the start of a drag, or a click that focuses.
+    fn press(
+        &mut self,
+        layout: &ScreenLayout,
+        target: ChromeTarget,
+        report: &MouseReport,
+    ) -> Option<ChromeAction> {
+        if let Some(divider) = layout.divider(report.col, report.row) {
+            self.drag = Some(Drag {
+                divider,
+                anchor: along(divider.dir, report),
+            });
+            return None;
+        }
+        match target {
+            // A header names its pane, and the header row is that pane's top
+            // border: clicking a pane's frame is clicking the pane.
+            ChromeTarget::PaneBody { pane, .. } | ChromeTarget::Header { pane, .. } => {
+                Some(ChromeAction::Focus(pane))
+            }
+            ChromeTarget::TabRow { .. }
+            | ChromeTarget::StatusBar { .. }
+            | ChromeTarget::Gutter
+            | ChromeTarget::Outside => None,
+        }
+    }
+
+    /// Pointer motion with the left button held: a divider drag, or nothing.
+    fn motion(&mut self, report: &MouseReport) -> Option<ChromeAction> {
+        let drag = self.drag.as_mut()?;
+        let now = along(drag.divider.dir, report);
+        let delta = i32::from(now) - i32::from(drag.anchor);
+        if delta == 0 {
+            return None;
+        }
+        drag.anchor = now;
+        Some(ChromeAction::Resize {
+            pane: drag.divider.pane,
+            dir: drag.divider.dir,
+            // A terminal cannot report a coordinate outside `u16`, so the
+            // difference of two of them always fits.
+            delta: i16::try_from(delta).unwrap_or(0),
+        })
+    }
+}
+
+/// The report's coordinate on the axis a divider along `dir` moves in.
+const fn along(dir: Direction, report: &MouseReport) -> u16 {
+    match dir {
+        Direction::Horizontal => report.col,
+        Direction::Vertical => report.row,
+    }
+}
+
+/// A wheel notch over a pane, or nothing.
+///
+/// Deliberately only over a pane. A wheel over the tab row or the status bar
+/// scrolls nothing, because there is no scrollback there to walk and guessing
+/// that the user meant the focused pane would move a view they were not pointing
+/// at.
+fn scroll(target: ChromeTarget, up: bool) -> Option<ChromeAction> {
+    match target {
+        ChromeTarget::PaneBody { pane, .. } | ChromeTarget::Header { pane, .. } => {
+            Some(ChromeAction::Scroll {
+                pane,
+                up,
+                lines: WHEEL_LINES,
+            })
+        }
+        ChromeTarget::TabRow { .. }
+        | ChromeTarget::StatusBar { .. }
+        | ChromeTarget::Gutter
+        | ChromeTarget::Outside => None,
     }
 }
 
@@ -1836,6 +2135,321 @@ mod tests {
             route_mouse(&screen(), tracking(MouseTracking::Click), &motion),
             MouseRoute::Application(_)
         ));
+    }
+
+    // -- chrome gestures ----------------------------------------------------
+
+    /// The same two-pane screen with a third pane stacked under the right one,
+    /// so both kinds of divider exist at once:
+    ///
+    /// ```text
+    ///  col 10       vertical divider (the one-cell gutter)
+    ///  row 5        horizontal divider, which is pane 3's header row
+    /// ```
+    fn stacked() -> ScreenLayout {
+        ScreenLayout::new(Size::new(20, 10))
+            .tab_row(0)
+            .status_row(9)
+            .focus(Some(PaneId::new(1)))
+            .pane(PaneArea::new(PaneId::new(1), 0, 2, Size::new(10, 7)))
+            .pane(PaneArea::new(PaneId::new(2), 11, 2, Size::new(9, 3)))
+            .pane(PaneArea::new(PaneId::new(3), 11, 6, Size::new(9, 3)))
+    }
+
+    fn kind(kind: MouseKind, col: u16, row: u16) -> MouseReport {
+        MouseReport {
+            kind,
+            mods: MouseMods::NONE,
+            col,
+            row,
+        }
+    }
+
+    #[test]
+    fn a_divider_is_found_from_the_pane_rectangles_on_either_side_of_it() {
+        let screen = stacked();
+        assert_eq!(
+            screen.divider(10, 4),
+            Some(Divider {
+                pane: PaneId::new(1),
+                dir: Direction::Horizontal,
+            }),
+            "the gutter column names the pane on its left"
+        );
+        assert_eq!(
+            screen.divider(13, 5),
+            Some(Divider {
+                pane: PaneId::new(2),
+                dir: Direction::Vertical,
+            }),
+            "a header row between two panes is the divider above the lower one"
+        );
+    }
+
+    #[test]
+    fn a_cell_with_no_pane_on_both_sides_of_it_is_not_a_divider() {
+        let screen = stacked();
+        let cases: [(&str, u16, u16); 5] = [
+            ("inside a pane's grid", 3, 4),
+            ("the tab row", 3, 0),
+            ("the status bar", 3, 9),
+            // Row 1 is pane 1's and pane 2's header, with nothing above either:
+            // the outermost border divides a pane from the terminal, and no
+            // ratio describes that.
+            ("a header at the top of the screen", 3, 1),
+            ("the gutter column beside a row no pane occupies", 10, 9),
+        ];
+        for (name, col, row) in cases {
+            assert_eq!(screen.divider(col, row), None, "{name}");
+        }
+    }
+
+    /// A drag is the acceptance criterion in one test: every command it produces
+    /// is a resize, the deltas are relative rather than cumulative, and nothing
+    /// about it focuses, splits, or closes anything.
+    #[test]
+    fn dragging_a_gutter_emits_resizes_and_nothing_else() {
+        let screen = stacked();
+        let mut chrome = ChromeMouse::new();
+
+        assert_eq!(
+            chrome.feed(
+                &screen,
+                ChromeTarget::Gutter,
+                &kind(MouseKind::Press(MouseButton::Left), 10, 4)
+            ),
+            None,
+            "a press on a divider begins a drag and commands nothing"
+        );
+        assert!(chrome.is_dragging());
+
+        let mut deltas = Vec::new();
+        for col in [12, 13, 13, 9] {
+            let action = chrome.feed(
+                &screen,
+                ChromeTarget::Gutter,
+                &kind(MouseKind::Motion(Some(MouseButton::Left)), col, 4),
+            );
+            if let Some(action) = action {
+                let ChromeAction::Resize { pane, dir, delta } = action else {
+                    panic!("a gutter drag may only resize, got {action:?}");
+                };
+                assert_eq!(pane, PaneId::new(1));
+                assert_eq!(dir, Direction::Horizontal);
+                deltas.push(delta);
+                assert_eq!(
+                    action.commands(None),
+                    vec![Action::ResizePane { pane, dir, delta }],
+                    "and a resize is exactly one command"
+                );
+            }
+        }
+        assert_eq!(
+            deltas,
+            vec![2, 1, -4],
+            "each delta is measured from the last one, and a motion that did not \
+             move a cell commands nothing"
+        );
+
+        assert_eq!(
+            chrome.feed(
+                &screen,
+                ChromeTarget::Gutter,
+                &kind(MouseKind::Release(MouseButton::Left), 9, 4)
+            ),
+            None
+        );
+        assert!(!chrome.is_dragging());
+        assert_eq!(
+            chrome.feed(
+                &screen,
+                ChromeTarget::Gutter,
+                &kind(MouseKind::Motion(Some(MouseButton::Left)), 3, 4)
+            ),
+            None,
+            "motion after the release belongs to nobody"
+        );
+    }
+
+    #[test]
+    fn dragging_a_header_row_moves_the_divider_above_the_pane_it_names() {
+        let screen = stacked();
+        let mut chrome = ChromeMouse::new();
+        let header = ChromeTarget::Header {
+            pane: PaneId::new(3),
+            col: 2,
+        };
+
+        assert_eq!(
+            chrome.feed(
+                &screen,
+                header,
+                &kind(MouseKind::Press(MouseButton::Left), 13, 5)
+            ),
+            None,
+            "a header that is also a divider drags rather than focusing"
+        );
+        assert_eq!(
+            chrome.feed(
+                &screen,
+                header,
+                &kind(MouseKind::Motion(Some(MouseButton::Left)), 13, 7)
+            ),
+            Some(ChromeAction::Resize {
+                pane: PaneId::new(2),
+                dir: Direction::Vertical,
+                delta: 2,
+            }),
+            "the pane above grows, and the column the pointer wandered to is \
+             irrelevant on this axis"
+        );
+    }
+
+    #[test]
+    fn clicking_a_pane_focuses_it_and_clicking_chrome_that_is_not_a_pane_does_not() {
+        let screen = stacked();
+        let cases: [(&str, ChromeTarget, u16, u16, Option<ChromeAction>); 5] = [
+            (
+                "an unfocused pane's body",
+                ChromeTarget::PaneBody {
+                    pane: PaneId::new(2),
+                    at: Point::new(1, 2),
+                },
+                12,
+                4,
+                Some(ChromeAction::Focus(PaneId::new(2))),
+            ),
+            (
+                "a pane header, which is that pane's own top border",
+                ChromeTarget::Header {
+                    pane: PaneId::new(1),
+                    col: 4,
+                },
+                4,
+                1,
+                Some(ChromeAction::Focus(PaneId::new(1))),
+            ),
+            ("the tab row", ChromeTarget::TabRow { col: 3 }, 3, 0, None),
+            (
+                "the status bar",
+                ChromeTarget::StatusBar { col: 3 },
+                3,
+                9,
+                None,
+            ),
+            ("off screen", ChromeTarget::Outside, 40, 40, None),
+        ];
+
+        for (name, target, col, row, expected) in cases {
+            let mut chrome = ChromeMouse::new();
+            let action = chrome.feed(
+                &screen,
+                target,
+                &kind(MouseKind::Press(MouseButton::Left), col, row),
+            );
+            assert_eq!(action, expected, "{name}");
+            assert!(!chrome.is_dragging(), "{name} must not begin a drag");
+        }
+
+        assert_eq!(
+            ChromeAction::Focus(PaneId::new(2)).commands(None),
+            vec![Action::FocusPane(PaneId::new(2))],
+            "and focus is one command, whose keyboard equivalent is focus-left \
+             and its three siblings"
+        );
+    }
+
+    /// The wheel has no command of its own: it is the copy-mode commands the
+    /// keyboard already has, which is what makes the equivalence exact.
+    #[test]
+    fn the_wheel_walks_scrollback_through_the_copy_mode_commands() {
+        let screen = stacked();
+        let mut chrome = ChromeMouse::new();
+        let body = ChromeTarget::PaneBody {
+            pane: PaneId::new(2),
+            at: Point::new(1, 2),
+        };
+
+        let up = chrome
+            .feed(&screen, body, &kind(MouseKind::ScrollUp, 12, 4))
+            .expect("a wheel over a pane scrolls it");
+        assert_eq!(
+            up,
+            ChromeAction::Scroll {
+                pane: PaneId::new(2),
+                up: true,
+                lines: WHEEL_LINES,
+            }
+        );
+
+        let mut expected = vec![Action::FocusPane(PaneId::new(2)), Action::EnterCopyMode];
+        expected.extend(std::iter::repeat_n(
+            Action::CopyMotion(CopyMotion::Up),
+            WHEEL_LINES.into(),
+        ));
+        assert_eq!(up.commands(None), expected);
+
+        let mut already = expected.clone();
+        already.remove(1);
+        assert_eq!(
+            up.commands(Some(PaneId::new(2))),
+            already,
+            "a pane the server already reported in copy mode is not asked again"
+        );
+        assert_eq!(
+            up.commands(Some(PaneId::new(9))),
+            expected,
+            "and another pane's copy mode says nothing about this one"
+        );
+
+        let down = chrome
+            .feed(&screen, body, &kind(MouseKind::ScrollDown, 12, 4))
+            .expect("and the other way");
+        let mut downward = vec![Action::FocusPane(PaneId::new(2))];
+        downward.extend(std::iter::repeat_n(
+            Action::CopyMotion(CopyMotion::Down),
+            WHEEL_LINES.into(),
+        ));
+        assert_eq!(down.commands(Some(PaneId::new(2))), downward);
+    }
+
+    #[test]
+    fn a_wheel_over_chrome_with_no_scrollback_under_it_does_nothing() {
+        let screen = stacked();
+        let mut chrome = ChromeMouse::new();
+        for target in [
+            ChromeTarget::TabRow { col: 3 },
+            ChromeTarget::StatusBar { col: 3 },
+            ChromeTarget::Gutter,
+            ChromeTarget::Outside,
+        ] {
+            assert_eq!(
+                chrome.feed(&screen, target, &kind(MouseKind::ScrollUp, 10, 4)),
+                None,
+                "{target:?} has no scrollback to walk, and guessing at the \
+                 focused pane would move a view nobody pointed at"
+            );
+        }
+    }
+
+    /// A pane whose application tracks the mouse never reaches [`ChromeMouse`]
+    /// at all, so its own scroll wheel and its own drags stay its own.
+    #[test]
+    fn an_application_owned_report_never_becomes_a_chrome_gesture() {
+        let screen = stacked();
+        let modes = tracking(MouseTracking::Motion);
+        for kind in [
+            MouseKind::Press(MouseButton::Left),
+            MouseKind::ScrollUp,
+            MouseKind::Motion(Some(MouseButton::Left)),
+        ] {
+            // Over the focused pane, whose modes the client holds.
+            let route = route_mouse(&screen, modes, &self::kind(kind, 2, 3));
+            assert!(
+                matches!(route, MouseRoute::Application(_)),
+                "{kind:?} over a tracking application is its own, got {route:?}"
+            );
+        }
     }
 
     // -- decoding chords ----------------------------------------------------

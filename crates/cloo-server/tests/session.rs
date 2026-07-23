@@ -357,6 +357,132 @@ async fn focus_moves_between_panes_and_input_follows_it() {
     ask_size(&session.handle, "40 90").await;
 }
 
+/// The mouse's half of focus. A click names a pane rather than a direction, so
+/// it must reach the same session state the four directional actions do — and it
+/// must be as unable to reach a pane that is not there.
+#[tokio::test]
+async fn focusing_a_named_pane_moves_focus_and_a_stale_name_is_dropped() {
+    let (root, session) = session(120, 40);
+    let right = session
+        .handle
+        .split(Direction::Horizontal, 0.25)
+        .await
+        .expect("30 and 90 columns both clear the minimum");
+    assert_eq!(snapshot_now(&session.handle).await.focused, right);
+
+    session
+        .handle
+        .focus_pane(root)
+        .await
+        .expect("session is alive");
+    assert_eq!(snapshot_now(&session.handle).await.focused, root);
+    // The keystroke follows focus, which is the whole proof it moved.
+    ask_size(&session.handle, "40 30").await;
+
+    // A click that crossed the wire against a screen a frame out of date.
+    session
+        .handle
+        .focus_pane(PaneId::new(99))
+        .await
+        .expect("session is alive");
+    assert_eq!(
+        snapshot_now(&session.handle).await.focused,
+        root,
+        "a click naming a pane that does not exist is dropped, not obeyed"
+    );
+
+    // A hidden pane is unreachable for the same reason a mouse event naming one
+    // is: it is not on the screen the click was aimed at.
+    session
+        .handle
+        .toggle_zoom()
+        .await
+        .expect("session is alive");
+    session
+        .handle
+        .focus_pane(right)
+        .await
+        .expect("session is alive");
+    assert_eq!(
+        snapshot_now(&session.handle).await.focused,
+        root,
+        "a pane a zoom is hiding cannot be clicked"
+    );
+}
+
+/// A gutter drag changes ratios only. Proved on both halves: the rectangles move
+/// by the cells asked for and the total is unchanged, and the same child is still
+/// running in each pane afterwards — a drag that had reshaped the tree, or
+/// restarted anything, would fail one or the other.
+#[tokio::test]
+async fn a_gutter_drag_moves_one_divider_without_restarting_a_child() {
+    let (root, session) = session_running(PID_THEN_REPORT, 120, 40);
+    let right = session
+        .handle
+        .split_even(Direction::Horizontal)
+        .await
+        .expect("the split must fit");
+    let right_pid = wait_for_line(&session.handle, "pid=").await;
+    session
+        .handle
+        .move_focus(Side::Left)
+        .await
+        .expect("session is alive");
+    let root_pid = wait_for_line(&session.handle, "pid=").await;
+    assert_ne!(root_pid, right_pid, "two panes, two children");
+    ask_size(&session.handle, "40 60").await;
+
+    session
+        .handle
+        .resize_pane(root, Direction::Horizontal, 15)
+        .await
+        .expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
+    assert_eq!(snapshot.panes.len(), 2, "a drag creates and closes nothing");
+    assert_eq!(rect_of(&snapshot, root), Size::new(75, 40));
+    assert_eq!(
+        rect_of(&snapshot, right),
+        Size::new(45, 40),
+        "the neighbour gives up exactly what the dragged pane gained"
+    );
+    assert_eq!(snapshot.focused, root, "and a drag does not move focus");
+    // The child heard about it through the ordinary geometry pass, and it is the
+    // same child: the pid it printed at startup is still on its grid.
+    ask_size(&session.handle, "40 75").await;
+    assert_eq!(
+        wait_for_line(&session.handle, "pid=").await,
+        root_pid,
+        "a drag must never restart a pane's child"
+    );
+
+    // Past the end stops at the end rather than being refused, and the far side
+    // keeps the minimum a split would have insisted on.
+    session
+        .handle
+        .resize_pane(root, Direction::Horizontal, 500)
+        .await
+        .expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
+    assert_eq!(rect_of(&snapshot, right), Size::new(20, 40));
+    assert_eq!(rect_of(&snapshot, root), Size::new(100, 40));
+
+    // And a drag naming a pane that is gone, or an axis with no divider on it,
+    // is dropped exactly as a stale click is.
+    for (pane, dir) in [
+        (PaneId::new(99), Direction::Horizontal),
+        (root, Direction::Vertical),
+    ] {
+        session
+            .handle
+            .resize_pane(pane, dir, 5)
+            .await
+            .expect("session is alive");
+        let after = snapshot_now(&session.handle).await;
+        assert_eq!(rect_of(&after, root), Size::new(100, 40));
+        assert_eq!(rect_of(&after, right), Size::new(20, 40));
+    }
+}
+
 #[tokio::test]
 async fn zoom_fills_the_area_and_unzoom_restores_the_split_without_a_restart() {
     let (root, session) = session_running(PID_THEN_REPORT, 120, 40);

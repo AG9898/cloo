@@ -8,10 +8,11 @@
 //!    on the terminal; what a chord is called in `config.toml` is cloo's, and it
 //!    must not drift between the parser and the documentation.
 //! 2. The [`Action`] vocabulary — [`parse_action`] and [`action_name`], one
-//!    kebab-case spelling per bindable action. An action that needs text a key
-//!    cannot carry ([`Action::RenameTab`], [`Action::CopySearch`]) has **no
-//!    spelling at all**, so a binding can never name a command the keypress could
-//!    not supply an argument for.
+//!    kebab-case spelling per bindable action. An action that needs an argument a
+//!    key cannot carry — text ([`Action::RenameTab`], [`Action::CopySearch`]) or a
+//!    pane id ([`Action::FocusPane`], [`Action::ResizePane`], which the mouse
+//!    supplies by pointing) — has **no spelling at all**, so a binding can never
+//!    name a command the keypress could not supply an argument for.
 //! 3. [`Keymap`] — the prefix chord plus the table reached after it. The
 //!    defaults are tmux's, with `C-b` as the prefix, because the secondary user
 //!    is a fluent tmux user (see `DECISIONS.md` RESOLVED-04).
@@ -385,7 +386,9 @@ impl fmt::Display for Key {
 /// carries everything the action needs. [`Action::RenameTab`] and
 /// [`Action::CopySearch`] take text the user has to type somewhere, so they are
 /// reached from a surface that can ask for it rather than from a chord that
-/// would have to invent it.
+/// would have to invent it. [`Action::FocusPane`] and [`Action::ResizePane`] are
+/// out for the same reason with a different argument: they name a pane, which a
+/// pointer supplies and a chord cannot.
 pub const ACTION_NAMES: [&str; 31] = [
     "split-vertical",
     "split-horizontal",
@@ -498,8 +501,13 @@ pub fn action_name(action: &Action) -> Option<&'static str> {
         Action::CopySelection(ClipboardTarget::Clipboard) => "copy-to-clipboard",
         Action::CopySelection(ClipboardTarget::PrimarySelection) => "copy-to-primary",
         Action::DetachClient => "detach-client",
-        // Both need text a chord cannot carry.
-        Action::RenameTab(_) | Action::CopySearch { .. } => return None,
+        // The first two need text a chord cannot carry; the last two name a
+        // pane, which a keypress does not either. The keyboard reaches the same
+        // session state through `focus-left` and friends.
+        Action::RenameTab(_)
+        | Action::CopySearch { .. }
+        | Action::FocusPane(_)
+        | Action::ResizePane { .. } => return None,
     })
 }
 
@@ -614,6 +622,7 @@ impl Default for Keymap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cloo_proto::{Direction, PaneId};
 
     fn key(text: &str) -> Key {
         Key::parse(text).unwrap_or_else(|e| panic!("{text:?} should parse: {e}"))
@@ -727,6 +736,31 @@ mod tests {
         assert_eq!(parse_action("rename-tab"), None);
         assert_eq!(parse_action("copy-search"), None);
         assert_eq!(parse_action(""), None);
+    }
+
+    /// The mouse's own actions name a pane. A chord cannot, so they are absent
+    /// from the vocabulary in both directions — and the keyboard equivalent a
+    /// click has is `focus-left` and its three siblings, which are bound.
+    #[test]
+    fn an_action_that_names_a_pane_has_no_spelling_but_has_a_keyboard_equivalent() {
+        assert_eq!(action_name(&Action::FocusPane(PaneId::new(3))), None);
+        assert_eq!(
+            action_name(&Action::ResizePane {
+                pane: PaneId::new(3),
+                dir: Direction::Horizontal,
+                delta: 2,
+            }),
+            None
+        );
+        assert_eq!(parse_action("focus-pane"), None);
+        assert_eq!(parse_action("resize-pane"), None);
+
+        for name in ["focus-left", "focus-right", "focus-up", "focus-down"] {
+            assert!(
+                ACTION_NAMES.contains(&name),
+                "{name} must stay bindable: it is what a click's keyboard equivalent is"
+            );
+        }
     }
 
     // -- defaults, overrides, and conflicts ---------------------------------

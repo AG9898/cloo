@@ -142,6 +142,30 @@ from that compact form rather than making up a different layout. `status_bar_cel
 `status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
 non-truecolor fallback down-samples colours while leaving these ASCII signals intact.
 
+### Mouse gestures on chrome
+
+The mouse is a convenience over the chrome, never a second way to reach it. As of M6-02 every
+gesture spends its result on a command the keyboard already has, so a terminal that reports no
+mouse at all — the documented `sgr_mouse` fallback — loses nothing but the pointer:
+
+| Gesture | What it does | Keyboard equivalent |
+|---|---|---|
+| Click a pane, or its header | Focus that pane | the four directional focus bindings |
+| Drag the gutter, or a header row | Move that divider | — |
+| Wheel over a pane | Walk three retained lines of its scrollback | `enter-copy-mode`, then `copy-up`/`copy-down` |
+
+The one-cell gutter and the header row are the same thing to a drag: the header row *is* the lower
+pane's top border, so both are dividers and both drag. **A drag changes ratios only** — no pane is
+created, closed, reordered, or restarted by one, and a drag past the end stops at the minimum pane
+size rather than being refused. Pressing on a divider begins the drag and does nothing else, so
+dragging a gutter can never also focus a pane.
+
+A wheel focuses the pane it is over before it scrolls, because scrollback is the focused pane's, and
+a wheel over the tab row or the status bar does nothing at all: there is no scrollback under those
+rows, and scrolling the focused pane instead would move a view the user was not pointing at. A pane
+whose application is tracking the mouse keeps every one of these for itself; shift is the override
+that reaches the chrome inside one.
+
 ### Copy mode
 
 Copy mode paints three roles over a pane's own cells and never replaces a character: a search

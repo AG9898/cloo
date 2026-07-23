@@ -14,6 +14,7 @@ use std::process::ExitStatus;
 use std::time::Duration;
 
 use cloo_core::AdapterId;
+use cloo_core::layout::Side;
 use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, ClientId, ClientMessage,
     ClipboardTarget, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size, StreamError,
@@ -412,6 +413,30 @@ impl Daemon {
                             *dirty = true;
                         }
                     }
+                }
+                // Focus, whether it arrived from the keyboard as a direction or
+                // from a click as a pane. Both land on the same actor, which is
+                // what makes "every chrome mouse gesture has a keyboard
+                // equivalent" one code path rather than two that must agree.
+                ClientMessage::Command(Action::FocusLeft) => {
+                    self.session()?.move_focus(Side::Left).await?;
+                }
+                ClientMessage::Command(Action::FocusRight) => {
+                    self.session()?.move_focus(Side::Right).await?;
+                }
+                ClientMessage::Command(Action::FocusUp) => {
+                    self.session()?.move_focus(Side::Up).await?;
+                }
+                ClientMessage::Command(Action::FocusDown) => {
+                    self.session()?.move_focus(Side::Down).await?;
+                }
+                ClientMessage::Command(Action::FocusPane(pane)) => {
+                    self.session()?.focus_pane(pane).await?;
+                }
+                // A gutter drag. The delta is in cells and becomes exactly one
+                // ratio inside the layout tree; ratios never cross the wire.
+                ClientMessage::Command(Action::ResizePane { pane, dir, delta }) => {
+                    self.session()?.resize_pane(pane, dir, delta).await?;
                 }
                 ClientMessage::Command(Action::NewTab) => {
                     let _ = self.session()?.new_tab().await;

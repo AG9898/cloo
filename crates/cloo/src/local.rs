@@ -29,7 +29,8 @@ use std::time::Duration;
 use cloo_client::capabilities::detect_caps;
 use cloo_client::effects::{EffectPolicy, apply_effect};
 use cloo_client::input::{
-    InputDecoder, InputEvent, MouseRoute, OuterModes, ScreenLayout, route_mouse,
+    ChromeAction, ChromeMouse, InputDecoder, InputEvent, MouseRoute, OuterModes, ScreenLayout,
+    route_mouse,
 };
 use cloo_client::outer::current_size;
 use cloo_client::raw_mode::{RawMode, RawModeError};
@@ -208,6 +209,13 @@ async fn session(
     // and no header. It is rebuilt on a resize rather than adjusted, because a
     // stale screen would place a click in a pane that has moved.
     let mut screen = ScreenLayout::single(size, THE_PANE);
+    // The gesture machine holds only a divider drag in flight, and this path has
+    // no divider to drag. It is here so the wheel reaches the same commands the
+    // copy-mode keys do rather than through a second path of its own.
+    let mut chrome = ChromeMouse::new();
+    // Which pane the server says is in copy mode, from the last frame drawn.
+    // Copy mode is session state, so a client asks rather than assumes.
+    let mut copy_mode = None;
     let mut decoder = InputDecoder::new(modes);
     let mut input = spawn_input_reader();
     let mut input_open = true;
@@ -239,7 +247,15 @@ async fn session(
             Step::Session(Some(SessionEvent::Exited) | None) => break,
             Step::Input(bytes) => {
                 for event in decoder.feed(&bytes) {
-                    route(handle(&session)?, &screen, pane_modes, event).await?;
+                    route(
+                        handle(&session)?,
+                        &screen,
+                        &mut chrome,
+                        pane_modes,
+                        copy_mode,
+                        event,
+                    )
+                    .await?;
                 }
             }
             // The outer terminal changed shape. The grid reflow and the child's
@@ -255,11 +271,20 @@ async fn session(
                 // A held escape prefix is released within a frame, which is what
                 // makes a lone Escape key reach the pane at all.
                 if let Some(event) = decoder.flush() {
-                    route(handle(&session)?, &screen, pane_modes, event).await?;
+                    route(
+                        handle(&session)?,
+                        &screen,
+                        &mut chrome,
+                        pane_modes,
+                        copy_mode,
+                        event,
+                    )
+                    .await?;
                 }
                 if dirty {
                     let snapshot = handle(&session)?.snapshot().await?;
                     pane_modes = snapshot.modes;
+                    copy_mode = snapshot.copy_mode.as_ref().map(|state| state.pane);
                     draw(
                         &mut out,
                         &mut renderer,
@@ -311,23 +336,58 @@ fn enable_modes(modes: OuterModes) -> Result<(), LocalError> {
 /// report against the screen the client actually drew and answers with either
 /// the wire event or a chrome target; a chrome target has no wire form at all,
 /// which is what keeps a chrome click out of a child's input — delivered there
-/// it appears in the user's shell as garbage. The local path draws no chrome, so
-/// there is nothing here to act on a chrome target yet and it is dropped;
-/// M6-02 is where those targets become actions.
+/// it appears in the user's shell as garbage. What cloo *does* with a chrome
+/// target is `ChromeMouse`'s answer, and as of M6-02 the local path acts on it:
+/// there is one pane and no gutter here, so click-to-focus and a divider drag
+/// have nothing to move, but the wheel does — it walks the same server-owned
+/// scrollback the copy-mode keys do, through the same commands.
 async fn route(
     session: &SessionHandle,
     screen: &ScreenLayout,
+    chrome: &mut ChromeMouse,
     modes: PaneModes,
+    copy_mode: Option<cloo_proto::PaneId>,
     event: InputEvent,
 ) -> Result<(), LocalError> {
     match event {
         InputEvent::Keys(bytes) => session.input(bytes).await?,
         InputEvent::Paste(text) => session.paste(text).await?,
         InputEvent::Focus(focused) => session.focus(focused).await?,
-        InputEvent::Mouse(report) => {
-            if let MouseRoute::Application(event) = route_mouse(screen, modes, &report) {
-                session.mouse(event).await?;
+        InputEvent::Mouse(report) => match route_mouse(screen, modes, &report) {
+            MouseRoute::Application(event) => session.mouse(event).await?,
+            MouseRoute::Chrome(target) => {
+                if let Some(action) = chrome.feed(screen, target, &report) {
+                    apply_chrome(session, action, copy_mode).await?;
+                }
             }
+        },
+    }
+    Ok(())
+}
+
+/// Applies one chrome gesture through the commands it maps onto.
+///
+/// The gesture is turned into `Action`s first and then dispatched, rather than
+/// calling the session directly, so the local path and an attached client run the
+/// same list — a gesture that gained a command would otherwise gain it in one
+/// place only. The two actions the local path cannot answer are exactly the two a
+/// single full-screen pane has no room for.
+async fn apply_chrome(
+    session: &SessionHandle,
+    action: ChromeAction,
+    copy_mode: Option<cloo_proto::PaneId>,
+) -> Result<(), LocalError> {
+    for command in action.commands(copy_mode) {
+        match command {
+            cloo_proto::Action::EnterCopyMode => session.enter_copy_mode().await?,
+            cloo_proto::Action::CopyMotion(motion) => session.copy_motion(motion.into()).await?,
+            cloo_proto::Action::FocusPane(pane) => session.focus_pane(pane).await?,
+            cloo_proto::Action::ResizePane { pane, dir, delta } => {
+                session.resize_pane(pane, dir, delta).await?;
+            }
+            // Nothing else is reachable from a gesture today, and a gesture that
+            // grew one would be a change to `ChromeAction::commands`.
+            _ => {}
         }
     }
     Ok(())

@@ -648,8 +648,32 @@ pub enum Action {
     FocusUp,
     /// Move focus one pane in a direction.
     FocusDown,
+    /// Move focus to the pane the user named.
+    ///
+    /// The mouse's half of focus: a click lands on a pane directly rather than
+    /// on a direction from wherever focus happens to be. It carries a pane id, so
+    /// it has no keymap spelling — the keyboard reaches the same session state
+    /// through the four directional actions above, which is the equivalence
+    /// every chrome mouse gesture is required to have.
+    FocusPane(PaneId),
     /// Toggle zoom on the focused pane.
     ToggleZoom,
+    /// Move the divider next to `pane`, growing that pane by `delta` cells.
+    ///
+    /// The wire half of a gutter drag, and deliberately expressed in *cells*
+    /// rather than in a ratio: ratios never cross the wire, and a client that
+    /// sent one would be doing arithmetic over a split extent only the server's
+    /// layout tree knows. The server turns the delta into exactly one new ratio,
+    /// so a drag can never create, close, or reorder a pane.
+    ResizePane {
+        /// The pane that grows on a positive delta and shrinks on a negative
+        /// one. Its nearest ancestor split along `dir` is the divider moved.
+        pane: PaneId,
+        /// The axis the divider divides along.
+        dir: Direction,
+        /// How many cells to move it by, signed toward `pane` growing.
+        delta: i16,
+    },
     /// Create a new tab.
     NewTab,
     /// Close the active tab.

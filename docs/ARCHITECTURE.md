@@ -345,7 +345,10 @@ across the tab is not what anyone means by *left*. Among those the nearest wins,
 one nearest the origin's own leading edge and then to traversal order. Moving past the edge of the
 layout is not an error and does nothing: wrapping around would move attention somewhere nobody was
 looking. `Side` lives in `cloo-core` and is not a wire type — the client sends `Action::FocusLeft`
-and the server turns it into one, so adding a direction is never a protocol change.
+and the server turns it into one, so adding a direction is never a protocol change. As of M6-02
+those four actions are routed by the daemon, alongside `Action::FocusPane`, which names a pane
+directly because that is what a click does; both land on the same actor, which is what makes the
+mouse's and the keyboard's focus one code path rather than two that must agree.
 
 **Zoom is a view flag, not a shape.** `Layout::zoom` records a pane id and changes nothing else;
 `Layout::resolve` then answers with that pane alone, filling the area. Three properties follow, and
@@ -661,12 +664,54 @@ input, where they appear as garbage. That is why `MouseRoute` has two differentl
 `Application` carries the `MouseEvent` the wire takes, and `Chrome` carries a `ChromeTarget` — tab
 row, status bar, a pane header, a pane body, gutter, or off-screen — which has no wire form at all,
 so there is nothing a caller could send by mistake. Each chrome target names what it needs to be
-acted on without a second hit test; M6-02 is where they become actions. The local smoke path draws
-no chrome, so its screen is `ScreenLayout::single` and a chrome target is still dropped there.
+acted on without a second hit test.
 
 The server does not take the client's word for any of it. `Session::deliver_mouse` re-checks that
 the named pane is visible and encodes from that pane's own modes, so a client cannot write into an
 arbitrary child and an application that never asked for the mouse hears nothing.
+
+##### Chrome mouse actions
+
+What cloo *does* with the reports it kept is `ChromeMouse`'s answer, as of M6-02. One rule shapes
+all of it: **every gesture maps onto commands that already exist.** A gesture reachable only with a
+mouse would be unreachable on a terminal that reports none, which the capability fallback makes an
+ordinary case rather than an exotic one — so `ChromeAction::commands` is the whole vocabulary, and
+it returns `Action`s the keyboard sends too.
+
+| Gesture | `ChromeAction` | Commands | Keyboard equivalent |
+|---|---|---|---|
+| Click a pane body or its header | `Focus(pane)` | `FocusPane` | `focus-left` and its three siblings |
+| Drag a divider | `Resize { pane, dir, delta }` | `ResizePane` | — (a drag is a pointer distance) |
+| Wheel over a pane | `Scroll { pane, up, lines }` | `FocusPane`, `EnterCopyMode`, `CopyMotion` ×3 | `enter-copy-mode`, `copy-up`/`copy-down` |
+
+`FocusPane` and `ResizePane` name a *pane*, which a keypress cannot supply, so neither has a keymap
+spelling in either direction — the same shape `RenameTab` and `CopySearch` take for text. A wheel
+focuses the pane it is over before it scrolls, because copy mode is the focused pane's; it enters
+copy mode only when the server has not already reported that pane in it, since copy mode is session
+state a second client may have entered.
+
+**A drag changes ratios only.** `ScreenLayout::divider` finds the divider from the pane rectangles
+alone — a pane's trailing edge one cell before the cell pointed at, another pane's leading edge one
+cell after it, and shared extent on the perpendicular axis — which covers both the one-cell gutter
+between side-by-side panes and the header row between stacked ones, since that row *is* the lower
+pane's top border. The press records the divider and commands nothing, so a drag can never also
+focus; each motion emits a delta measured from the last one, so a drag never applies its distance
+twice. The delta crosses the wire in **cells**, never as a ratio: ratios never cross the wire, and a
+client computing one would be doing arithmetic over a split extent only the layout tree knows.
+`Layout::resize` turns it into exactly one new ratio on the pane's nearest ancestor split along that
+axis, clamped so both halves keep `MIN_PANE_SIZE` when the extent can hold two of them — a drag past
+the end stops at the end rather than being refused. The tree's shape is untouched, so no pane is
+created, closed, reordered, or restarted; each affected child costs one `TIOCSWINSZ` from the
+ordinary geometry pass.
+
+`Command::FocusPane` and `Command::ResizePane` carry no reply for the same reason `MoveFocus` does
+not: a click or a drag crossed the wire against a screen at most one frame old, so a pane that has
+closed — or that a zoom is hiding — is dropped exactly as a stale mouse event is. A refusal would be
+a message about a pane the user can no longer see.
+
+The local smoke path draws no chrome and has one full-screen pane, so click-to-focus and a drag have
+nothing to move there; the wheel does, and it goes through the same `ChromeAction::commands` list
+rather than a path of its own.
 
 ##### Keys and the prefix
 
