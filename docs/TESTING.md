@@ -448,6 +448,33 @@ into cells and into deterministic model state:
 `src/input.rs` gains the queue's keyboard vocabulary: the conventional bindings mapping to `Next`,
 `Prev`, `Focus`, `Acknowledge`, and `Dismiss`, and an unbound key mapping to nothing.
 
+M3-04 adds the keyboard-first overlays in `src/overlay.rs`, tested as one model and one renderer
+rather than three of each:
+
+- **Dismissal from every state.** Every overlay — including an empty switcher and an empty
+  launcher — answers `Dismissed` to `Dismiss`, driven through `input::overlay_action(b"\x1b")` so
+  the binding and the model are asserted together. This is the fixture that fails the moment a
+  surface can trap the terminal.
+- **Navigation.** The cursor walks and clamps at both ends, `First`/`Last` jump, and an empty
+  overlay has nowhere to go and confirms to nothing at all — a launcher with no configured profile
+  must not invent one.
+- **Explicit profiles only.** A confirmed launcher row yields a `LaunchRequest` whose profile is
+  one the caller supplied, and a `Profile` that fails its own `validate` never becomes a row: the
+  fixture builds a deliberately invalid profile beside a valid one and asserts only the valid one is
+  offered. Reverting the validation filter fails exactly that test.
+- **Pane details are what the server said.** The field list comes from `PaneInfo` plus the reported
+  attention, and a task the user never set is absent rather than blank.
+- **The shared width ladder.** Every row of every overlay is exactly the width asked for at every
+  width from 0 to 60, and the box is exactly as tall as it was asked for from 0 to 10 rows. Exact
+  strings pin the yield order — extras from the end, then the title truncates — the dismissal hint
+  as the last hint standing, the selected row's `>` marker as text rather than colour alone, and a
+  box too short for its list keeping the title and the hints.
+- **The backdrop** dims through the same `dim_cell_with_theme` an unfocused pane takes, changing
+  rendition and never a character.
+
+`src/input.rs` gains the matching overlay vocabulary: `j`/`k` and the arrows, `g`/`G` and Home/End,
+Enter, and Escape or `q`, with an unbound key mapping to nothing.
+
 `src/renderer.rs` gained the positioned `Span` that chrome is painted from: a span drawn at its own
 origin, each span restating its style absolutely so a second one cannot inherit the first's, an
 empty span moving nothing, and spans never clearing the outer terminal.
@@ -601,12 +628,13 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/src/theme.rs` | Theme resolution | Named theme RGB tokens, deliberate ANSI semantic fallback below truecolor, and outer-terminal palette inheritance |
 | `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck; plus the always-on status row's session, active tab, attention, and prefix forms yielding to ASCII markers |
 | `crates/cloo-client/src/copy_mode.rs` | Copy-mode rendering | Selection, match, and cursor spans painted from the grid cache with the cache asserted unchanged, role precedence with each role distinct by attribute as well as colour, positions outside the viewport dropped rather than clamped, the status row exactly its width at every width in one fixed degradation order, and the explicit copy: a denied policy or an incapable terminal writing nothing and not even sending the request, a permitted one writing exact OSC 52, and a non-clipboard effect refused on the copy path |
+| `crates/cloo-client/src/overlay.rs` | Overlays | Every overlay dismissible from every state including an empty one, the Escape binding driven through `input::overlay_action`, navigation clamping at both ends with an empty overlay confirming to nothing, a confirmed session row naming that session, a confirmed launcher row yielding a profile the caller supplied, a profile that fails its own `validate` never becoming a row, pane details listing only what the server reported with an unset task absent, every row exactly its width from 0 to 60 and the box exactly its height from 0 to 10, the yield order and the dismissal hint standing last as exact strings, the selected row's `>` marker as text, and the backdrop dimming rendition without changing a character |
 | `crates/cloo-client/src/effects.rs` | Outer-terminal effects | Default-deny client policy, exact title and OSC 52 rendering, capability checks, safe suppression, and base64 padding |
 | `crates/cloo-client/src/outer.rs` | Outer terminal | The degenerate-`winsize` fallback |
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
 | `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
 | `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, `TermCaps` round-tripping over the handshake, a `Tabs` update replacing the cached bar and a resolved command reaching the server, an unresolvable `TERM` surfacing as a capability failure, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
-| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, the three mouse-ownership rules, hit testing every region of a drawn screen with a mis-described pane unable to swallow a chrome row or a header a pane's own cell, no chrome region producing a wire event even under full motion tracking, an unfocused-pane and a shift-held click routing to `PaneBody`, a tracking level below the event left for the server to drop, and the attention-queue key bindings mapping to their actions with an unbound key mapping to none |
+| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, the three mouse-ownership rules, hit testing every region of a drawn screen with a mis-described pane unable to swallow a chrome row or a header a pane's own cell, no chrome region producing a wire event even under full motion tracking, an unfocused-pane and a shift-held click routing to `PaneBody`, a tracking level below the event left for the server to drop, and the attention-queue and overlay key bindings mapping to their actions with an unbound key mapping to none |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/cli.rs` | Binary | The command line as a pure function: every launch option read, options stopping at the program so `sh -c` keeps its own flags, `--` for a program that looks like a flag, an unknown or repeated flag refused, `--profile` and a program refused together, and resolution — a named or configured profile with its defaults, the user's name/task/directory winning, an unknown profile naming the ones that exist, a program running as a generic pane named for itself, a relative directory resolved and a tilde refused, and a control character in a name or task refused |

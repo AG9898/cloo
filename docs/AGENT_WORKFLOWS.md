@@ -75,6 +75,13 @@ replaces that built-in **in place**, keeping its position in the launcher, becau
 is part of what the user learned. A repeated ID within one document keeps the first definition, so
 the result never depends on which duplicate was seen last.
 
+The launcher itself is `cloo-client`'s overlay, added at M3-04, and it launches *profiles* and
+nothing else. Its rows are built from validated `Profile` values — a `LaunchRequest` can only be
+produced by confirming one, and it carries a `ProfileId` rather than a command line, so there is no
+path by which a pane starts from something a user typed into an overlay or that cloo inferred. A
+profile that fails `Profile::validate` is left out of the list rather than offered and refused at
+`execvp`, which keeps a configuration warning from becoming a mystery at the moment of use.
+
 Two kinds of wrongness get two different answers. Syntax is the document's: malformed TOML or an
 unknown key fails the whole parse and the caller keeps the defaults — an ignored typo would be a
 setting the user believes is applied. Semantics are each profile's: a well-formed entry that does

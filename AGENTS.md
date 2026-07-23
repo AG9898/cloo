@@ -373,6 +373,11 @@ answered after every pane's child has exited with nobody draining the event chan
 undeliverable notifications followed by a resize that still applies. Every snapshot in that file now
 goes through a `snapshot_now` helper that wraps the call in a deadline — a test must never await an
 actor reply without a timeout, or a wedged actor hangs the whole suite instead of failing one test.
+M3-04 adds the keyboard-first overlays in `cloo-client/src/overlay.rs` — every overlay dismissible
+from every state including an empty one, navigation clamping at both ends, a confirmed launcher row
+naming a profile the caller supplied with an unvalidatable profile never becoming a row, pane
+details listing only what the server reported, and the shared width ladder asserted exactly at
+every width and height — with the matching key bindings in `cloo-client/src/input.rs`.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -835,6 +840,16 @@ Every snapshot in `cloo-server/tests/session.rs` now goes through `snapshot_now`
 call in the same `DEADLINE` — a 20-second failure naming the stall instead of an unbounded hang.
 Any future fixture that awaits an actor reply needs the same wrapper; the suite is ~3 seconds, so
 anything that runs long is a stall, not slow work.
+
+### 2026-07-23 — One overlay model, and two properties that are types
+`cloo-client::overlay` is a single `Overlay` — a list, a cursor, a title — for the session
+switcher, the profile launcher, and pane details, because the style guide gives all three one
+language and three models would drift. Two rules are enforced by construction rather than by a
+branch: `LaunchRequest` has no constructor but confirming a launcher row and a launcher row has
+none but a validated `Profile`, so "explicit profiles only" cannot be violated by a caller; and
+`Dismiss` answers `Dismissed` from every state including an empty list, so no overlay can trap the
+terminal. The rows reuse the pane header's fixed yield order, and the hint row inverts it — the
+dismissal hint is written first so it is the last one standing.
 
 ### 2026-07-23 — Half-reverting `deliver_mouse` proves less than it looks
 Confirming the M6-01 mouse fixtures non-vacuous means reverting to the *fully* naive implementation:

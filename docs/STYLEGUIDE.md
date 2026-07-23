@@ -176,6 +176,31 @@ share one overlay language: dim the background, retain a clear selected row, pro
 hints, and dismiss with Escape. Toasts are concise, stack in a bounded queue, and never cover a
 focused harness input indefinitely. Coalesce repeated events from the same pane.
 
+The session switcher, the profile launcher, and the pane-details view are that language written
+once, in `cloo-client`'s `overlay` module as of M3-04. An overlay is a title row, a list, and a
+hint row, each exactly the overlay's width, drawn over the raised surface with the screen beneath
+dimmed by the same contrast reduction an unfocused pane takes:
+
+```
+  sessions 1/3
+  7 main 3 panes attached
+> 8 review 1 panes
+  esc close enter switch j/k move
+```
+
+The selected row wears `> ` as well as the accent, because selection may never rest on colour
+alone; an unselected row keeps the same two columns so a row never shifts as the cursor moves. A
+row spends its width in the pane header's fixed order — the marker and the lead field are what a
+row *is*, trailing fields yield from the end, and the title truncates last — so an overlay degrades
+like the rest of the chrome rather than inventing its own layout. The hints yield the same way, but
+they are ordered with dismissal *first*, so the last hint standing on a narrow overlay is the one
+that says how to close. Escape is bound in every overlay without exception.
+
+A launcher row is built from a configured profile and from nothing else: there is no free-text
+command field, and a profile that fails validation is not offered rather than offered and refused
+at launch. The pane-details view shows only what the server reported — profile, name, task, working
+directory, and state — and a task the user never set is absent rather than blank.
+
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:
 

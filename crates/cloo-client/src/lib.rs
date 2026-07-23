@@ -4,7 +4,7 @@
 //! session state. **All chrome is rendered here**, which is why theming never
 //! touches the server.
 //!
-//! Ten modules today:
+//! Eleven modules today:
 //!
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
@@ -25,6 +25,9 @@
 //!   and ownership rule that decide whether a mouse event is chrome's or the
 //!   application's, and the keyboard actions that drive the attention queue
 //!   overlay.
+//! - [`overlay`] — the keyboard-first session switcher, profile launcher, and
+//!   pane-details view, as one model and one renderer over the shared chrome
+//!   rules.
 //! - [`copy_mode`] — highlights and the status row for server-owned copy mode,
 //!   plus the explicit, policy-gated OSC 52 copy.
 //! - [`effects`] — client-local policy and safe rendering for allowlisted
@@ -44,6 +47,7 @@ pub mod copy_mode;
 pub mod effects;
 pub mod input;
 pub mod outer;
+pub mod overlay;
 pub mod raw_mode;
 pub mod renderer;
 pub mod resize;
@@ -67,9 +71,14 @@ pub use copy_mode::{
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{
     ChromeTarget, InputDecoder, InputEvent, MouseOwner, MouseReport, MouseRoute, MouseTarget,
-    OuterModes, PaneArea, QueueAction, ScreenLayout, mouse_owner, queue_action, route_mouse,
+    OuterModes, OverlayAction, PaneArea, QueueAction, ScreenLayout, mouse_owner, overlay_action,
+    queue_action, route_mouse,
 };
 pub use outer::{current_size, window_size};
+pub use overlay::{
+    LaunchRequest, Overlay, OverlayKind, OverlayOutcome, PaneDetails, ProfileEntry, SessionEntry,
+    backdrop_cells, backdrop_span, hint_cells, overlay_cells, overlay_spans, title_cells,
+};
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, Grid, RenderError, Renderer, Span};
 pub use resize::ResizeWatch;

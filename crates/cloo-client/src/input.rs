@@ -874,6 +874,50 @@ pub fn queue_action(keys: &[u8]) -> Option<QueueAction> {
     }
 }
 
+/// A keyboard action against an open overlay.
+///
+/// The session switcher, the profile launcher, and the pane-details view are
+/// one surface with one vocabulary — see [`crate::overlay`]. Like
+/// [`QueueAction`], these are cloo's own actions: an open overlay owns the
+/// keyboard, and none of this reaches a child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlayAction {
+    /// Move the cursor one row down.
+    Next,
+    /// Move the cursor one row up.
+    Prev,
+    /// Jump to the first row.
+    First,
+    /// Jump to the last row.
+    Last,
+    /// Act on the selected row.
+    Confirm,
+    /// Close the overlay without acting.
+    Dismiss,
+}
+
+/// Maps a run of decoded key bytes to an overlay action, or `None` if unbound.
+///
+/// The bindings mirror [`queue_action`]'s so the overlays and the attention
+/// queue are one habit: arrows and `j`/`k` navigate, `g`/`G` and Home/End jump
+/// to the ends, Enter confirms, and Escape or `q` dismisses. The configurable
+/// keymap lands in M4 and supersedes them.
+///
+/// Escape is bound in every overlay, deliberately and without exception: an
+/// overlay that could not be closed would hold the user's terminal.
+#[must_use]
+pub fn overlay_action(keys: &[u8]) -> Option<OverlayAction> {
+    match keys {
+        b"j" | b"\x1b[B" => Some(OverlayAction::Next),
+        b"k" | b"\x1b[A" => Some(OverlayAction::Prev),
+        b"g" | b"\x1b[H" => Some(OverlayAction::First),
+        b"G" | b"\x1b[F" => Some(OverlayAction::Last),
+        b"\r" | b"\n" => Some(OverlayAction::Confirm),
+        b"\x1b" | b"q" => Some(OverlayAction::Dismiss),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1513,5 +1557,34 @@ mod tests {
     fn an_unbound_key_is_not_a_queue_action() {
         assert_eq!(queue_action(b"x"), None);
         assert_eq!(queue_action(b""), None);
+    }
+
+    // -- overlay actions ----------------------------------------------------
+
+    #[test]
+    fn overlay_keys_map_to_navigation_and_actions() {
+        let cases: [(&[u8], OverlayAction); 12] = [
+            (b"j", OverlayAction::Next),
+            (b"\x1b[B", OverlayAction::Next),
+            (b"k", OverlayAction::Prev),
+            (b"\x1b[A", OverlayAction::Prev),
+            (b"g", OverlayAction::First),
+            (b"\x1b[H", OverlayAction::First),
+            (b"G", OverlayAction::Last),
+            (b"\x1b[F", OverlayAction::Last),
+            (b"\r", OverlayAction::Confirm),
+            (b"\n", OverlayAction::Confirm),
+            (b"\x1b", OverlayAction::Dismiss),
+            (b"q", OverlayAction::Dismiss),
+        ];
+        for (keys, action) in cases {
+            assert_eq!(overlay_action(keys), Some(action), "{keys:?}");
+        }
+    }
+
+    #[test]
+    fn an_unbound_key_is_not_an_overlay_action() {
+        assert_eq!(overlay_action(b"x"), None);
+        assert_eq!(overlay_action(b""), None);
     }
 }

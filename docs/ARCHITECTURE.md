@@ -471,6 +471,23 @@ The palette here is the reference `storm` theme, as constants. Named themes and 
 inheritance land in M4-03; nothing in this module reaches session state, which is what makes that
 a client-local change.
 
+#### Overlays
+
+`cloo-client::overlay`, as of M3-04, is the session switcher, the profile launcher, and the
+pane-details view as *one* model and one renderer: an `Overlay` is a list, a keyboard cursor, and
+a title, and the three differ only in what a row says and what confirming one means. Like `chrome`
+it is a pure function into cells, so a row is testable against an exact string.
+
+Two properties are types rather than rules. A `LaunchRequest` carries a `ProfileId` and has no
+constructor but confirming a launcher row, and a launcher row has no constructor but a validated
+`cloo_core::Profile` — so a launch cannot name anything the configuration did not define, and
+there is no free-text command to type into. And `OverlayAction::Dismiss` answers `Dismissed` from
+every state, including an empty list, so no overlay can hold the terminal. The keyboard vocabulary
+lives beside the attention queue's in `cloo-client::input`, because an open overlay owns the
+keyboard exactly as chrome owns a mouse click over a border; none of it reaches a child. The
+visual contract — the shared width ladder, the text selection marker, the dimmed backdrop — is in
+[`STYLEGUIDE.md`](STYLEGUIDE.md#overlays-and-notifications).
+
 #### Raw mode
 
 `cloo-client::raw_mode::RawMode` is an RAII guard over one terminal descriptor. Restoration is by
