@@ -92,9 +92,14 @@ crates/
 - A handle to an actor is a **sender and nothing more**. Never hand out a reference to the state
   behind it, and never keep a second path to that state "just for reads" — the point of the
   channel is that arrival order is the only order.
-- A notification a reader acts on by *looking at current state* is a level, not an edge: send it
-  on a depth-one channel with `try_send` and let it coalesce. A notification that carries
-  information the reader cannot recover — the child exited — must be sent, not dropped.
+- A notification a reader acts on by *looking at current state* is a level, not an edge: queue at
+  most one and let it coalesce. A notification that carries information the reader cannot recover
+  — the child exited — must be delivered, not dropped.
+- **An actor loop never awaits a send on its own outbound channel.** Delivering has to be
+  something the loop *tries*, not something it waits for: park the value in a queue the task owns
+  and select over a permit alongside the loop's other branches. Awaiting instead makes a slow
+  reader indistinguishable from a wedged session, and where the reader drains the channel only
+  between requests it is a deadlock — it is waiting for a reply the parked actor will never send.
 - Every branch of a `select!` must be cancel-safe, and the reason must be stated in a comment
   where it is not obvious. The usual proof is that the branch's only suspension point is itself
   cancel-safe and that nothing is consumed or recorded after it.

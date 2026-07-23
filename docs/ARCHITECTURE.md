@@ -288,8 +288,8 @@ pane, `PtyReactor::resize` keeps the grid-then-ioctl order. A degenerate area is
 than refused: a client that briefly reports zero rows mid-drag has no bearing on a child that is
 running fine, and refusing would turn a cosmetic glitch into a dead session.
 
-Output flows back as a `SessionEvent`. `Output` is a *level*, not an edge — the channel holds one,
-so a session producing bytes faster than anyone reads them coalesces into a single pending
+Output flows back as a `SessionEvent`. `Output` is a *level*, not an edge — at most one is ever
+queued, so a session producing bytes faster than anyone reads them coalesces into a single pending
 notification rather than one per PTY read, and the reader asks for a snapshot when it is ready to
 draw. `Exited` is sent once the PTY reaches end of file; the task stays alive and still answers
 snapshot commands after it, which is what lets a child's last words be drawn before its death is
@@ -297,6 +297,18 @@ reported. The task pumps every pane's PTY for its whole life, attached or not, s
 between connections is lost. A pane whose child exits stops being pumped and keeps its grid;
 `Exited` is sent once *every* pane's child is gone, because a session with one dead pane and three
 live ones is not over.
+
+Every event leaves through an **outbox** the session task owns, and the loop never awaits a send on
+the event channel. That is the fix M6-03 made, and the reason is a deadlock rather than a
+throughput concern: an actor parked on `send` has stopped applying commands, so it no longer
+answers `Command::Snapshot` — and the reader that would drain the channel is normally the one
+blocked awaiting exactly that snapshot. The loop instead selects over a channel permit alongside
+the PTY pump and the command receiver, keeps applying commands while it waits for room, and puts
+the event back at the front of the outbox whenever another branch wins. `Output` coalesces inside
+the outbox instead of relying on the channel's capacity; an `Effect` is ordered with respect to
+other effects and is the one thing overflow may drop, on the same reasoning as `cloo-term`'s
+bounded queue — an effect changes no grid cell and no session state. `Exited` is never dropped and
+never coalesced, because no later snapshot can recover it.
 
 ##### Split and close
 

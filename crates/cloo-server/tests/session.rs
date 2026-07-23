@@ -76,6 +76,21 @@ fn launch_named(script: &str, name: Option<&str>, task: Option<&str>) -> Launch 
     .expect("the generic profile validates")
 }
 
+/// The current picture, or a failure if the actor stopped answering.
+///
+/// Every snapshot in this file goes through here rather than awaiting
+/// [`SessionHandle::snapshot`] directly, because an unbounded await turns a
+/// wedged actor into a suite that hangs forever instead of a test that fails.
+/// That is not hypothetical: it is exactly what M6-01's fixtures hit, and a
+/// timeout is the difference between a twenty-second failure that names the
+/// problem and a `cargo test --workspace` that never returns.
+async fn snapshot_now(handle: &SessionHandle) -> SessionSnapshot {
+    tokio::time::timeout(DEADLINE, handle.snapshot())
+        .await
+        .expect("the session actor must answer a snapshot rather than block")
+        .expect("the session must be alive")
+}
+
 /// The focused pane's grid as lines, trailing blanks trimmed.
 fn text(snapshot: &SessionSnapshot) -> Vec<String> {
     snapshot
@@ -99,7 +114,7 @@ async fn ask_size(handle: &SessionHandle, expected: &str) {
 
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
-        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let snapshot = snapshot_now(handle).await;
         let lines = text(&snapshot);
         if lines
             .iter()
@@ -148,7 +163,7 @@ fn session_running(
 async fn wait_for_line(handle: &SessionHandle, prefix: &str) -> String {
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
-        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let snapshot = snapshot_now(handle).await;
         let lines = text(&snapshot);
         if let Some(line) = lines.iter().find(|line| line.starts_with(prefix)) {
             return line.clone();
@@ -171,7 +186,7 @@ async fn a_split_creates_a_pane_whose_child_starts_at_its_own_geometry() {
         .await
         .expect("a 120x40 session has room for two panes");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.panes.len(), 2, "the layout must hold both panes");
     assert_eq!(
         snapshot.focused, new_pane,
@@ -203,7 +218,7 @@ async fn closing_a_pane_collapses_the_layout_and_regrows_the_survivor() {
         .await
         .expect("closing a pane that is not the last one must succeed");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(
         snapshot.panes.len(),
         1,
@@ -236,7 +251,7 @@ async fn a_split_with_no_room_is_refused_and_changes_nothing() {
         "unexpected error: {err:?}"
     );
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(
         snapshot.panes.len(),
         1,
@@ -264,7 +279,7 @@ async fn closing_the_last_pane_is_refused_and_leaves_its_child_running() {
         "unexpected error: {err:?}"
     );
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.panes.len(), 1);
 
     // The refusal cost the child nothing: it is still there to be resized and
@@ -290,16 +305,7 @@ async fn closing_an_unknown_pane_is_refused() {
         matches!(err, PaneError::Layout(LayoutError::UnknownPane(_))),
         "unexpected error: {err:?}"
     );
-    assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .panes
-            .len(),
-        1
-    );
+    assert_eq!(snapshot_now(&session.handle).await.panes.len(), 1);
 }
 
 #[tokio::test]
@@ -313,12 +319,7 @@ async fn focus_moves_between_panes_and_input_follows_it() {
         .await
         .expect("30 and 90 columns both clear the minimum");
     assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .focused,
+        snapshot_now(&session.handle).await.focused,
         right,
         "focus follows a split"
     );
@@ -328,7 +329,7 @@ async fn focus_moves_between_panes_and_input_follows_it() {
         .move_focus(Side::Left)
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.focused, root);
     // The keystroke that asks for a report goes to whichever pane is focused,
     // so this answer is the whole proof that the move took effect.
@@ -342,12 +343,7 @@ async fn focus_moves_between_panes_and_input_follows_it() {
         .await
         .expect("session is alive");
     assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .focused,
+        snapshot_now(&session.handle).await.focused,
         root,
         "an edge pane stays put rather than wrapping"
     );
@@ -357,15 +353,7 @@ async fn focus_moves_between_panes_and_input_follows_it() {
         .move_focus(Side::Right)
         .await
         .expect("session is alive");
-    assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .focused,
-        right
-    );
+    assert_eq!(snapshot_now(&session.handle).await.focused, right);
     ask_size(&session.handle, "40 90").await;
 }
 
@@ -390,7 +378,7 @@ async fn zoom_fills_the_area_and_unzoom_restores_the_split_without_a_restart() {
         .toggle_zoom()
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.zoomed, Some(root));
     assert_eq!(
         snapshot.panes.len(),
@@ -412,7 +400,7 @@ async fn zoom_fills_the_area_and_unzoom_restores_the_split_without_a_restart() {
         .toggle_zoom()
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.zoomed, None);
     assert_eq!(
         snapshot.panes.len(),
@@ -436,12 +424,7 @@ async fn zoom_fills_the_area_and_unzoom_restores_the_split_without_a_restart() {
 async fn switching_tabs_preserves_every_existing_child() {
     let (_, session) = session_running(PID_THEN_REPORT, 120, 40);
     let first_pid = wait_for_line(&session.handle, "pid=").await;
-    let first = session
-        .handle
-        .snapshot()
-        .await
-        .expect("session is alive")
-        .tab;
+    let first = snapshot_now(&session.handle).await.tab;
 
     let second = session
         .handle
@@ -449,7 +432,7 @@ async fn switching_tabs_preserves_every_existing_child() {
         .await
         .expect("a new tab launches its initial pane");
     let second_pid = wait_for_line(&session.handle, "pid=").await;
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.tab, second, "a new tab becomes active");
     assert_eq!(snapshot.tabs.len(), 2, "the tab bar has both tabs");
     assert_eq!(snapshot.panes.len(), 1, "each tab owns its own layout");
@@ -459,15 +442,7 @@ async fn switching_tabs_preserves_every_existing_child() {
         .prev_tab()
         .await
         .expect("the first tab is still selectable");
-    assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .tab,
-        first
-    );
+    assert_eq!(snapshot_now(&session.handle).await.tab, first);
     assert_eq!(
         wait_for_line(&session.handle, "pid=").await,
         first_pid,
@@ -495,22 +470,14 @@ async fn a_split_while_zoomed_shows_the_pane_it_created() {
         .toggle_zoom()
         .await
         .expect("session is alive");
-    assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .zoomed,
-        Some(root)
-    );
+    assert_eq!(snapshot_now(&session.handle).await.zoomed, Some(root));
 
     let new_pane = session
         .handle
         .split_even(Direction::Horizontal)
         .await
         .expect("the split must fit");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(
         snapshot.zoomed, None,
         "a split unzooms, or the pane it just made is invisible"
@@ -537,7 +504,7 @@ async fn a_resize_is_divided_between_every_pane() {
         .await
         .expect("session is alive");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(rect_of(&snapshot, root), Size::new(160, 30));
     assert_eq!(rect_of(&snapshot, new_pane), Size::new(160, 30));
 
@@ -578,7 +545,7 @@ async fn a_launch_carries_its_metadata_into_every_snapshot() {
         .await
         .expect("a 120x40 session has room for two panes");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(
         snapshot.metas.len(),
         2,
@@ -659,7 +626,7 @@ async fn a_profile_naming_a_missing_program_fails_clearly_and_changes_nothing() 
     );
 
     // The layout was rolled back: the session is exactly what it was.
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.panes.len(), 1);
     assert_eq!(snapshot.metas.len(), 1);
     assert_eq!(snapshot.focused, root);
@@ -684,7 +651,7 @@ async fn a_plain_split_repeats_the_sessions_own_launch() {
         .await
         .expect("the split must fit");
 
-    let snapshot = spawned.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&spawned.handle).await;
     let repeated = info_of(&snapshot, new_pane);
     let original = info_of(&snapshot, root);
     assert_eq!(repeated.profile, original.profile);
@@ -718,7 +685,7 @@ async fn a_named_profile_reaches_the_pane_it_launched() {
         .await
         .expect("the split must fit");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let info = info_of(&snapshot, new_pane);
     assert_eq!(info.profile, "harness");
     assert_eq!(
@@ -754,7 +721,7 @@ async fn wait_for_attention(
 ) -> cloo_proto::PaneAttention {
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
-        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let snapshot = snapshot_now(handle).await;
         let att = attention_of(&snapshot, pane);
         if att.state == state {
             return att;
@@ -775,7 +742,7 @@ async fn attention_updates_are_serialized_through_the_session_task() {
 
     // An uninstrumented child is Unknown with no source: a live PTY is not proof
     // a harness is doing anything.
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(
         attention_of(&snapshot, root),
         cloo_proto::PaneAttention {
@@ -793,7 +760,7 @@ async fn attention_updates_are_serialized_through_the_session_task() {
         .set_attention(root, AttentionState::NeedsInput, AttentionSource::Bell)
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let att = attention_of(&snapshot, root);
     assert_eq!(att.state, cloo_proto::AttentionState::NeedsInput);
     assert_eq!(att.source, cloo_proto::AttentionSource::Bell);
@@ -805,7 +772,7 @@ async fn attention_updates_are_serialized_through_the_session_task() {
         .acknowledge_attention(root)
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let att = attention_of(&snapshot, root);
     assert_eq!(att.state, cloo_proto::AttentionState::NeedsInput);
     assert!(
@@ -820,7 +787,7 @@ async fn attention_updates_are_serialized_through_the_session_task() {
         .set_attention(root, AttentionState::NeedsInput, AttentionSource::Bell)
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert!(
         attention_of(&snapshot, root).acknowledged,
         "a re-announced state must not refill a queue the user just cleared"
@@ -832,7 +799,7 @@ async fn attention_updates_are_serialized_through_the_session_task() {
         .set_attention(root, AttentionState::Failed, AttentionSource::Lifecycle)
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let att = attention_of(&snapshot, root);
     assert_eq!(att.state, cloo_proto::AttentionState::Failed);
     assert!(!att.acknowledged, "a changed state is unseen again");
@@ -863,7 +830,7 @@ async fn a_report_for_a_closed_pane_is_dropped_without_disturbing_the_survivor()
         .await
         .expect("session is alive");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.attention.len(), 1, "only the survivor remains");
     assert_eq!(
         attention_of(&snapshot, root).state,
@@ -939,7 +906,7 @@ async fn ordinary_output_is_never_a_source() {
     // Make sure the bait is actually on the grid before checking attention.
     wait_for_line(&session.handle, "error").await;
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let att = attention_of(&snapshot, root);
     assert_eq!(
         att.state,
@@ -986,7 +953,7 @@ async fn an_opted_in_adapters_report_arrives_attributed_to_it() {
         .await
         .expect("the pane opted into this adapter");
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let att = attention_of(&snapshot, root);
     assert_eq!(att.state, cloo_proto::AttentionState::Working);
     assert_eq!(
@@ -1012,7 +979,7 @@ async fn an_opted_in_adapters_report_arrives_attributed_to_it() {
         .adapter_report(root, adapter, AdapterState::NeedsInput)
         .await
         .expect("the pane opted into this adapter");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert!(
         attention_of(&snapshot, root).acknowledged,
         "a re-announced adapter state must not resurrect the queue entry"
@@ -1046,7 +1013,7 @@ async fn an_adapter_the_profile_did_not_name_is_refused_and_changes_nothing() {
         .expect_err("an adapter the profile did not name may not speak");
     assert_eq!(refusal, cloo_proto::AdapterRejection::NotPermitted);
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     let att = attention_of(&snapshot, root);
     assert_eq!(att.state, cloo_proto::AttentionState::Failed);
     assert_eq!(att.source, cloo_proto::AttentionSource::Lifecycle);
@@ -1069,7 +1036,7 @@ async fn a_pane_that_opted_into_nothing_is_reachable_by_no_adapter() {
         .expect_err("a pane that named no adapter permits none");
     assert_eq!(refusal, cloo_proto::AdapterRejection::NotPermitted);
 
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(
         attention_of(&snapshot, root).state,
         cloo_proto::AttentionState::Unknown,
@@ -1137,7 +1104,7 @@ async fn copy_and_search_state_is_server_owned_and_regex_errors_keep_it_intact()
         .await
         .expect("selection reaches the actor");
 
-    let before = session.handle.snapshot().await.expect("session is alive");
+    let before = snapshot_now(&session.handle).await;
     let copy = before.copy_mode.as_ref().expect("copy state is projected");
     assert_eq!(copy.pane, root);
     assert_eq!(copy.query.as_deref(), Some("needle"));
@@ -1154,7 +1121,7 @@ async fn copy_and_search_state_is_server_owned_and_regex_errors_keep_it_intact()
         .copy_motion(CopyMotion::Down)
         .await
         .expect("the reattached client reaches the same actor state");
-    let after = session.handle.snapshot().await.expect("session is alive");
+    let after = snapshot_now(&session.handle).await;
     assert_ne!(
         after.copy_mode.as_ref().map(|copy| copy.cursor),
         before.copy_mode.as_ref().map(|copy| copy.cursor),
@@ -1166,7 +1133,7 @@ async fn copy_and_search_state_is_server_owned_and_regex_errors_keep_it_intact()
         .await
         .expect_err("an invalid regex is a clean reply, not an actor crash");
     assert!(matches!(err, CopyModeError::Search(_)), "got {err}");
-    let after_error = session.handle.snapshot().await.expect("session is alive");
+    let after_error = snapshot_now(&session.handle).await;
     assert_eq!(
         after_error
             .copy_mode
@@ -1214,7 +1181,7 @@ async fn an_explicit_copy_reads_retained_text_without_changing_anything() {
         .await
         .expect("motion reaches the actor");
 
-    let before = session.handle.snapshot().await.expect("session is alive");
+    let before = snapshot_now(&session.handle).await;
     let copy = before.copy_mode.as_ref().expect("copy state is projected");
     // The viewport line the client would draw the copy cursor on. The server
     // revealed the cursor when it moved, so it must be inside the three rows a
@@ -1241,7 +1208,7 @@ async fn an_explicit_copy_reads_retained_text_without_changing_anything() {
     );
 
     // Copying is a read: not one grid cell, cursor, or selection moved.
-    let after = session.handle.snapshot().await.expect("session is alive");
+    let after = snapshot_now(&session.handle).await;
     assert_eq!(after.pane, before.pane, "a copy must not touch the grid");
     assert_eq!(after.copy_mode, before.copy_mode);
 
@@ -1283,7 +1250,7 @@ fn plain_echoer(bytes: usize) -> String {
 async fn wait_for_text(handle: &SessionHandle, wanted: &str) {
     let deadline = tokio::time::Instant::now() + DEADLINE;
     loop {
-        let snapshot = handle.snapshot().await.expect("the session must be alive");
+        let snapshot = snapshot_now(handle).await;
         let lines = text(&snapshot);
         if lines.iter().any(|line| line.contains(wanted)) {
             return;
@@ -1336,7 +1303,7 @@ async fn a_mouse_event_reaches_the_pane_it_names_and_not_the_focused_one() {
         .move_focus(Side::Left)
         .await
         .expect("session is alive");
-    let snapshot = session.handle.snapshot().await.expect("session is alive");
+    let snapshot = snapshot_now(&session.handle).await;
     assert_eq!(snapshot.focused, root);
     wait_for_text(&session.handle, "ready").await;
 
@@ -1361,15 +1328,7 @@ async fn a_mouse_event_reaches_the_pane_it_names_and_not_the_focused_one() {
         .move_focus(Side::Right)
         .await
         .expect("session is alive");
-    assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .focused,
-        other
-    );
+    assert_eq!(snapshot_now(&session.handle).await.focused, other);
     wait_for_text(&session.handle, "[<0;11;6M").await;
 }
 
@@ -1430,15 +1389,7 @@ async fn a_mouse_event_for_a_closed_pane_is_dropped() {
         .close(gone)
         .await
         .expect("closing the new pane must succeed");
-    assert_eq!(
-        session
-            .handle
-            .snapshot()
-            .await
-            .expect("session is alive")
-            .focused,
-        root
-    );
+    assert_eq!(snapshot_now(&session.handle).await.focused, root);
     wait_for_text(&session.handle, "ready").await;
 
     session
@@ -1452,4 +1403,75 @@ async fn a_mouse_event_for_a_closed_pane_is_dropped() {
         .await
         .expect("session is alive");
     wait_for_text(&session.handle, "done").await;
+}
+
+// --- The actor answers after every child has exited (M6-03) -----------------
+//
+// The session task must never stop applying commands because a reader stopped
+// draining its events. That is not a fairness nicety: the reader that would
+// free the channel is normally the one blocked awaiting a snapshot, so an actor
+// parked on `send` and a caller parked on `snapshot` wait for each other
+// forever. Both mouse fixtures above end with every child exited, which is how
+// they found it.
+
+/// A snapshot is answered after every pane's child has exited, with nobody
+/// draining the session's events.
+#[tokio::test]
+async fn a_snapshot_is_answered_after_every_child_has_exited() {
+    // Output *and then* an exit is the whole reproduction. The bytes queue the
+    // coalesced `Output` level, and the exit is the event that used to be
+    // awaited into a channel already holding it. A child that exits silently
+    // leaves the channel empty and never stalls, which is why the M2-08
+    // lifecycle fixtures passed throughout.
+    let (root, session) = session_running("printf 'bye\\n'", 80, 24);
+
+    // `session.events` is deliberately never read. That is not an artificial
+    // test condition: it is what a daemon looks like for as long as it is
+    // inside its own `publish_current`.
+    let att = wait_for_attention(&session.handle, root, cloo_proto::AttentionState::Ready).await;
+    assert_eq!(
+        att.source,
+        cloo_proto::AttentionSource::Lifecycle,
+        "the exit was observed, which is what the stall came after"
+    );
+
+    // Attention is set in the same turn as the exit, one statement before the
+    // send that used to block, so observing it proves the actor returned to the
+    // command loop. Asking again proves it stays there.
+    let snapshot = snapshot_now(&session.handle).await;
+    assert!(
+        text(&snapshot).iter().any(|line| line.contains("bye")),
+        "a child's last words outlive it; the pane shows {:?}",
+        text(&snapshot)
+    );
+}
+
+/// The actor keeps answering while a full event channel goes unread.
+///
+/// The bound above is one event; this is the general case. A pane that keeps
+/// producing output while nobody drains must not accumulate a wakeup per read
+/// or stall on the one it cannot deliver — `Output` is a level, and the outbox
+/// is what keeps that true without an await in the loop.
+#[tokio::test]
+async fn output_that_nobody_drains_never_stalls_the_actor() {
+    let (_, session) = session_running("while read _; do printf 'tick\\n'; done", 80, 24);
+
+    // Every one of these leaves an undeliverable notification behind, since the
+    // channel holds one and its receiver is never polled.
+    for _ in 0..64 {
+        session
+            .handle
+            .input(b"\n".to_vec())
+            .await
+            .expect("session is alive");
+    }
+
+    wait_for_text(&session.handle, "tick").await;
+    // Still answering, and still applying commands, after all of it.
+    session
+        .handle
+        .resize(Size::new(100, 30))
+        .await
+        .expect("session is alive");
+    assert_eq!(snapshot_now(&session.handle).await.area, Size::new(100, 30));
 }

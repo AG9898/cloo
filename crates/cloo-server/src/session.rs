@@ -15,11 +15,20 @@
 //! `winsize` the child is given can never come from two different computations.
 //!
 //! Output flows the other way as [`SessionEvent`]. `Output` is a *level*, not
-//! an edge: the channel holds one, and a session producing bytes faster than
-//! anyone reads them coalesces into a single pending notification rather than
-//! one per PTY read. The reader then asks for a [`SessionSnapshot`] whenever it
-//! is ready to draw, which is what keeps the render rate capped by a timer
-//! rather than by the child.
+//! an edge: at most one is ever queued, and a session producing bytes faster
+//! than anyone reads them coalesces into a single pending notification rather
+//! than one per PTY read. The reader then asks for a [`SessionSnapshot`]
+//! whenever it is ready to draw, which is what keeps the render rate capped by
+//! a timer rather than by the child.
+//!
+//! Every event leaves through an *outbox* — a queue this task owns — and never
+//! by awaiting the event channel from inside the loop. That is the difference
+//! between a reader that is slow and a session that is wedged: an actor blocked
+//! on `send` has stopped answering [`Command::Snapshot`], so the one caller who
+//! could drain the channel is itself waiting for a reply that will never come.
+//! The loop instead selects over a permit and keeps applying commands while it
+//! waits, which is what makes "the session always answers" true no matter what
+//! the reader is doing.
 //!
 //! The task pumps every pane's PTY for its whole life, attached or not. A
 //! session that only read while someone was watching would lose everything
@@ -40,6 +49,7 @@
 //! the reason zoom cannot restart a PTY: the only thing it can do to a child is
 //! change its `winsize`, and a hidden pane's child is not even told that.
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -89,6 +99,19 @@ pub const EVEN_SPLIT: f32 = 0.5;
 /// try, and a child that closed its terminal and kept running falls through
 /// after a trivial delay rather than blocking the actor forever.
 const EXIT_REAP_TRIES: usize = 256;
+
+/// How many events may wait in the session's outbox before an effect is
+/// dropped.
+///
+/// The outbox exists so the loop never blocks on the event channel, which means
+/// a reader that has stopped draining must not be able to grow it without
+/// bound. Overflow drops a typed client-local effect — the same thing
+/// `cloo-term`'s bounded queue already does one layer down, and safe for the
+/// same reason: an effect changes no grid cell and no session state. `Output` is
+/// a level and coalesces instead of accumulating, and
+/// [`Exited`](SessionEvent::Exited) is never dropped, because it carries a fact
+/// no later snapshot can recover.
+const EVENT_OUTBOX: usize = 64;
 
 /// Everything that mutates a session.
 ///
@@ -860,6 +883,14 @@ pub struct Session {
     cursor: usize,
     commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<SessionEvent>,
+    /// Events waiting for room in `events`, oldest first.
+    ///
+    /// The whole reason this task never awaits a send: a full channel parks the
+    /// event here instead of parking the actor, so commands keep being applied
+    /// and answered while the reader catches up. Ordering between effects is
+    /// preserved, and the coalescing rule for `Output` lives here rather than in
+    /// the channel's capacity.
+    outbox: VecDeque<SessionEvent>,
 }
 
 impl Session {
@@ -889,7 +920,9 @@ impl Session {
 
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
         // Capacity one on purpose: `Output` is a level, so a second one adds
-        // nothing a reader would act on differently.
+        // nothing a reader would act on differently. Anything the channel
+        // cannot take waits in the outbox rather than stalling the task, so the
+        // capacity bounds what is in flight and never what the actor may do.
         let (events, event_rx) = mpsc::channel(1);
 
         let session = Self {
@@ -912,6 +945,7 @@ impl Session {
             cursor: 0,
             commands: command_rx,
             events,
+            outbox: VecDeque::new(),
         };
 
         Ok(SpawnedSession {
@@ -928,22 +962,40 @@ impl Session {
             // Once every pane is at end of file there is nothing left to pump,
             // but the task keeps answering commands so the children's last
             // output can still be asked for and drawn.
-            let step = if self.panes.iter().any(|pane| !pane.ended) {
-                // `pump_any` and `recv` are both cancel-safe: each awaits
-                // readiness and buffers before it decides anything, so losing
-                // this race drops a wakeup and never a byte or a command. The
-                // two borrow disjoint fields, which is why this is not a method.
-                tokio::select! {
-                    pumped = pump_any(&mut self.panes, &mut self.cursor) => Step::Pumped(pumped),
-                    command = self.commands.recv() => Step::Command(command),
+            let pumping = self.panes.iter().any(|pane| !pane.ended);
+            // Taken out before the select so the flush branch borrows nothing
+            // of `self`, and put back below if another branch won the race.
+            let mut queued = self.outbox.pop_front();
+
+            // `pump_any`, `recv`, and `reserve` are all cancel-safe: each awaits
+            // readiness and commits nothing before it returns, so losing this
+            // race drops a wakeup and never a byte, a command, or an event.
+            // They borrow disjoint fields, which is why this is not a method.
+            let step = tokio::select! {
+                pumped = pump_any(&mut self.panes, &mut self.cursor), if pumping => {
+                    Step::Pumped(pumped)
                 }
-            } else {
-                Step::Command(self.commands.recv().await)
+                permit = self.events.reserve(), if queued.is_some() => {
+                    // `queued` is `Some` here by the branch's own condition; a
+                    // reader that has hung up takes the event with it, which is
+                    // the one case where dropping an event is the right answer.
+                    if let (Ok(permit), Some(event)) = (permit, queued.take()) {
+                        permit.send(event);
+                    }
+                    Step::Flushed
+                }
+                command = self.commands.recv() => Step::Command(command),
             };
+            if let Some(event) = queued {
+                self.outbox.push_front(event);
+            }
 
             match step {
+                // The event moved, or its reader is gone. Either way the loop
+                // has nothing else to do with this turn.
+                Step::Flushed => {}
                 Step::Pumped(Some((pane, Ok(Pump::Bytes(_))))) => {
-                    self.report_effects(pane).await;
+                    self.queue_effects(pane);
                     self.refresh_copy_search(pane);
                     // A bell rings in the bytes just fed. It is an attention
                     // source, not something read out of the grid.
@@ -961,8 +1013,11 @@ impl Session {
                     // A pane whose child exited keeps its grid until someone
                     // closes it. The session is over only when every child is.
                     if self.panes.iter().all(|pane| pane.ended) {
-                        // Not `notify`: a pending `Output` must not swallow this.
-                        let _ = self.events.send(SessionEvent::Exited).await;
+                        // Queued, never awaited, and never coalesced away: this
+                        // is the turn in which the actor used to stop answering
+                        // snapshots, and the reader that would free the channel
+                        // is usually the one blocked asking for one.
+                        self.outbox.push_back(SessionEvent::Exited);
                     } else {
                         self.notify(SessionEvent::Output);
                     }
@@ -1916,37 +1971,41 @@ impl Session {
         self.panes.iter_mut().find(|pane| pane.id == id)
     }
 
-    /// Reports an event, dropping it if one is already pending.
+    /// Queues an event for the reader, dropping it if one is already pending.
     ///
     /// Coalescing is the point: a large `cat` must not turn into one wakeup per
-    /// read, and a second `Output` tells a reader nothing the first did not.
-    fn notify(&self, event: SessionEvent) {
-        let _ = self.events.try_send(event);
+    /// read, and a second `Output` tells a reader nothing the first did not. The
+    /// check is against the outbox rather than the channel, so an `Output` that
+    /// is merely waiting for room still counts as the pending one.
+    fn notify(&mut self, event: SessionEvent) {
+        if self.outbox.contains(&event) {
+            return;
+        }
+        self.outbox.push_back(event);
     }
 
-    /// Drains one pane's typed outer-terminal requests after feeding output.
+    /// Queues one pane's typed outer-terminal requests after feeding output.
     ///
-    /// Effects are sent before the coalesced output level so a title-only OSC
+    /// Effects are queued before the coalesced output level so a title-only OSC
     /// is observable even when it made no grid cell dirty. Unlike an output
-    /// wakeup, each request carries information and is therefore awaited by
-    /// the session-to-daemon channel; that channel has no socket write in its
-    /// path, so a slow terminal cannot stall this actor.
-    async fn report_effects(&mut self, pane: PaneId) {
+    /// wakeup each request carries information, so they are never coalesced with
+    /// one another — two title changes are two ordered requests. They are the
+    /// one thing the outbox may drop, and only when a reader has stopped
+    /// draining long enough to fill [`EVENT_OUTBOX`]: an effect changes no grid
+    /// cell and no session state, so losing one costs a client-local repaint of
+    /// something cosmetic rather than a fact about the session.
+    fn queue_effects(&mut self, pane: PaneId) {
         let effects = self
             .pane_mut(pane)
             .map_or_else(Vec::new, |pane| pane.reactor.emulator_mut().drain_effects());
         for effect in effects {
-            if self
-                .events
-                .send(SessionEvent::Effect {
-                    pane,
-                    effect: wire_effect(effect),
-                })
-                .await
-                .is_err()
-            {
+            if self.outbox.len() >= EVENT_OUTBOX {
                 return;
             }
+            self.outbox.push_back(SessionEvent::Effect {
+                pane,
+                effect: wire_effect(effect),
+            });
         }
     }
 }
@@ -2036,6 +2095,8 @@ enum Step {
     /// A pane's PTY produced output, reached end of file, or failed. `None`
     /// means there was nothing left to pump.
     Pumped(Option<(PaneId, Result<Pump, PtyError>)>),
+    /// A queued event was handed to the reader, or its reader has gone.
+    Flushed,
     /// A command arrived, or the last handle was dropped.
     Command(Option<Command>),
 }

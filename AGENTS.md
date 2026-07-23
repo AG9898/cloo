@@ -138,6 +138,8 @@ Full topology, crate responsibilities, and protocol: [`docs/ARCHITECTURE.md`](do
 - Never use a caret/range version for `alacritty_terminal` — pin exactly.
 - Never add a `Mutex` to session state.
 - Never emit a render update per PTY read.
+- Never await a send on an actor's own outbound channel from inside its loop — queue the event and
+  select over a permit, or a slow reader becomes a deadlock.
 - Never leave the terminal in raw mode on any exit path, including panic — and never leave a
   reporting mode (paste, focus, mouse) on either; register its reset with `RawMode::on_restore`.
 - Never add Windows-specific code — out of scope for v1.
@@ -366,6 +368,11 @@ pane's cell, and asserts that *no* chrome region produces a wire event even unde
 tracking; `cloo-server/tests/session.rs` proves against real children that an event reaches the pane
 it names and not the focused one, that a pane which never enabled the mouse is written nothing, and
 that an event naming a closed pane is dropped.
+M6-03 adds the stall coverage those fixtures needed in `cloo-server/tests/session.rs`: a snapshot
+answered after every pane's child has exited with nobody draining the event channel, and sixty-four
+undeliverable notifications followed by a resize that still applies. Every snapshot in that file now
+goes through a `snapshot_now` helper that wraps the call in a deadline — a test must never await an
+actor reply without a timeout, or a wedged actor hangs the whole suite instead of failing one test.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -811,3 +818,27 @@ are both facts about which enums exist rather than refusals some branch must rem
 makes it *opt-in* is the profile's `adapter` field, copied onto `PaneMeta` at launch: the server
 matches the announced name against the pane's own, stamps the provenance itself, and answers every
 report — a silent drop is indistinguishable from success to the shell script an adapter usually is.
+
+### 2026-07-23 — An actor that awaits its own event channel deadlocks against its reader
+The session task used to `send(SessionEvent::Exited).await` when the last pane's child exited, and
+with the depth-one channel already holding a coalesced `Output` that parked the actor — which meant
+it stopped answering `Command::Snapshot`, and the only reader that could drain the channel was
+whoever was awaiting that snapshot. Events now leave through an outbox the task owns and the loop
+selects over a channel permit, so a slow reader costs latency and never liveness. The tell is that
+`exit 0` never reproduced it while `printf 'bye\n'` always did: with no output there is nothing in
+the channel to block behind, which is why every M2-08 lifecycle fixture passed for two milestones.
+
+### 2026-07-23 — A test that awaits an actor reply without a timeout hangs the whole suite
+Between M6-01 and M6-03 `cargo test --workspace` never returned, because `wait_for_text` checked its
+deadline only *after* `handle.snapshot().await` came back and a wedged actor meant it never did.
+Every snapshot in `cloo-server/tests/session.rs` now goes through `snapshot_now`, which wraps the
+call in the same `DEADLINE` — a 20-second failure naming the stall instead of an unbounded hang.
+Any future fixture that awaits an actor reply needs the same wrapper; the suite is ~3 seconds, so
+anything that runs long is a stall, not slow work.
+
+### 2026-07-23 — Half-reverting `deliver_mouse` proves less than it looks
+Confirming the M6-01 mouse fixtures non-vacuous means reverting to the *fully* naive implementation:
+write to the focused pane with no visibility check. Reverting only the pane lookup leaves the
+`is_visible` guard in place, and `a_mouse_event_for_a_closed_pane_is_dropped` then passes against a
+broken implementation, because the guard drops the event before the wrong lookup is ever reached.
+When checking a fixture's honesty, break the specific line that fixture is about.

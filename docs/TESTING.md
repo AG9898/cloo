@@ -345,9 +345,30 @@ deliberately on the *wrong text* rather than on a hang: two panes each read a fi
 echo it with the escape byte stripped, so a report delivered to the wrong pane shows up as `[<0`
 where `done` was expected. Three fixtures — an event naming an unfocused pane reaching that pane
 and not the focused one, a pane that never enabled the mouse being written nothing while its
-neighbour tracks, and an event naming a closed pane dropped rather than redirected. The first was
-confirmed non-vacuous by reverting `deliver_mouse` to write to the focused pane and watching the
-focused grid show `[<0`.
+neighbour tracks, and an event naming a closed pane dropped rather than redirected. All three were
+confirmed non-vacuous by reverting `deliver_mouse` to the naive implementation — write to the
+focused pane, with no visibility check — and watching each fail. Reverting only the pane lookup is
+*not* enough for the closed-pane fixture: the visibility check drops the event first, so that
+fixture passes against a half-reverted implementation and proves nothing.
+
+Two of those fixtures are also what found the stall M6-03 fixed, and `session.rs` now carries the
+regression coverage. `a_snapshot_is_answered_after_every_child_has_exited` runs a child that prints
+one line and exits — output *and then* an exit, which is the whole reproduction, since the bytes
+queue the coalesced `Output` level and the exit is the event that used to be awaited into a channel
+already holding it. It never drains `SpawnedSession::events`, which is not an artificial condition:
+it is what a daemon looks like for as long as it is inside its own `publish_current`. A child that
+exits silently leaves the channel empty and never stalls, which is why the M2-08 lifecycle fixtures
+passed throughout and why this one does not use `exit 0`.
+`output_that_nobody_drains_never_stalls_the_actor` covers the general case with sixty-four
+undeliverable notifications and then asserts a resize still applies.
+
+Every snapshot in that file goes through a `snapshot_now` helper that wraps
+`SessionHandle::snapshot` in the same 20-second deadline the polling waits use. This is the rule
+worth carrying to any future actor fixture: **a test must never await an actor reply without a
+timeout.** A wedged actor is a real failure mode, and an unbounded await turns it into a
+`cargo test --workspace` that never returns instead of a test that fails and names the problem —
+which is precisely what happened between M6-01 and M6-03. Both stall fixtures were confirmed
+non-vacuous by restoring the awaited `Exited` send and watching them fail on that deadline.
 
 Copy-mode rendering (M5-02) is covered the same way, at both ends. The *client* half is pure and
 unit tested in `cloo-client::copy_mode`: spans are built from the grid cache and the cache is
