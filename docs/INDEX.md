@@ -19,6 +19,7 @@ moving any file under `docs/`, update this file in the same commit.
 | [`docs/ENV_VARS.md`](ENV_VARS.md) | Canonical environment variable and secret matrix |
 | [`docs/TESTING.md`](TESTING.md) | Test strategy, how to run, file inventory, and writing new tests |
 | [`docs/STYLEGUIDE.md`](STYLEGUIDE.md) | Canonical terminal-chrome visual language and degradation rules |
+| [`docs/BRANDING.md`](BRANDING.md) | Canonical external brand-mark system, asset roles, and export rules |
 | [`docs/AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md) | Coding-harness profiles, attention states, and compatibility contract |
 | [`docs/workboard.json`](workboard.json) | Active task queue (canonical board) |
 | [`docs/workboard.schema.json`](workboard.schema.json) | JSON Schema contract for workboard structure and required task fields |

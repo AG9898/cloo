@@ -454,3 +454,28 @@ accident.
 **Affects:** [`ARCHITECTURE.md`](ARCHITECTURE.md), [`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md),
 `crates/cloo-proto/src/adapter.rs`, `crates/cloo-server/src/{socket,conn,daemon,session}.rs`,
 `crates/cloo-core/src/pane.rs`. Implemented in M2-09; `PROTOCOL_VERSION` bumped to 8.
+
+---
+
+### RESOLVED-16 — One master mark with contextual companion marks
+
+**Resolved:** 2026-07-23
+
+**Decision:** cloo has one product mark: the rounded terminal face with a prompt, cursor, and
+underscore. A stacked-terminal workspace mark, minimal command prompt, and expressive agent
+signal are companion marks for their named external contexts; they are not separate products or
+interchangeable app icons. The terminal renderer uses none of them and retains its text glyphs
+and 16-colour treatment.
+
+**Why:** The product needs a distinctive, legible app identity without throwing away useful
+visual ideas that communicate persistent workspaces, compact command contexts, and concurrent
+agents. A strict hierarchy permits those ideas to reinforce one recognizable cloo instead of
+asking users to learn four logos. Keeping external assets outside terminal chrome preserves the
+client-side renderer's capability and accessibility contract.
+
+**Alternatives rejected:** Treating every mark as an equal logo would fragment recognition;
+shipping only the product mark would discard useful, related visual vocabulary; putting a raster
+or gradient mark into terminal chrome would violate the deliberate cell and fallback model.
+
+**Affects:** [`BRANDING.md`](BRANDING.md), [`STYLEGUIDE.md`](STYLEGUIDE.md), public repository and
+release surfaces. Implementation is deferred to workboard task M7-05.

@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">cloo command mark</title>
+  <desc id="desc">A minimal prompt and underscore for compact cloo command contexts.</desc>
+  <defs>
+    <linearGradient id="cloo-command-gradient" x1="143" y1="132" x2="365" y2="382" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bb9af7"/>
+      <stop offset="0.5" stop-color="#7aa2f7"/>
+      <stop offset="1" stop-color="#7dcfff"/>
+    </linearGradient>
+  </defs>
+  <path d="m151 136 128 120-128 120-29-31 94-89-94-89z" fill="url(#cloo-command-gradient)"/>
+  <path d="M295 344h100v32H295z" fill="url(#cloo-command-gradient)"/>
+</svg>

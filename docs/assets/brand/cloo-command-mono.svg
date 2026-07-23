@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">cloo command mark, one colour</title>
+  <desc id="desc">The one-colour version of cloo's minimal prompt and underscore mark.</desc>
+  <path d="m151 136 128 120-128 120-29-31 94-89-94-89z" fill="currentColor"/>
+  <path d="M295 344h100v32H295z" fill="currentColor"/>
+</svg>

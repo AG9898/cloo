@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">cloo workspace mark</title>
+  <desc id="desc">A stack of terminal windows representing cloo's persistent multi-pane workspace.</desc>
+  <defs>
+    <linearGradient id="cloo-workspace-gradient" x1="122" y1="208" x2="391" y2="421" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bb9af7"/>
+      <stop offset="0.5" stop-color="#7aa2f7"/>
+      <stop offset="1" stop-color="#7dcfff"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0f0f16"/>
+  <rect x="102" y="103" width="253" height="216" rx="31" fill="none" stroke="#2a2e42" stroke-width="18"/>
+  <rect x="132" y="137" width="253" height="216" rx="31" fill="#16161e" stroke="#414868" stroke-width="18"/>
+  <rect x="161" y="191" width="253" height="216" rx="31" fill="#0f0f16" stroke="url(#cloo-workspace-gradient)" stroke-width="20"/>
+  <path d="M191 211H385V250H191Z" fill="url(#cloo-workspace-gradient)"/>
+  <path d="M230 281 270 319 230 357" fill="none" stroke="#c0caf5" stroke-linecap="square" stroke-linejoin="miter" stroke-width="18"/>
+  <path d="M290 358H351" fill="none" stroke="#c0caf5" stroke-linecap="square" stroke-width="17"/>
+</svg>

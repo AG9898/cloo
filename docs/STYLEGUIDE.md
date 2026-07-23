@@ -14,6 +14,10 @@ renderer contract. The HTML mock is a visual reference, not production code: clo
 and ANSI sequences, not a DOM. When the mock relies on rounded corners, alpha, shadows, or a
 specific font, this guide defines the cell-based equivalent.
 
+External product marks are governed separately by [`BRANDING.md`](BRANDING.md). They are never
+rendered in terminal chrome: the terminal keeps this guide's cell-based, ASCII-first treatments
+and deliberate 16-colour fallbacks.
+
 The design is intentionally dark, compact, and monospace. It supports normal terminal work and
 many concurrent coding-agent panes without turning the multiplexer into a dashboard.
 

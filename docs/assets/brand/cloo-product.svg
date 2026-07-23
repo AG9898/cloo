@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">cloo product mark</title>
+  <desc id="desc">A rounded terminal frame with a prompt, cursor, and underscore in the cloo Storm gradient.</desc>
+  <defs>
+    <linearGradient id="cloo-product-gradient" x1="84" y1="72" x2="430" y2="440" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#bb9af7"/>
+      <stop offset="0.5" stop-color="#7aa2f7"/>
+      <stop offset="1" stop-color="#7dcfff"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#0f0f16"/>
+  <rect x="70" y="70" width="372" height="372" rx="75" fill="#0f0f16" stroke="url(#cloo-product-gradient)" stroke-width="28"/>
+  <rect x="130" y="141" width="252" height="220" rx="36" fill="none" stroke="#2a2e42" stroke-width="18"/>
+  <path d="M181 207 228 251 181 295" fill="none" stroke="#c0caf5" stroke-linecap="square" stroke-linejoin="miter" stroke-width="21"/>
+  <rect x="278" y="233" width="34" height="34" fill="#c0caf5"/>
+  <path d="M220 313H303" fill="none" stroke="#c0caf5" stroke-linecap="square" stroke-width="19"/>
+</svg>
