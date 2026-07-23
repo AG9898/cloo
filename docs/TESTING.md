@@ -110,6 +110,17 @@ Covered today in `cloo-core`, all as unit tests:
   their configuration spellings round-tripping, and Storm's reference values matching the style
   guide exactly. Theme choice remains model data; terminal-specific colour resolution stays in the
   client.
+- Keymap resolution (M4-02): chord spellings parsed and rendered as inverses, so the documentation
+  and the parser cannot drift; each invalid spelling refused by its own error, including `S-a`,
+  which a terminal could never send, and a literal control character reported without printing it.
+  The action vocabulary round-trips over `ACTION_NAMES`, and an action needing typed text has no
+  spelling in either direction. Over that, the table: the tmux-shaped defaults under `C-b`, an
+  override replacing in place and reporting what it displaced, an addition appended, two keys for
+  one action treated as an alias rather than a conflict, a rebound prefix leaving every binding
+  alone, and unbinding removing exactly one entry. The `[keys]` document surface is proved beside
+  the profiles, with the same two failure modes — a chord written twice is a document error because
+  TOML refuses it, while an unspellable chord, an unknown action, or an unusable prefix drops one
+  line and keeps the default it would have replaced.
 
 Covered today in `cloo-proto`, all as unit tests:
 
@@ -475,6 +486,21 @@ rather than three of each:
 `src/input.rs` gains the matching overlay vocabulary: `j`/`k` and the arrows, `g`/`G` and Home/End,
 Enter, and Escape or `q`, with an unbound key mapping to nothing.
 
+M4-02 adds the keyboard's half of the ownership question to `src/input.rs`, in two layers. First
+`decode_key`, with one fixture per encoding a terminal actually sends — control letters, `M-x`,
+`C-M-b`, `CSI Z`, `SS3` arrows, the `;modifier` parameter forms, numbered editing and function keys
+— each asserted against the spelling `cloo-core` would parse, which is the join between the two
+crates. A sequence cloo does not model, and half of one, answer `None` rather than a guess.
+
+Then `KeyRouter`, whose fixtures are all one property: **nothing is consumed outside a pending
+prefix.** Every default-bound chord fed without the prefix comes back as `Pane` with exactly its own
+bytes, and the fixture asserts the chord *is* bound first so it cannot pass vacuously. Around that:
+ordinary typing passed through byte for byte, a prefix and its chord arriving in one read, typing
+around a command keeping its order and its bytes, an unbound or undecodable chord after the prefix
+consumed rather than typed at a shell, the prefix twice sending itself to the child, a rebound
+prefix handing `C-b` back to the pane, and a reset forgetting a pending prefix. Reverting the router
+to one that looks a chord up without the prefix fails five of them.
+
 `src/renderer.rs` gained the positioned `Span` that chrome is painted from: a span drawn at its own
 origin, each span restating its style absolutely so a second one cannot inherit the first's, an
 empty span moving nothing, and spans never clearing the outer terminal.
@@ -559,9 +585,9 @@ tested in `src/local.rs`.
 The intended shape for the rest, in the order it becomes testable:
 
 - **`cloo-core`** — profile and pane-metadata models joined layout at M2-04, profile
-  configuration parsing at M2-05, and the tab and session lifecycle at M3-01; keymap resolution and
-  the rest of the configuration surface are still to come. Like layout, all of them are pure and
-  testable without a terminal.
+  configuration parsing at M2-05, the tab and session lifecycle at M3-01, and keymap resolution at
+  M4-02; the rest of the configuration surface is still to come. Like layout, all of them are pure
+  and testable without a terminal.
 - **`cloo-server`** — the socket lifecycle joined the PTY tests at M1-01, handshake and attach
   coverage at M1-02, the session task at M1-03, and split and close at M2-01. Slower; keep the
   count deliberate.
@@ -607,7 +633,8 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-core/src/session.rs` | Session model | The tab lifecycle: create appending and activating, rename and select touching only their target, close with its defined active-tab behaviour (right neighbour, rightmost fallback, non-active left alone), and every rejection changing nothing — unknown tab and the last tab refused with unknown checked first |
 | `crates/cloo-core/src/profile.rs` | Profiles | The three built-ins as data — launcher order, each validating, none carrying an adapter, `codex` reconstructible field for field — plus every shape rejection: ID alphabet and bound, default name, command NUL or control character, and a recommendation below the layout floor |
 | `crates/cloo-core/src/pane.rs` | Pane metadata | Validated names, labels, and an absolute-only working directory (a path that does not exist still validating, which is what pins validation to being pure), attention as state plus provenance: `unknown` by default, only three states queueing, acknowledgment cleared on change but kept on a repeat, only an adapter advisory, and the wire projection carrying what the user supplied with an absent task staying absent, plus attention's own wire projection: `unknown`/`None`/unseen by default, state, provenance, and acknowledgment kept together, and every state mapping to a distinct wire form, plus the adapter opt-in: a pane permitting only the adapter its profile named, every built-in permitting none, and an adapter state that can never become `quiet` or `unknown` |
-| `crates/cloo-core/src/config.rs` | Configuration | Profile definitions parsed from `config.toml` text: a document error keeping the defaults and an unknown key refusing rather than being ignored, one invalid profile dropped with a warning while its neighbours load, built-in override in place, duplicate IDs keeping the first, and the command and `min_size` surface — omitted command as login shell, empty array refused, arguments verbatim, a recommendation below the layout floor rejected |
+| `crates/cloo-core/src/config.rs` | Configuration | Profile definitions parsed from `config.toml` text: a document error keeping the defaults and an unknown key refusing rather than being ignored, one invalid profile dropped with a warning while its neighbours load, built-in override in place, duplicate IDs keeping the first, and the command and `min_size` surface — omitted command as login shell, empty array refused, arguments verbatim, a recommendation below the layout floor rejected; plus the `[keys]` table — no table meaning the `C-b` defaults, a rebound prefix keeping every binding, an override leaving the other defaults alone, `none` unbinding, a chord written twice as a document error, an unspellable prefix keeping `C-b`, an invalid chord or unknown action dropped alone in chord order, and an action needing typed text refused |
+| `crates/cloo-core/src/keymap.rs` | Keymap | Chord spellings — modifiers then a key, case-sensitive characters and case-insensitive names, a trailing `-` as the key, every canonical spelling round-tripping, and each invalid spelling refused by its own error including a literal control character reported without printing it; the action vocabulary round-tripping with no spelling for an action that needs typed text; and the table itself: the tmux-shaped defaults under `C-b`, an override replacing in place and reporting what it displaced, an addition appended, two keys for one action as an alias, a rebound prefix leaving the bindings alone, and unbinding removing exactly one entry |
 | `crates/cloo-core/src/error.rs` | Session model | `LayoutError` messages naming the pane, sizes, and axis they refused, `MetadataError` naming its field and escaping a rejected control character rather than printing it, and `SessionError` naming the tab it refused and explaining the last-tab rule |
 | `crates/cloo-core/src/grid.rs` | Wire conversion | Emulator cells, colours, attributes, cursor, and negotiated pane modes crossing into wire types, and the two crates' attribute bit layouts still agreeing |
 | `crates/cloo-core/src/theme.rs` | Theme model | The four named palette spellings, complete style-guide token tables, and Storm's exact reference values |
@@ -634,7 +661,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/src/capabilities.rs` | Capabilities | Detection from `TERM`/`COLORTERM`, an unresolvable `TERM` refusing an attach but not a local pane, each capability reading its own field, and the documented fallback for every baseline capability |
 | `crates/cloo-client/src/resize.rs` | Resize watch | The recorded starting size, and nothing reported without a `SIGWINCH` — the signal itself is driven from the binary's tests |
 | `crates/cloo-client/src/attach.rs` | Attach | A hello completing the attach, `TermCaps` round-tripping over the handshake, a `Tabs` update replacing the cached bar and a resolved command reaching the server, an unresolvable `TERM` surfacing as a capability failure, a refusal surfacing the server's own reason, a future server caught client-side, a non-hello reply and a silent server refused, and detach waiting for its acknowledgement |
-| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, the three mouse-ownership rules, hit testing every region of a drawn screen with a mis-described pane unable to swallow a chrome row or a header a pane's own cell, no chrome region producing a wire event even under full motion tracking, an unfocused-pane and a shift-held click routing to `PaneBody`, a tracking level below the event left for the server to drop, and the attention-queue and overlay key bindings mapping to their actions with an unbound key mapping to none |
+| `crates/cloo-client/src/input.rs` | Input routing | One fixture per negotiated mode's request and matching reset, decoding of paste, focus, and every mouse report kind, sequences split across reads, a lone Escape released by a flush, a mode never requested left alone, the three mouse-ownership rules, hit testing every region of a drawn screen with a mis-described pane unable to swallow a chrome row or a header a pane's own cell, no chrome region producing a wire event even under full motion tracking, an unfocused-pane and a shift-held click routing to `PaneBody`, a tracking level below the event left for the server to drop, and the attention-queue and overlay key bindings mapping to their actions with an unbound key mapping to none; plus keys — one fixture per encoding a terminal sends decoded to its `cloo-core` spelling, a multi-byte character as one chord, an unmodelled or half-arrived sequence refused rather than guessed at, and the prefix state machine: every default-bound chord still the pane's without the prefix, typing passed through byte for byte, a prefix and its chord in one read, typing around a command keeping its order and bytes, an unbound or undecodable chord after the prefix consumed rather than typed, the prefix twice sending itself to the child, a rebound prefix giving the old one back to the pane, and a reset forgetting a pending prefix |
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/cli.rs` | Binary | The command line as a pure function: every launch option read, options stopping at the program so `sh -c` keeps its own flags, `--` for a program that looks like a flag, an unknown or repeated flag refused, `--profile` and a program refused together, and resolution — a named or configured profile with its defaults, the user's name/task/directory winning, an unknown profile naming the ones that exist, a program running as a generic pane named for itself, a relative directory resolved and a tilde refused, and a control character in a name or task refused |

@@ -133,7 +133,10 @@ queue is rendered as `0!` in this row, so the count remains explicit.
 Width yields in one fixed order: drop the active tab title, shorten `session:7` to `s7`, collapse a
 per-state tally to its total (`3!`), then drop `?` from the `C-b ?` hint. At the narrowest useful
 width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and the
-`C-b` prefix. Below four cells no renderer can preserve all four fields, so the row is truncated
+`C-b` prefix. The prefix that hint names is configurable as of M4-02 — `[keys] prefix` in
+`config.toml`, defaulting to `C-b` — and the keymap is the client's, not session state, so two
+clients attached to one session may legitimately show different hints. This row still renders
+cloo's default spelling; drawing a rebound prefix in it is chrome work yet to land. Below four cells no renderer can preserve all four fields, so the row is truncated
 from that compact form rather than making up a different layout. `status_bar_cells` and
 `status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
 non-truecolor fallback down-samples colours while leaving these ASCII signals intact.

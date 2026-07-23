@@ -176,7 +176,8 @@ impl std::error::Error for ConfigLoadError {
 #[derive(Debug)]
 pub enum Reload {
     /// The whole document parsed, so it replaced the previous configuration.
-    /// Validation warnings describe only rejected individual profile entries.
+    /// Validation warnings describe only individual entries — a profile or a
+    /// key binding — that were rejected on their own.
     Applied {
         /// Entries in an otherwise valid document that were ignored.
         warnings: Vec<ConfigWarning>,
@@ -197,7 +198,8 @@ pub enum Reload {
 pub struct InitialConfig {
     /// The complete validated configuration selected for startup.
     pub config: Config,
-    /// User-visible diagnostics for a rejected document or profile entries.
+    /// User-visible diagnostics for a rejected document or for the individual
+    /// profile or key entries that were dropped.
     pub diagnostics: Vec<String>,
 }
 

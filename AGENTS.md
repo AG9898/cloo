@@ -373,6 +373,14 @@ answered after every pane's child has exited with nobody draining the event chan
 undeliverable notifications followed by a resize that still applies. Every snapshot in that file now
 goes through a `snapshot_now` helper that wraps the call in a deadline — a test must never await an
 actor reply without a timeout, or a wedged actor hangs the whole suite instead of failing one test.
+M4-02 adds keymap resolution: chord spellings and the tmux-shaped `C-b` table in
+`cloo-core/src/keymap.rs` (spellings round-tripping, each invalid one refused by its own error, the
+action vocabulary with no name for an action that needs typed text, and an override replacing a
+binding in place while an alias is not a conflict), the `[keys]` document surface in
+`cloo-core/src/config.rs` (a chord written twice as a document error, an unspellable prefix keeping
+`C-b`, and a bad line dropped alone), and the prefix state machine in `cloo-client/src/input.rs` —
+one fixture per encoding a terminal sends decoded to its spelling, and every default-bound chord
+still reaching the pane byte for byte when no prefix is pending.
 M3-04 adds the keyboard-first overlays in `cloo-client/src/overlay.rs` — every overlay dismissible
 from every state including an empty one, navigation clamping at both ends, a confirmed launcher row
 naming a profile the caller supplied with an unvalidatable profile never becoming a row, pane
@@ -857,3 +865,20 @@ write to the focused pane with no visibility check. Reverting only the pane look
 `is_visible` guard in place, and `a_mouse_event_for_a_closed_pane_is_dropped` then passes against a
 broken implementation, because the guard drops the event before the wrong lookup is ever reached.
 When checking a fixture's honesty, break the specific line that fixture is about.
+
+### 2026-07-23 — The keyboard's ownership rule is the mirror of the mouse's
+`cloo-core::keymap` owns what a chord is *called* and `cloo-client::input` owns what bytes it
+arrives as, because a spelling must not depend on a terminal and an encoding does. The router's one
+property is that **nothing is consumed outside a pending prefix**: pass-through is a copy of the
+slice that arrived rather than a re-encoding of a decoded chord, and a sequence `decode_key` cannot
+name is the pane's, exactly as a mode that was never negotiated is. Confirm any fixture here by
+reverting to a router that looks a chord up without the prefix — five tests fail, and a keymap that
+ate `c` in vim would otherwise ship.
+
+### 2026-07-23 — A vocabulary is how a binding is stopped from naming an impossible command
+`Action::RenameTab` and `Action::CopySearch` carry text a keypress does not, so they have no
+configuration spelling in *either* direction — `parse_action` refuses the name and `action_name`
+answers `None`. That is the same shape as `LaunchRequest` having no constructor but a confirmed
+launcher row: the impossible case is absent from the vocabulary rather than rejected by a branch
+someone has to remember. Relatedly, `S-a` is refused because a terminal reports a shifted `a` as
+`A`, so accepting it would store a binding that could never fire.

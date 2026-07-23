@@ -569,7 +569,7 @@ never resizes a grid or a PTY itself.
 #### Input routing
 
 `cloo-client::input` is the other half of what the client does with the terminal it sits in, as of
-M1-07. Three pieces, composing in one direction:
+M1-07. Four pieces, composing in one direction:
 
 - **`OuterModes`** — which reporting modes cloo asks the outer terminal to turn on, derived from
   the negotiated `TermCaps` and from nothing else. A capability that could not be established is
@@ -584,6 +584,9 @@ M1-07. Three pieces, composing in one direction:
   `flush` on the frame tick — that is what makes the Escape key reach a pane at all.
 - **`ScreenLayout` / `route_mouse`** — where a report landed and who owns it. `mouse_owner` is the
   ownership rule on its own, for a caller that has already hit-tested.
+- **`decode_key` / `KeyRouter`** — the keyboard's ownership question, added at M4-02. `decode_key`
+  turns a run of key bytes into a `cloo_core::keymap::Key`; the router decides whether that chord
+  is cloo's at all.
 
 The encoding sits on the far side. `ClientMessage::Paste`, `Focus`, and `Mouse` carry *what
 happened*; `cloo-server::session` turns each into bytes using the modes the pane's own application
@@ -646,6 +649,40 @@ no chrome, so its screen is `ScreenLayout::single` and a chrome target is still 
 The server does not take the client's word for any of it. `Session::deliver_mouse` re-checks that
 the named pane is visible and encodes from that pane's own modes, so a client cannot write into an
 arbitrary child and an application that never asked for the mouse hears nothing.
+
+##### Keys and the prefix
+
+The keymap itself is `cloo-core`'s — see [Keymap](#keymap) — and resolving it against a real
+terminal is `cloo-client::input`'s, as of M4-02.
+
+`decode_key` names the first chord in a run of key bytes and says how many bytes it took, using the
+conventional encodings: `0x01`–`0x1a` are control letters, `ESC` before anything but a sequence
+introducer is that chord with alt, `CSI`/`SS3` carry the arrows, editing keys, and function keys —
+including the `;modifier` parameter forms — and a bare `ESC` is Escape. Two pairs are deliberately
+kept apart: `0x0d` is Enter while `0x0a` is `C-j`, and `0x7f` is Backspace while `0x08` is `C-h`.
+A sequence cloo does not model answers `None`, which a caller must treat as the pane's rather than
+as an unrecognised command — the same rule `InputDecoder` follows for a mode that was never
+negotiated.
+
+`KeyRouter` is the prefix state machine, and it has one safety property: **outside a pending
+prefix, every byte is the pane's.** A chord in the table means nothing until the prefix is pressed,
+so an application using `c`, `x`, `q`, or an arrow key never notices cloo is there. Pass-through
+bytes are a copy of the slice that arrived, never a re-encoding of a decoded chord, since a client
+that re-encoded would corrupt input the first time it guessed at a convention differently. Only the
+single chord after the prefix is looked up; anything after it in the same read is passed through
+again.
+
+| `KeyRoute` | Meaning |
+|---|---|
+| `Pane(bytes)` | the user's bytes, verbatim, for the focused pane's child |
+| `Pending` | the prefix was pressed; nothing reached the child, and the status bar shows it |
+| `Command(Action)` | a bound chord, sent as `ClientMessage::Command` |
+| `Unbound` | a chord after the prefix that no binding names — consumed, never typed |
+
+An unbound chord is consumed rather than delivered because the user was talking to cloo; passing it
+on is how a mistyped command ends up in a shell. Pressing the prefix twice sends the prefix itself
+to the child, which is tmux's `send-prefix` and the only way to type a `C-b` into a program that
+wants one.
 
 ### The binary
 
@@ -727,7 +764,9 @@ override. M4-01 puts file I/O in `cloo-server::config`: `CLOO_CONFIG` wins over
 `XDG_CONFIG_HOME/cloo/config.toml` and the `$HOME/.config` fallback, a missing file means defaults,
 and a startup read failure warns before using defaults. Its `ConfigManager` loads and validates a
 whole replacement before one assignment changes the live value; a failed `SIGHUP` reload therefore
-keeps the prior valid configuration. M2-06 launches from profiles.
+keeps the prior valid configuration. M2-06 launches from profiles. M4-02 adds the `[keys]` table to
+the same document and the same warning rules — see [Keymap](#keymap) — so a `Config` now carries
+the prefix and its bindings alongside the profiles.
 
 M2-07 makes the session actor the one serialized path for that attention state. `Command::SetAttention`
 and `Command::AcknowledgeAttention` arrive on the same `mpsc` as every other mutation, so the
@@ -995,6 +1034,53 @@ before dropping exactly the reactors it named. `NewTab`, `CloseTab`, `NextTab`, 
 `RenameTab` cross as `Action` values, so the client sends intent while the actor remains the one
 writer. Switching applies the selected tab's resolved geometry but leaves all other reactors
 alive and pumping, preserving their grids and child processes for a later return.
+
+---
+
+## Keymap
+
+`cloo-core::keymap`, as of M4-02. Three things, kept separate on purpose:
+
+- **`Key`** — one chord: a `KeyCode` (a printable character, a named key, or `F1`–`F12`) and its
+  `KeyMods`. It owns a *spelling* and nothing else. `C-` is control, `M-`/`A-` are alt, `S-` is
+  shift, and a key is either a character written as itself, case sensitively, or a name matched
+  case-insensitively (`enter`, `escape`, `pageup`, `f5`, …). `Display` writes the canonical
+  spelling and `Key::parse` reads it back, which is what keeps the parser and the documentation
+  from drifting. Shift on a printable character is refused rather than accepted quietly: a
+  terminal reports a shifted `a` as `A`, so such a binding could never fire. What *bytes* a
+  terminal sends for a chord is the client's, not this crate's — see
+  [Keys and the prefix](#keys-and-the-prefix).
+- **The action vocabulary** — one kebab-case name per bindable `Action`, with `parse_action` and
+  `action_name` as inverses over `ACTION_NAMES`. An action that needs text a chord cannot carry
+  (`RenameTab`, `CopySearch`) has **no spelling at all**, so a binding cannot name a command the
+  keypress could not supply an argument for; those are reached from a surface that can ask.
+- **`Keymap`** — the prefix chord plus the table reached after it. The defaults are tmux's, with
+  `C-b` as the prefix ([DECISIONS.md](DECISIONS.md) RESOLVED-04): `%` and `"` split, `x` closes,
+  `hjkl` and the arrows move focus, `z` zooms, `c`/`&`/`n`/`p` are tabs, `[` enters copy mode, and
+  `d` detaches.
+
+Conflict resolution is one rule: `bind` replaces a key's action **in place** and returns what it
+displaced. In place, because the order of the table is the order a user reads it in; returning the
+displaced action, because overriding a default and colliding with an earlier binding are the same
+operation here and different messages to whoever wrote the file. Two keys bound to one action are
+not a conflict — that is how the arrows and `hjkl` both move focus.
+
+Configuration is a `[keys]` table parsed by `cloo-core::config`:
+
+```toml
+[keys]
+prefix = "C-a"                 # omit to keep C-b
+
+[keys.bindings]
+"|" = "split-vertical"         # an addition, or an override of a default
+"x" = "none"                   # `none` removes a binding entirely
+```
+
+The same two failure modes as profiles, and for the same reason. TOML itself refuses a chord
+written twice, so a duplicate is a document error rather than a silent last-wins. A chord that
+cannot be spelled, or an action name cloo does not know, drops that one line with a
+`ConfigWarning` and leaves the default it would have replaced in place. An unusable `prefix` in
+particular keeps `C-b`: a prefix nobody can press is a session with no way out.
 
 ---
 

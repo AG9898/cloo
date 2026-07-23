@@ -170,6 +170,25 @@ crates/
   naming it, and its neighbours still load.
   Never coerce a rejected value into a nearby valid one — a clamped setting is a setting the user
   never wrote.
+- A setting whose only fallback would leave cloo unusable keeps its default explicitly. An
+  unspellable key `prefix` is the case that exists today: the binding is dropped, `C-b` stays, and
+  the user is warned — a prefix nobody can press is a session with no way out.
+
+### Keys
+
+- A chord's *spelling* lives in `cloo-core::keymap` and its *bytes* live in `cloo-client::input`.
+  Neither crate does the other's half: what a terminal sends depends on the terminal, and what a
+  key is called in `config.toml` must not.
+- A binding names an `Action`, never bytes for a child. An action that needs text a chord cannot
+  carry has no configuration spelling at all, so the vocabulary itself is what stops a binding from
+  naming a command it could not supply an argument for.
+- **Nothing is cloo's until the prefix is pressed.** A key run outside a pending prefix is passed
+  through as the *same bytes that arrived*, never re-encoded from a decoded chord, and a chord in
+  the keymap means nothing until the prefix precedes it. A sequence the client cannot name is the
+  pane's too — decoding must answer "not a chord I know" rather than guess.
+- After the prefix, exactly one chord is consumed. An unbound one is swallowed rather than
+  delivered: the user was talking to cloo, and passing it on is how a mistyped command ends up in
+  a shell.
 
 ---
 

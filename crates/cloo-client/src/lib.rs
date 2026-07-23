@@ -23,8 +23,9 @@
 //! - [`input`] — the reporting modes cloo asks the outer terminal for, the
 //!   decoder that splits its byte stream back into typed events, the hit test
 //!   and ownership rule that decide whether a mouse event is chrome's or the
-//!   application's, and the keyboard actions that drive the attention queue
-//!   overlay.
+//!   application's, the prefix state machine that resolves a `cloo-core`
+//!   keymap against decoded chords, and the keyboard actions that drive the
+//!   attention queue overlay.
 //! - [`overlay`] — the keyboard-first session switcher, profile launcher, and
 //!   pane-details view, as one model and one renderer over the shared chrome
 //!   rules.
@@ -70,9 +71,9 @@ pub use copy_mode::{
 };
 pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{
-    ChromeTarget, InputDecoder, InputEvent, MouseOwner, MouseReport, MouseRoute, MouseTarget,
-    OuterModes, OverlayAction, PaneArea, QueueAction, ScreenLayout, mouse_owner, overlay_action,
-    queue_action, route_mouse,
+    ChromeTarget, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseOwner, MouseReport,
+    MouseRoute, MouseTarget, OuterModes, OverlayAction, PaneArea, QueueAction, ScreenLayout,
+    decode_key, mouse_owner, overlay_action, queue_action, route_mouse,
 };
 pub use outer::{current_size, window_size};
 pub use overlay::{

@@ -5,7 +5,7 @@
 //! belongs in `cloo-server` or `cloo-client` instead. Everything here is pure
 //! and unit-testable without a terminal.
 //!
-//! Ten modules today:
+//! Eleven modules today:
 //!
 //! - [`session`] — the top of the model: an ordered set of tabs with one active,
 //!   and the tab lifecycle (create, rename, select, close) over it.
@@ -18,6 +18,10 @@
 //!   merging local profiles over the built-ins. Reading the file is the
 //!   server's; a document error is returned for its owner to handle, and a
 //!   single bad profile is dropped with a warning rather than costing the rest.
+//! - [`keymap`] — key chords, their configuration spellings, and the tmux-shaped
+//!   `C-b` prefix table. A [`Keymap`] answers what a chord means *after* the
+//!   prefix and never what ordinary typing means; the prefix state machine is
+//!   `cloo-client`'s.
 //! - [`pane`] — pane identity and the provenance-aware attention state.
 //! - [`grid`] — the emulator-cell to wire-cell conversion, the only place the
 //!   `cloo-term` and `cloo-proto` vocabularies meet.
@@ -40,6 +44,7 @@ pub mod copy_mode;
 pub mod error;
 pub mod grid;
 pub mod id;
+pub mod keymap;
 pub mod layout;
 pub mod pane;
 pub mod profile;
@@ -58,6 +63,7 @@ pub use grid::{
     wire_size,
 };
 pub use id::{PaneIdAllocator, SessionIdAllocator, TabIdAllocator};
+pub use keymap::{DEFAULT_PREFIX, Key, KeyCode, KeyError, KeyMods, Keymap};
 pub use layout::{Layout, MIN_PANE_SIZE, Node, Side};
 pub use pane::{
     Attention, AttentionSource, AttentionState, PaneMeta, PaneName, TaskLabel, WorkingDir,

@@ -1,6 +1,6 @@
 //! What the user's terminal sends, turned into typed events cloo can route.
 //!
-//! Three things live here, and they compose in one direction:
+//! Four things live here, and they compose in one direction:
 //!
 //! 1. [`OuterModes`] — which reporting modes cloo asks the *outer* terminal to
 //!    turn on, derived from the capabilities negotiated at attach. Nothing is
@@ -15,6 +15,10 @@
 //!    whether that place belongs to the pane's application or to cloo's own
 //!    chrome. [`mouse_owner`] is the ownership rule on its own, for a caller
 //!    that has already done its own hit testing.
+//! 4. [`decode_key`] and [`KeyRouter`] — the keyboard's half of the same
+//!    ownership question. `cloo-core` owns what a chord is *called* and what it
+//!    is bound to; this is where a run of bytes becomes a [`Key`] and where the
+//!    prefix state machine decides whether a chord is cloo's at all.
 //!
 //! **The client decodes; the server encodes.** A paste leaves here as text and
 //! is bracketed on the far side, because whether the child wants brackets is a
@@ -31,10 +35,18 @@
 //! [`MouseRoute`]: an application event arrives already shaped as the
 //! [`MouseEvent`] the wire takes, and a chrome event has no such shape at all,
 //! so there is nothing for a caller to send by mistake.
+//!
+//! The keyboard's ownership rule is narrower and stricter: **nothing is cloo's
+//! until the prefix is pressed.** [`KeyRouter`] passes every byte through
+//! verbatim — the same slice it was handed, never re-encoded — until it decodes
+//! the prefix chord, and only the single chord after that prefix is looked up.
+//! An application using `c`, `x`, or an arrow key is therefore untouched, which
+//! is the whole reason a multiplexer can sit under a full-screen program.
 
+use cloo_core::keymap::{Key, KeyCode, KeyMods, Keymap};
 use cloo_proto::{
-    MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, PaneId, PaneModes, Point, Size,
-    TermCaps,
+    Action, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking, PaneId, PaneModes, Point,
+    Size, TermCaps,
 };
 
 /// Turns on bracketed paste in the outer terminal.
@@ -835,6 +847,300 @@ pub fn route_mouse(layout: &ScreenLayout, modes: PaneModes, report: &MouseReport
     }
 }
 
+// ---------------------------------------------------------------------------
+// Keys
+// ---------------------------------------------------------------------------
+
+/// The characters `0x1c`–`0x1f` are control forms of, in order.
+const CTRL_SYMBOLS: [char; 4] = ['\\', ']', '^', '_'];
+
+/// Decodes the first chord in a run of key bytes, with the bytes it consumed.
+///
+/// `None` means "not a chord this function can name" — an escape sequence cloo
+/// does not model, or a sequence that is not all here yet. A caller must treat
+/// that as the pane's, never as an unrecognised command: bytes cloo cannot
+/// explain belong to whatever is running, which is the same rule the decoder
+/// above follows for a mode that was never negotiated.
+///
+/// The encodings are the conventional ones. `0x01`–`0x1a` are control letters,
+/// `ESC` followed by anything but a sequence introducer is that chord with alt,
+/// `CSI`/`SS3` carry the arrows, editing keys, and function keys, and a bare
+/// `ESC` is Escape. Two deliberate splits: `0x0d` is Enter while `0x0a` is
+/// `C-j`, and `0x7f` is Backspace while `0x08` is `C-h` — that is what those
+/// keys actually send in raw mode, and collapsing either pair would make one of
+/// the two unbindable.
+#[must_use]
+pub fn decode_key(bytes: &[u8]) -> Option<(Key, usize)> {
+    let first = *bytes.first()?;
+    match first {
+        0x1b => decode_escape(bytes),
+        0x0d => Some((Key::code(KeyCode::Enter), 1)),
+        0x09 => Some((Key::code(KeyCode::Tab), 1)),
+        0x7f => Some((Key::code(KeyCode::Backspace), 1)),
+        0x00 => Some((Key::ctrl(' '), 1)),
+        0x01..=0x1a => Some((Key::ctrl(char::from(b'a' + first - 1)), 1)),
+        0x1c..=0x1f => Some((Key::ctrl(CTRL_SYMBOLS[usize::from(first - 0x1c)]), 1)),
+        _ => decode_char(bytes),
+    }
+}
+
+/// Decodes one UTF-8 character as an unmodified chord.
+fn decode_char(bytes: &[u8]) -> Option<(Key, usize)> {
+    let lead = *bytes.first()?;
+    let len = match lead {
+        0x00..=0x7f => 1,
+        0xc0..=0xdf => 2,
+        0xe0..=0xef => 3,
+        0xf0..=0xf7 => 4,
+        _ => return None,
+    };
+    let ch = core::str::from_utf8(bytes.get(..len)?)
+        .ok()?
+        .chars()
+        .next()?;
+    Some((Key::char(ch), len))
+}
+
+/// Decodes a sequence that starts with `ESC`.
+fn decode_escape(bytes: &[u8]) -> Option<(Key, usize)> {
+    match bytes.get(1) {
+        // Nothing after it in this run: a lone Escape. The run loop's flush is
+        // what guarantees this is the whole story rather than a split sequence.
+        None => Some((Key::code(KeyCode::Escape), 1)),
+        Some(b'[') => decode_csi(bytes),
+        Some(b'O') => decode_ss3(bytes),
+        Some(_) => {
+            let (key, len) = decode_key(&bytes[1..])?;
+            Some((key.with_alt(), len + 1))
+        }
+    }
+}
+
+/// Decodes `ESC O x`: the arrows in application mode, and `F1`–`F4`.
+fn decode_ss3(bytes: &[u8]) -> Option<(Key, usize)> {
+    let code = match *bytes.get(2)? {
+        b'A' => KeyCode::Up,
+        b'B' => KeyCode::Down,
+        b'C' => KeyCode::Right,
+        b'D' => KeyCode::Left,
+        b'H' => KeyCode::Home,
+        b'F' => KeyCode::End,
+        b'P' => KeyCode::Function(1),
+        b'Q' => KeyCode::Function(2),
+        b'R' => KeyCode::Function(3),
+        b'S' => KeyCode::Function(4),
+        _ => return None,
+    };
+    Some((Key::code(code), 3))
+}
+
+/// Decodes `ESC [ params final`, including the `;modifier` forms.
+fn decode_csi(bytes: &[u8]) -> Option<(Key, usize)> {
+    let mut params = [0_u32; 2];
+    let mut field = 0;
+    let mut index = 2;
+    loop {
+        match *bytes.get(index)? {
+            byte @ b'0'..=b'9' => {
+                if field < params.len() {
+                    params[field] = params[field]
+                        .saturating_mul(10)
+                        .saturating_add(u32::from(byte - b'0'));
+                }
+            }
+            b';' => field += 1,
+            byte @ (b'A'..=b'Z' | b'~') => {
+                let code = match byte {
+                    b'A' => KeyCode::Up,
+                    b'B' => KeyCode::Down,
+                    b'C' => KeyCode::Right,
+                    b'D' => KeyCode::Left,
+                    b'H' => KeyCode::Home,
+                    b'F' => KeyCode::End,
+                    // `CSI Z` is back-tab, which is the only shifted chord a
+                    // terminal spells with its own final byte.
+                    b'Z' => return Some((Key::new(KeyCode::Tab, KeyMods::SHIFT), index + 1)),
+                    b'~' => numbered_key(params[0])?,
+                    _ => return None,
+                };
+                return Some((Key::new(code, csi_mods(params[1])), index + 1));
+            }
+            _ => return None,
+        }
+        index += 1;
+    }
+}
+
+/// The editing and function keys spelled as `CSI n ~`.
+fn numbered_key(number: u32) -> Option<KeyCode> {
+    Some(match number {
+        1 | 7 => KeyCode::Home,
+        2 => KeyCode::Insert,
+        3 => KeyCode::Delete,
+        4 | 8 => KeyCode::End,
+        5 => KeyCode::PageUp,
+        6 => KeyCode::PageDown,
+        11..=15 => KeyCode::Function(u8::try_from(number - 10).ok()?),
+        17..=21 => KeyCode::Function(u8::try_from(number - 11).ok()?),
+        23 | 24 => KeyCode::Function(u8::try_from(number - 12).ok()?),
+        _ => return None,
+    })
+}
+
+/// The `1 + bitfield` modifier parameter terminals send as a CSI parameter.
+fn csi_mods(param: u32) -> KeyMods {
+    if param < 2 {
+        return KeyMods::NONE;
+    }
+    let bits = param - 1;
+    KeyMods {
+        shift: bits & 1 != 0,
+        alt: bits & 2 != 0,
+        ctrl: bits & 4 != 0,
+    }
+}
+
+/// What one run of key bytes turned into.
+///
+/// [`Pane`](Self::Pane) carries the user's bytes *unchanged* — a copy of the
+/// slice that arrived, never a re-encoding of a decoded chord — because a client
+/// that re-encoded would have to guess at the terminal's own conventions and
+/// would corrupt input the moment it guessed differently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyRoute {
+    /// Bytes for the focused pane's child, exactly as the terminal sent them.
+    Pane(Vec<u8>),
+    /// The prefix was pressed. Nothing reaches the child; the next chord is
+    /// cloo's. Worth surfacing because the status bar shows the pending prefix.
+    Pending,
+    /// A bound command. The client sends this as `ClientMessage::Command`.
+    Command(Action),
+    /// A chord after the prefix that no binding names. It is *consumed*: the
+    /// user meant it for cloo, and passing it to the child instead is how a
+    /// mistyped command ends up in a shell.
+    Unbound,
+}
+
+/// The prefix state machine: which keys are the pane's and which are cloo's.
+///
+/// One rule, and it is the whole safety property: **outside a pending prefix,
+/// every byte is the pane's.** A chord bound in the table means nothing until
+/// the prefix has been pressed, so an application that uses `c`, `x`, `q`, or an
+/// arrow key never notices cloo is there. Only the single chord after the prefix
+/// is looked up, and whatever follows it in the same read is passed through
+/// again.
+///
+/// Pressing the prefix twice sends the prefix itself to the child — tmux's
+/// `send-prefix`, and the only way to type a `C-b` into a program that wants
+/// one.
+#[derive(Debug, Clone)]
+pub struct KeyRouter {
+    keymap: Keymap,
+    pending: bool,
+}
+
+impl KeyRouter {
+    /// A router over `keymap`, with no prefix pending.
+    #[must_use]
+    pub fn new(keymap: Keymap) -> Self {
+        Self {
+            keymap,
+            pending: false,
+        }
+    }
+
+    /// The keymap being resolved against.
+    #[must_use]
+    pub const fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    /// Whether the prefix has been pressed and the next chord is cloo's.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Forgets a pending prefix.
+    ///
+    /// For the events that end a keystroke's context — losing focus, or an
+    /// overlay taking the keyboard — where leaving it pending would silently
+    /// swallow the user's next keystroke.
+    pub const fn reset(&mut self) {
+        self.pending = false;
+    }
+
+    /// Replaces the keymap, keeping any pending prefix.
+    ///
+    /// A `SIGHUP` reload is allowed to change the bindings under a user who is
+    /// mid-chord; what it must not do is drop the chord they already pressed.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+    }
+
+    /// Routes one run of decoded key bytes.
+    ///
+    /// Pass-through bytes are coalesced: an ordinary line of typing is one
+    /// [`KeyRoute::Pane`], and a run is split only where a prefix interrupts it.
+    pub fn feed(&mut self, keys: &[u8]) -> Vec<KeyRoute> {
+        let mut routes = Vec::new();
+        // Where the current run of pass-through bytes started. Everything from
+        // here to the cursor is the pane's and is emitted verbatim.
+        let mut from = 0;
+        let mut index = 0;
+
+        while index < keys.len() {
+            let decoded = decode_key(&keys[index..]);
+            if self.pending {
+                self.pending = false;
+                match decoded {
+                    Some((key, len)) => {
+                        if let Some(action) = self.keymap.action(key) {
+                            routes.push(KeyRoute::Command(action.clone()));
+                        } else if key == self.keymap.prefix() {
+                            routes.push(KeyRoute::Pane(keys[index..index + len].to_vec()));
+                        } else {
+                            routes.push(KeyRoute::Unbound);
+                        }
+                        index += len;
+                    }
+                    // Undecodable after the prefix: the user was talking to
+                    // cloo, so the rest of the run is consumed rather than
+                    // delivered to a child as a fragment.
+                    None => {
+                        routes.push(KeyRoute::Unbound);
+                        index = keys.len();
+                    }
+                }
+                from = index;
+                continue;
+            }
+
+            match decoded {
+                Some((key, len)) if key == self.keymap.prefix() => {
+                    if from < index {
+                        routes.push(KeyRoute::Pane(keys[from..index].to_vec()));
+                    }
+                    index += len;
+                    from = index;
+                    self.pending = true;
+                    routes.push(KeyRoute::Pending);
+                }
+                Some((_, len)) => index += len,
+                // Not a chord cloo can name, so it is the pane's — along with
+                // everything after it, which cannot be scanned safely without
+                // knowing where this sequence ends.
+                None => index = keys.len(),
+            }
+        }
+
+        if from < keys.len() {
+            routes.push(KeyRoute::Pane(keys[from..].to_vec()));
+        }
+        routes
+    }
+}
+
 /// A keyboard action against the attention queue overlay.
 ///
 /// The overlay is a navigation surface: the user walks the entries, jumps to the
@@ -1530,6 +1836,244 @@ mod tests {
             route_mouse(&screen(), tracking(MouseTracking::Click), &motion),
             MouseRoute::Application(_)
         ));
+    }
+
+    // -- decoding chords ----------------------------------------------------
+
+    /// The bytes each default-bound chord arrives as, which is also the table
+    /// the pass-through property below is proved over.
+    const DEFAULT_CHORDS: [(&[u8], &str); 18] = [
+        (b"%", "%"),
+        (b"\"", "\""),
+        (b"x", "x"),
+        (b"h", "h"),
+        (b"j", "j"),
+        (b"k", "k"),
+        (b"l", "l"),
+        (b"\x1b[D", "left"),
+        (b"\x1b[B", "down"),
+        (b"\x1b[A", "up"),
+        (b"\x1b[C", "right"),
+        (b"z", "z"),
+        (b"c", "c"),
+        (b"&", "&"),
+        (b"n", "n"),
+        (b"p", "p"),
+        (b"[", "["),
+        (b"d", "d"),
+    ];
+
+    fn chord(text: &str) -> Key {
+        Key::parse(text).unwrap_or_else(|e| panic!("{text:?} should parse: {e}"))
+    }
+
+    fn router() -> KeyRouter {
+        KeyRouter::new(Keymap::defaults())
+    }
+
+    /// One fixture per encoding a terminal actually uses, checked against the
+    /// spelling `cloo-core` would parse. This is the join between the two
+    /// halves: a chord a user can write must be a chord a terminal can send.
+    #[test]
+    fn every_chord_a_terminal_sends_decodes_to_its_spelling() {
+        let cases: [(&[u8], &str); 20] = [
+            (b"a", "a"),
+            (b"G", "G"),
+            (b" ", "space"),
+            (b"\x02", "C-b"),
+            (b"\x00", "C-space"),
+            (b"\x1f", "C-_"),
+            (b"\x0a", "C-j"),
+            (b"\x08", "C-h"),
+            (b"\r", "enter"),
+            (b"\t", "tab"),
+            (b"\x7f", "backspace"),
+            (b"\x1b", "escape"),
+            (b"\x1bx", "M-x"),
+            (b"\x1b\x02", "C-M-b"),
+            (b"\x1b[Z", "S-tab"),
+            (b"\x1bOA", "up"),
+            (b"\x1b[1;5A", "C-up"),
+            (b"\x1b[3~", "delete"),
+            (b"\x1b[6~", "pagedown"),
+            (b"\x1b[24~", "f12"),
+        ];
+        for (bytes, spelling) in cases {
+            assert_eq!(
+                decode_key(bytes),
+                Some((chord(spelling), bytes.len())),
+                "{bytes:?} is {spelling}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_multi_byte_character_is_one_chord() {
+        assert_eq!(decode_key("é".as_bytes()), Some((Key::char('é'), 2)));
+    }
+
+    #[test]
+    fn a_sequence_cloo_does_not_model_is_not_a_chord() {
+        // Answering with a guess here is what would steal a reply or a key an
+        // application is using.
+        assert_eq!(decode_key(b"\x1b[?1;2c"), None);
+        assert_eq!(decode_key(b"\x1b["), None, "and neither is half of one");
+        assert_eq!(decode_key(b""), None);
+    }
+
+    // -- the prefix state machine -------------------------------------------
+
+    /// The acceptance property: outside a pending prefix nothing is consumed,
+    /// not even a chord the keymap binds. An application using `c`, `x`, or an
+    /// arrow key must never notice cloo is there.
+    #[test]
+    fn a_bound_chord_without_the_prefix_is_still_the_panes() {
+        for (bytes, spelling) in DEFAULT_CHORDS {
+            let mut router = router();
+            assert!(
+                router.keymap().action(chord(spelling)).is_some(),
+                "{spelling} is bound, so this fixture is not vacuous"
+            );
+            assert_eq!(
+                router.feed(bytes),
+                vec![KeyRoute::Pane(bytes.to_vec())],
+                "{spelling} without the prefix is the pane's"
+            );
+            assert!(!router.is_pending());
+        }
+    }
+
+    #[test]
+    fn ordinary_typing_is_passed_through_byte_for_byte() {
+        assert_eq!(
+            router().feed(b"ls -la\r"),
+            vec![KeyRoute::Pane(b"ls -la\r".to_vec())],
+            "one run, and the same bytes the terminal sent"
+        );
+    }
+
+    #[test]
+    fn the_prefix_is_held_and_the_next_chord_resolves() {
+        let mut router = router();
+        assert_eq!(router.feed(b"\x02"), vec![KeyRoute::Pending]);
+        assert!(router.is_pending(), "nothing reached the child");
+        assert_eq!(
+            router.feed(b"c"),
+            vec![KeyRoute::Command(Action::NewTab)],
+            "and the chord after it is cloo's"
+        );
+        assert!(!router.is_pending());
+    }
+
+    #[test]
+    fn a_prefix_and_its_chord_in_one_read_are_still_one_command() {
+        assert_eq!(
+            router().feed(b"\x02%"),
+            vec![KeyRoute::Pending, KeyRoute::Command(Action::SplitVertical)]
+        );
+    }
+
+    #[test]
+    fn an_escape_sequence_after_the_prefix_resolves_as_a_chord() {
+        assert_eq!(
+            router().feed(b"\x02\x1b[D"),
+            vec![KeyRoute::Pending, KeyRoute::Command(Action::FocusLeft)]
+        );
+    }
+
+    #[test]
+    fn typing_around_a_command_keeps_its_order_and_its_bytes() {
+        assert_eq!(
+            router().feed(b"ab\x02cdef"),
+            vec![
+                KeyRoute::Pane(b"ab".to_vec()),
+                KeyRoute::Pending,
+                KeyRoute::Command(Action::NewTab),
+                KeyRoute::Pane(b"def".to_vec()),
+            ],
+            "only the one chord after the prefix is taken"
+        );
+    }
+
+    #[test]
+    fn an_unbound_chord_after_the_prefix_is_consumed_rather_than_typed() {
+        // Delivering it instead is how a mistyped command ends up in a shell.
+        let mut router = router();
+        assert_eq!(
+            router.feed(b"\x02Q"),
+            vec![KeyRoute::Pending, KeyRoute::Unbound]
+        );
+        assert!(!router.is_pending());
+    }
+
+    #[test]
+    fn an_undecodable_sequence_after_the_prefix_is_consumed_whole() {
+        assert_eq!(
+            router().feed(b"\x02\x1b[?1;2c"),
+            vec![KeyRoute::Pending, KeyRoute::Unbound],
+            "a fragment of what the user meant for cloo is not the child's"
+        );
+    }
+
+    #[test]
+    fn a_sequence_cloo_cannot_name_is_the_panes_along_with_the_rest_of_the_run() {
+        let bytes: &[u8] = b"\x1b[?1;2crest";
+        assert_eq!(router().feed(bytes), vec![KeyRoute::Pane(bytes.to_vec())]);
+    }
+
+    #[test]
+    fn pressing_the_prefix_twice_sends_it_to_the_child() {
+        // tmux's `send-prefix`, and the only way to type a `C-b` into a program
+        // that wants one.
+        assert_eq!(
+            router().feed(b"\x02\x02"),
+            vec![KeyRoute::Pending, KeyRoute::Pane(b"\x02".to_vec())]
+        );
+    }
+
+    #[test]
+    fn a_rebound_prefix_gives_the_old_one_back_to_the_pane() {
+        let mut keymap = Keymap::defaults();
+        keymap.set_prefix(chord("C-a"));
+        let mut router = KeyRouter::new(keymap);
+        assert_eq!(
+            router.feed(b"\x02c"),
+            vec![KeyRoute::Pane(b"\x02c".to_vec())],
+            "C-b is an application's key again"
+        );
+        assert_eq!(
+            router.feed(b"\x01c"),
+            vec![KeyRoute::Pending, KeyRoute::Command(Action::NewTab)]
+        );
+    }
+
+    #[test]
+    fn a_configured_binding_resolves_through_the_router() {
+        let mut keymap = Keymap::defaults();
+        keymap.bind(chord("|"), Action::SplitVertical);
+        keymap.unbind(chord("x"));
+        let mut router = KeyRouter::new(keymap);
+        assert_eq!(
+            router.feed(b"\x02|"),
+            vec![KeyRoute::Pending, KeyRoute::Command(Action::SplitVertical)]
+        );
+        assert_eq!(
+            router.feed(b"\x02x"),
+            vec![KeyRoute::Pending, KeyRoute::Unbound],
+            "an unbound default is unbound, not a fallback to what it was"
+        );
+    }
+
+    #[test]
+    fn a_reset_forgets_a_pending_prefix() {
+        let mut router = router();
+        let _ = router.feed(b"\x02");
+        router.reset();
+        assert_eq!(
+            router.feed(b"c"),
+            vec![KeyRoute::Pane(b"c".to_vec())],
+            "the context that made it cloo's is gone"
+        );
     }
 
     // -- queue actions ------------------------------------------------------

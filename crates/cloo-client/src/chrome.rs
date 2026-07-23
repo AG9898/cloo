@@ -813,11 +813,13 @@ pub fn summary_span(at: Point, queue: &AttentionQueue) -> Span {
 // Status bar
 // ---------------------------------------------------------------------------
 
-/// The hard-coded prefix hint until keymap configuration lands.
+/// The hint for cloo's default prefix, [`cloo_core::keymap::DEFAULT_PREFIX`].
 ///
-/// The prefix is a chrome concern, not session state: a client may render the
-/// same attached session with a different local keymap once configuration is
-/// available. For now M2's fixed `C-b` binding makes this a constant.
+/// The prefix is a chrome concern, not session state: the keymap is the
+/// client's, so two clients attached to one session may legitimately show
+/// different hints. M4-02 makes the chord configurable; rendering a *rebound*
+/// prefix in this row is chrome work still to land, so the row states the
+/// default rather than a chord it has not been told about.
 pub const DEFAULT_PREFIX_HINT: &str = "C-b ?";
 
 /// Builds the always-on minimal status row, exactly `width` cells wide.

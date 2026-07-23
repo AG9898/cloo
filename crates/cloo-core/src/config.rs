@@ -1,4 +1,5 @@
-//! Configuration parsing: local profile definitions merged over the built-ins.
+//! Configuration parsing: local profile and key definitions merged over the
+//! built-ins.
 //!
 //! [`parse`] takes the *text* of `config.toml` and never a path. `cloo-core`
 //! performs no I/O, so finding the file, reading it, and deciding what to do
@@ -13,11 +14,15 @@
 //!   where a number belongs: [`parse`] returns [`ConfigError`] and nothing is
 //!   loaded. Unknown keys are rejected rather than ignored, so a typo surfaces
 //!   as an error instead of as a setting that silently never applied.
-//! - **Semantics are each profile's.** A well-formed profile whose ID is not in
+//! - **Semantics are each entry's.** A well-formed profile whose ID is not in
 //!   the accepted alphabet, whose command holds a control character, or whose
 //!   recommended minimum is below cloo's layout floor is dropped *on its own*,
 //!   with a [`ConfigWarning`] naming it. One bad profile must not cost the user
 //!   the other nine, and it must not silently become something it did not say.
+//!   A key binding is the same: an unspellable chord or an action cloo does not
+//!   know drops that one line, and the default it would have replaced survives —
+//!   an unusable prefix in particular leaves `C-b` in place, because a keymap
+//!   nobody can reach is a terminal the user has to kill.
 //!
 //! Either way the fallback is safe: a caller that gets a [`ConfigError`] keeps
 //! [`Config::defaults`], and a caller that gets warnings keeps everything that
@@ -56,16 +61,32 @@
 //! [[profile]]
 //! id = "codex"
 //! command = ["codex", "--model", "o3"]
+//!
+//! [keys]
+//! prefix = "C-a"                 # omit to keep cloo's `C-b`
+//!
+//! [keys.bindings]
+//! "|" = "split-vertical"         # an addition, or an override of a default
+//! "x" = "none"                   # `none` removes a binding entirely
 //! ```
+//!
+//! Chord spellings are [`crate::keymap::Key::parse`]'s and action names are
+//! [`crate::keymap::ACTION_NAMES`]. Bindings are reached *after* the prefix, so
+//! nothing in that table can shadow a key an application is using.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
 use cloo_proto::Size;
 
 use crate::error::MetadataError;
+use crate::keymap::{Key, KeyError, Keymap, parse_action};
 use crate::profile::{AdapterId, Profile, ProfileCommand, ProfileId};
+
+/// The value that removes a binding rather than naming an action.
+const UNBIND: &str = "none";
 
 // ---------------------------------------------------------------------------
 // Errors and warnings
@@ -118,6 +139,30 @@ pub enum ConfigWarning {
         /// The repeated ID.
         id: String,
     },
+    /// A prefix chord that could not be spelled. The default `C-b` is kept: a
+    /// prefix nobody can press is a session with no way out.
+    BadPrefix {
+        /// The chord as it appeared in the document.
+        key: String,
+        /// Why it could not be read.
+        reason: KeyError,
+    },
+    /// A binding whose chord could not be spelled. Whatever that chord was bound
+    /// to before — usually a default — is left in place.
+    BadBinding {
+        /// The chord as it appeared in the document.
+        key: String,
+        /// Why it could not be read.
+        reason: KeyError,
+    },
+    /// A binding naming an action cloo has no spelling for. `RenameTab` and
+    /// `CopySearch` land here on purpose: they need text a chord cannot carry.
+    UnknownAction {
+        /// The chord the line bound.
+        key: String,
+        /// The action name as written.
+        action: String,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -130,6 +175,18 @@ impl fmt::Display for ConfigWarning {
                 f,
                 "profile {id:?} is defined more than once; the first definition was kept"
             ),
+            Self::BadPrefix { key, reason } => write!(
+                f,
+                "key prefix {key:?} was ignored: {reason}; the default {} was kept",
+                crate::keymap::DEFAULT_PREFIX
+            ),
+            Self::BadBinding { key, reason } => {
+                write!(f, "binding {key:?} was ignored: {reason}")
+            }
+            Self::UnknownAction { key, action } => write!(
+                f,
+                "binding {key:?} was ignored: no action is called {action:?}"
+            ),
         }
     }
 }
@@ -140,22 +197,30 @@ impl fmt::Display for ConfigWarning {
 
 /// A validated configuration.
 ///
-/// Today it holds profiles and nothing else. Keymap, theme, and the rest of the
-/// surface land with the full loader and `SIGHUP` reload in M4; this type is the
-/// thing they will be added to, which is why the field is private and reached
-/// through accessors.
+/// Today it holds profiles and the keymap. Theme selection and the rest of the
+/// surface land alongside them; the fields are private and reached through
+/// accessors so adding one is not a breaking change for every caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     profiles: Vec<Profile>,
+    keys: Keymap,
 }
 
 impl Config {
-    /// The configuration cloo uses with no config file: the three built-ins.
+    /// The configuration cloo uses with no config file: the three built-in
+    /// profiles and the `C-b` keymap.
     #[must_use]
     pub fn defaults() -> Self {
         Self {
             profiles: Profile::built_ins(),
+            keys: Keymap::defaults(),
         }
+    }
+
+    /// The prefix chord and the table reached after it.
+    #[must_use]
+    pub const fn keys(&self) -> &Keymap {
+        &self.keys
     }
 
     /// Every profile, in launcher order — built-ins first, in their built-in
@@ -211,6 +276,21 @@ pub struct Loaded {
 struct RawConfig {
     #[serde(default)]
     profile: Vec<RawProfile>,
+    #[serde(default)]
+    keys: Option<RawKeys>,
+}
+
+/// The `[keys]` table. TOML itself refuses a repeated key inside `bindings`, so
+/// a chord written twice is a document error rather than a silent last-wins.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKeys {
+    #[serde(default)]
+    prefix: Option<String>,
+    /// Ordered by chord spelling rather than by document order, so the warnings
+    /// a broken table produces do not depend on TOML's map iteration.
+    #[serde(default)]
+    bindings: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -306,7 +386,56 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
         }
     }
 
+    if let Some(keys) = raw.keys {
+        apply_keys(keys, &mut config.keys, &mut warnings);
+    }
+
     Ok(Loaded { config, warnings })
+}
+
+/// Merges a `[keys]` table over the defaults.
+///
+/// Every line is answered on its own: a chord that cannot be spelled, or an
+/// action cloo has no name for, drops that line and leaves whatever it would
+/// have replaced in place. That is what "invalid configuration falls back to the
+/// defaults" has to mean for a keymap — the alternative is a document with one
+/// typo in it leaving the user unable to split a pane.
+fn apply_keys(raw: RawKeys, keys: &mut Keymap, warnings: &mut Vec<ConfigWarning>) {
+    if let Some(written) = raw.prefix {
+        match Key::parse(&written) {
+            Ok(key) => keys.set_prefix(key),
+            Err(reason) => warnings.push(ConfigWarning::BadPrefix {
+                key: written,
+                reason,
+            }),
+        }
+    }
+
+    for (written, action) in raw.bindings {
+        let key = match Key::parse(&written) {
+            Ok(key) => key,
+            Err(reason) => {
+                warnings.push(ConfigWarning::BadBinding {
+                    key: written,
+                    reason,
+                });
+                continue;
+            }
+        };
+        if action == UNBIND {
+            keys.unbind(key);
+            continue;
+        }
+        match parse_action(&action) {
+            Some(action) => {
+                keys.bind(key, action);
+            }
+            None => warnings.push(ConfigWarning::UnknownAction {
+                key: written,
+                action,
+            }),
+        }
+    }
 }
 
 /// Parses configuration text, falling back to [`Config::defaults`] when the
@@ -329,6 +458,8 @@ pub fn parse_or_defaults(text: &str) -> (Config, Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use cloo_proto::Action;
 
     use crate::layout::MIN_PANE_SIZE;
     use crate::profile::HARNESS_MIN_SIZE;
@@ -664,6 +795,180 @@ mod tests {
     #[test]
     fn a_missing_id_is_an_error_because_nothing_can_name_the_entry() {
         assert!(parse("[[profile]]\ncommand = [\"hx\"]\n").is_err());
+    }
+
+    // -- Keys ---------------------------------------------------------------
+
+    fn key(text: &str) -> Key {
+        Key::parse(text).unwrap_or_else(|e| panic!("{text:?} should parse: {e}"))
+    }
+
+    #[test]
+    fn a_document_with_no_keys_table_is_the_c_b_defaults() {
+        let loaded = parse("").expect("valid");
+        assert_eq!(loaded.config.keys(), &Keymap::defaults());
+        assert_eq!(loaded.config.keys().prefix(), key("C-b"));
+    }
+
+    #[test]
+    fn a_rebound_prefix_keeps_every_default_binding() {
+        let loaded = parse(
+            r#"
+            [keys]
+            prefix = "C-a"
+            "#,
+        )
+        .expect("valid");
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(loaded.config.keys().prefix(), key("C-a"));
+        assert_eq!(
+            loaded.config.keys().bindings(),
+            Keymap::defaults().bindings(),
+            "rebinding the prefix is not a reason to forget the table"
+        );
+    }
+
+    #[test]
+    fn a_binding_overrides_a_default_and_leaves_the_others_alone() {
+        let loaded = parse(
+            r#"
+            [keys.bindings]
+            "|" = "split-vertical"
+            "x" = "toggle-zoom"
+            "#,
+        )
+        .expect("valid");
+        assert!(loaded.warnings.is_empty());
+        let keys = loaded.config.keys();
+        assert_eq!(keys.action(key("|")), Some(&Action::SplitVertical));
+        assert_eq!(keys.action(key("x")), Some(&Action::ToggleZoom));
+        // The overridden key's old action is still reachable where it was also
+        // bound, and every untouched default is untouched.
+        assert_eq!(keys.action(key("%")), Some(&Action::SplitVertical));
+        assert_eq!(keys.action(key("c")), Some(&Action::NewTab));
+        assert_eq!(keys.action(key("d")), Some(&Action::DetachClient));
+    }
+
+    #[test]
+    fn none_removes_a_default_binding() {
+        let loaded = parse(
+            r#"
+            [keys.bindings]
+            "x" = "none"
+            "#,
+        )
+        .expect("valid");
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(loaded.config.keys().action(key("x")), None);
+        assert_eq!(
+            loaded.config.keys().action(key("z")),
+            Some(&Action::ToggleZoom)
+        );
+    }
+
+    #[test]
+    fn a_chord_written_twice_is_a_document_error() {
+        // TOML refuses the repeated key itself, which is what makes "last one
+        // wins" impossible to reach by accident.
+        assert!(
+            parse("[keys.bindings]\n\"x\" = \"close-pane\"\n\"x\" = \"toggle-zoom\"\n").is_err()
+        );
+    }
+
+    #[test]
+    fn an_unspellable_prefix_keeps_c_b() {
+        let loaded = parse(
+            r#"
+            [keys]
+            prefix = "C-"
+            "#,
+        )
+        .expect("well-formed");
+        assert_eq!(
+            loaded.warnings,
+            [ConfigWarning::BadPrefix {
+                key: "C-".to_owned(),
+                reason: KeyError::MissingKey,
+            }]
+        );
+        assert_eq!(
+            loaded.config.keys().prefix(),
+            key("C-b"),
+            "a prefix nobody can press is a session with no way out"
+        );
+    }
+
+    #[test]
+    fn an_invalid_binding_is_dropped_alone_and_the_default_survives() {
+        let loaded = parse(
+            r#"
+            [keys.bindings]
+            "S-a" = "close-pane"
+            "nope" = "new-tab"
+            "v" = "split-vertical"
+            "#,
+        )
+        .expect("well-formed");
+        assert_eq!(
+            loaded.warnings,
+            [
+                ConfigWarning::BadBinding {
+                    key: "S-a".to_owned(),
+                    reason: KeyError::ShiftedChar('a'),
+                },
+                ConfigWarning::BadBinding {
+                    key: "nope".to_owned(),
+                    reason: KeyError::UnknownKey("nope".to_owned()),
+                },
+            ],
+            "warnings are ordered by chord so they do not depend on map order"
+        );
+        assert_eq!(
+            loaded.config.keys().action(key("v")),
+            Some(&Action::SplitVertical),
+            "one bad line must not cost the good ones"
+        );
+        assert_eq!(
+            loaded.config.keys().action(key("x")),
+            Some(&Action::ClosePane)
+        );
+    }
+
+    #[test]
+    fn a_binding_naming_an_action_that_needs_typed_text_is_refused() {
+        // `rename-tab` has no spelling because a chord carries no name to rename
+        // the tab to; it is reached from a surface that can ask.
+        let loaded = parse(
+            r#"
+            [keys.bindings]
+            "r" = "rename-tab"
+            "#,
+        )
+        .expect("well-formed");
+        assert_eq!(
+            loaded.warnings,
+            [ConfigWarning::UnknownAction {
+                key: "r".to_owned(),
+                action: "rename-tab".to_owned(),
+            }]
+        );
+        assert_eq!(loaded.config.keys().action(key("r")), None);
+    }
+
+    #[test]
+    fn an_unknown_keys_field_is_a_document_error() {
+        assert!(parse("[keys]\nprefx = \"C-a\"\n").is_err());
+        assert!(parse("[keys]\nprefix = 7\n").is_err());
+    }
+
+    #[test]
+    fn a_key_warning_names_the_chord_and_the_default_it_kept() {
+        let message = ConfigWarning::BadPrefix {
+            key: "C-".to_owned(),
+            reason: KeyError::MissingKey,
+        }
+        .to_string();
+        assert!(message.contains("C-b"), "{message}");
     }
 
     #[test]
