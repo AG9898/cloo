@@ -3,9 +3,10 @@
 This is the single source of truth for all environment variable configuration.
 If any other doc mentions a variable, it should link here rather than restate it.
 
-> **cloo has no secrets.** It is a local single-user tool with no accounts, no network tier,
-> and no credentials. There is no `.env` file, and none of the variables below are sensitive.
-> If that ever changes, secret values come from the environment only and never from source.
+> **The cloo runtime has no secrets.** It is a local single-user tool with no accounts, no
+> network tier, and no credentials. A repository-root `.env` may exist solely for the
+> maintainer's npm release credential; cloo never reads it and it must never be committed or
+> logged.
 
 ---
 
@@ -34,9 +35,19 @@ warns and does the same, and a failed `SIGHUP` reload retains the preceding vali
 
 ---
 
+## Maintainer Release Credential
+
+The repository-root `.env` is not application configuration. It may contain only
+`NPM_TOKEN` for an explicitly user-authorized release of the public `clooterminal` package.
+It is ignored by Git and is read only to configure that one `npm publish` invocation; never
+print, log, commit, or persist the token value. Packaging and publishing remain deferred to
+workboard task M7-04.
+
+---
+
 ## Local Development Setup
 
-No setup required. There is no `.env` file and nothing to copy.
+No runtime setup is required. The release-only `.env` is not needed to build or run cloo.
 
 ```bash
 cargo build --workspace

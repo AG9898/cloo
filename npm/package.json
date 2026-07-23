@@ -33,5 +33,9 @@
   "os": [
     "darwin",
     "linux"
-  ]
+  ],
+  "private": false,
+  "publishConfig": {
+    "access": "public"
+  }
 }

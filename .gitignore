@@ -3,5 +3,8 @@
 .DS_Store
 *:Zone.Identifier
 
+# Maintainer-only npm release credential. Never commit this file.
+.env
+
 # Cargo.lock is intentionally committed — cloo ships a binary, so builds
 # should be reproducible.

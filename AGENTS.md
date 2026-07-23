@@ -270,9 +270,11 @@ Stop and report (do not continue) when:
 
 ## Environment Variables
 
-cloo reads standard environment variables and owns no secrets. The ones that matter for running
-it locally: `XDG_RUNTIME_DIR` (socket location), `TERM` (capability detection), and
-`CLOO_SOCKET` / `CLOO_CONFIG` for isolating a dev instance from a live one.
+cloo reads standard environment variables and owns no runtime secrets. The ones that matter for
+running it locally: `XDG_RUNTIME_DIR` (socket location), `TERM` (capability detection), and
+`CLOO_SOCKET` / `CLOO_CONFIG` for isolating a dev instance from a live one. The ignored
+repository-root `.env` is a maintainer-only `NPM_TOKEN` for an explicitly authorized npm release;
+cloo never reads it.
 
 See [`docs/ENV_VARS.md`](docs/ENV_VARS.md) for the canonical matrix.
 
@@ -928,3 +930,8 @@ separate batches, because the damage tracker sends copy state only when it chang
 sent the whole list at once sees one frame, already at the final cursor, and any assertion against
 "where entering put it" passes vacuously. Split the batch when a fixture needs to measure a delta
 through a coalescing channel.
+
+### 2026-07-23 — npm publishing credentials are repository-local, not runtime configuration
+The repository-root `.env` holds only the maintainer's `NPM_TOKEN` for an explicitly
+user-authorized `clooterminal` release. It is gitignored and must never be printed, logged,
+committed, or used for any command other than that one publish; cloo itself never reads it.
