@@ -338,6 +338,17 @@ resize does, so a split shrinks its neighbour's child and a close regrows the su
 Focus follows a split. Closing the focused pane moves focus to the first surviving pane in
 traversal order — directional movement needs a pane to start from, and the closed one is gone.
 
+As of M6-04 these reach the session from an attached client: the daemon routes
+`Action::SplitVertical`/`SplitHorizontal` to `split_even` (a vertical divider stands two panes side
+by side, `Direction::Horizontal`; a horizontal one stacks them), `Action::ToggleZoom` to
+`toggle_zoom`, and `Action::ClosePane` to `close_focused`. `ClosePane` names no pane, so it maps to
+`Command::CloseFocused`, which resolves the target from the session's own focus rather than trusting
+a client to have tracked it — the keyboard's half of close, mirroring how `Action::FocusPane` is the
+mouse's half. A refused split (too small) or a refused close (the last pane) is an ordinary answer
+the user sees, not a daemon error, so the daemon swallows it exactly as it does a rejected tab
+operation. None of this is a wire change — those `Action` variants already crossed the wire — so the
+handshake is unchanged.
+
 ##### Directional focus and zoom
 
 As of M2-02, `Command::MoveFocus` and `Command::ToggleZoom` sit on top of that without disturbing

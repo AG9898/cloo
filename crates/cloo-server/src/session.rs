@@ -154,6 +154,16 @@ pub enum Command {
         /// Whether the pane was closed, or why it was not.
         reply: oneshot::Sender<Result<(), PaneError>>,
     },
+    /// Closes the focused pane, whichever one that currently is.
+    ///
+    /// The keyboard's half of close: a bound `close-pane` names no pane, so the
+    /// session resolves the target from its own focus rather than trusting a
+    /// client to have tracked it. A click that closes a named pane still uses
+    /// [`Close`](Self::Close).
+    CloseFocused {
+        /// Whether the focused pane was closed, or why it was not.
+        reply: oneshot::Sender<Result<(), PaneError>>,
+    },
     /// Moves focus to the pane on one side of the focused one.
     ///
     /// No reply: there is nothing to refuse. An edge pane asked to move past
@@ -605,6 +615,21 @@ impl SessionHandle {
     pub async fn close(&self, pane: PaneId) -> Result<(), PaneError> {
         let (reply, answer) = oneshot::channel();
         self.send(Command::Close { pane, reply }).await?;
+        answer.await.map_err(|_| PaneError::Gone)?
+    }
+
+    /// Closes whichever pane is currently focused.
+    ///
+    /// The keyboard's half of [`close`](Self::close): a bound `close-pane` names
+    /// no pane, so the session resolves the target from its own focus rather
+    /// than a client tracking it.
+    ///
+    /// # Errors
+    ///
+    /// As [`close`](Self::close).
+    pub async fn close_focused(&self) -> Result<(), PaneError> {
+        let (reply, answer) = oneshot::channel();
+        self.send(Command::CloseFocused { reply }).await?;
         answer.await.map_err(|_| PaneError::Gone)?
     }
 
@@ -1132,6 +1157,12 @@ impl Session {
             }
             Command::Close { pane, reply } => {
                 let outcome = self.close(pane);
+                let changed = outcome.is_ok();
+                let _ = reply.send(outcome);
+                self.settle(changed)
+            }
+            Command::CloseFocused { reply } => {
+                let outcome = self.close(self.focused());
                 let changed = outcome.is_ok();
                 let _ = reply.send(outcome);
                 self.settle(changed)

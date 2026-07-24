@@ -17,7 +17,8 @@ use cloo_core::AdapterId;
 use cloo_core::layout::Side;
 use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, ClientId, ClientMessage,
-    ClipboardTarget, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size, StreamError,
+    ClipboardTarget, Direction, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size,
+    StreamError,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -437,6 +438,26 @@ impl Daemon {
                 // ratio inside the layout tree; ratios never cross the wire.
                 ClientMessage::Command(Action::ResizePane { pane, dir, delta }) => {
                     self.session()?.resize_pane(pane, dir, delta).await?;
+                }
+                // Layout commands from the keyboard. A vertical divider stacks
+                // the panes side by side (`Direction::Horizontal`), a horizontal
+                // one above the other. A refused split — most often too small —
+                // is an ordinary answer the user sees, not a daemon error, so it
+                // is swallowed here exactly as a rejected tab operation is.
+                ClientMessage::Command(Action::SplitVertical) => {
+                    let _ = self.session()?.split_even(Direction::Horizontal).await;
+                }
+                ClientMessage::Command(Action::SplitHorizontal) => {
+                    let _ = self.session()?.split_even(Direction::Vertical).await;
+                }
+                // Close names no pane: the session resolves it from its own
+                // focus, which is the keyboard's half of close. A last pane
+                // refusing to close is an ordinary answer, like a last tab.
+                ClientMessage::Command(Action::ClosePane) => {
+                    let _ = self.session()?.close_focused().await;
+                }
+                ClientMessage::Command(Action::ToggleZoom) => {
+                    self.session()?.toggle_zoom().await?;
                 }
                 ClientMessage::Command(Action::NewTab) => {
                     let _ = self.session()?.new_tab().await;

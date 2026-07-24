@@ -1217,6 +1217,106 @@ async fn a_wheel_over_a_pane_walks_scrollback_through_the_copy_mode_commands() {
         .expect("the daemon must not fail");
 }
 
+/// Reads frames until a layout snapshot matching `want` arrives.
+///
+/// The tracker sends a [`ServerMessage::Layout`] only when the geometry
+/// changed, so a predicate — not a fixed frame count — is what pins a test to
+/// the layout it means.
+async fn await_layout(
+    attached: &mut Attached<UnixStream>,
+    want: impl Fn(&cloo_proto::LayoutSnapshot) -> bool,
+) -> cloo_proto::LayoutSnapshot {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Layout(layout)) if want(&layout) => return layout,
+                Some(_) => {}
+                None => panic!("the server closed before the layout matched"),
+            }
+        }
+    })
+    .await
+    .expect("the layout must reach the expected shape")
+}
+
+#[tokio::test]
+async fn split_zoom_and_close_from_a_client_move_the_reported_layout() {
+    // These four commands used to fall into the daemon's catch-all and be
+    // dropped. Each of split, zoom, and close is sent over the wire and proved
+    // to change the layout the session actor reports — the geometry a client
+    // draws from, on its own wire clock.
+    let dir = TempDir::new("layout-commands");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, "read _; exit 0");
+
+    let mut attached = client(&socket).await;
+    let first = PaneId::new(1);
+
+    // One pane at the full area, nothing zoomed.
+    let start = await_layout(&mut attached, |l| l.panes.len() == 1).await;
+    assert_eq!(start.zoomed, None);
+    assert_eq!(start.focused, Some(first));
+
+    // A vertical divider stands two panes side by side. Focus follows the split,
+    // which is what makes splitting and then typing do what a user means.
+    attached
+        .send_command(Action::SplitVertical)
+        .await
+        .expect("a split must reach the daemon");
+    let split = await_layout(&mut attached, |l| l.panes.len() == 2).await;
+    let second = split.focused.expect("a split focuses its new pane");
+    assert_ne!(second, first, "the new pane is focused, not the old one");
+
+    // Zoom shows the focused pane alone at the full area; the tree behind it is
+    // unchanged, so this is a view flag rather than a reshaping.
+    attached
+        .send_command(Action::ToggleZoom)
+        .await
+        .expect("zoom must reach the daemon");
+    let zoomed = await_layout(&mut attached, |l| l.zoomed.is_some()).await;
+    assert_eq!(zoomed.zoomed, Some(second));
+    assert_eq!(
+        zoomed.panes.len(),
+        1,
+        "a zoomed layout resolves to one pane"
+    );
+    assert_eq!(zoomed.panes[0].pane, second);
+
+    // Unzoom brings the second pane back into the geometry.
+    attached
+        .send_command(Action::ToggleZoom)
+        .await
+        .expect("unzoom must reach the daemon");
+    let unzoomed = await_layout(&mut attached, |l| l.zoomed.is_none() && l.panes.len() == 2).await;
+    assert_eq!(unzoomed.zoomed, None);
+
+    // Close names no pane: the session resolves it from its own focus, so the
+    // new pane goes and focus falls back to the survivor.
+    attached
+        .send_command(Action::ClosePane)
+        .await
+        .expect("close must reach the daemon");
+    let closed = await_layout(&mut attached, |l| l.panes.len() == 1).await;
+    assert_eq!(
+        closed.focused,
+        Some(first),
+        "focus falls back to the survivor"
+    );
+    assert_eq!(closed.panes[0].pane, first);
+
+    // Let the surviving child exit so the daemon can finish.
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    drop(attached);
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
 #[tokio::test]
 async fn an_opt_in_adapter_reports_advisory_state_that_reaches_a_client_attributed() {
     // The whole loop for the one advisory source: a separate local process

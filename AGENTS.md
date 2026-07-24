@@ -970,3 +970,12 @@ above a grid (`area.y - 1`), which is why the header row *is* the top border rat
 one. Pane bodies go through `chrome::body_span` so dimming stays the one-place `dim_cells` policy —
 a body and its header recede by the same rule — and the composition returns a pure `Vec<Span>`, never
 touching a descriptor.
+
+### 2026-07-24 — A vertical divider is a horizontal split, and ClosePane names no pane
+Routing the four layout actions off the daemon's catch-all (M6-04) has two traps. The axis flips
+names: `Action::SplitVertical` is a *vertical divider* — two panes side by side — which is
+`Direction::Horizontal` in `split_even`, and `SplitHorizontal` stacks them (`Direction::Vertical`).
+And `Action::ClosePane` carries no pane id — a bound `close-pane` names none — so it cannot reach
+`SessionHandle::close(pane)`; it needs `Command::CloseFocused`, which resolves the target from the
+session's own focus, the keyboard's mirror of `Action::FocusPane` being the mouse's. None of this
+touched the wire (the `Action` variants already existed), so the handshake did not bump.
