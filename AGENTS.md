@@ -403,6 +403,11 @@ from every state including an empty one, navigation clamping at both ends, a con
 naming a profile the caller supplied with an unvalidatable profile never becoming a row, pane
 details listing only what the server reported, and the shared width ladder asserted exactly at
 every width and height — with the matching key bindings in `cloo-client/src/input.rs`.
+M6-05 adds frame composition in `cloo-client/src/renderer.rs`: `compose_frame` lays a two-pane
+snapshot's grids into their `PaneArea`s with the tab row on row zero, a header directly above each
+grid, and the status row on the last row — a focused body dropping in undimmed and byte-equal to the
+cache at its rect origin, an unfocused body receding through the shared `chrome::body_span` dimming,
+a headerless area drawing no header, and a zero-sized frame composing nothing.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -955,3 +960,13 @@ single runtime thread wedged and no other future (including the test's own drain
 handle alive for the whole test, and let a child that must be drained exit on its own rather than
 block on `read`. Other tests only survive this because they *finish* and let runtime-drop abort the
 detached actor; a test that awaits after the handle drops does not get that reprieve.
+
+### 2026-07-24 — Compose the frame from the hit-tester's own rects, not a parallel geometry
+`compose_frame` (in `cloo-client::renderer`) builds the whole attached picture from `PaneArea` — the
+*same* rect type `input::ScreenLayout` answers a mouse report against — so the frame a user sees and
+the map a click resolves through cannot drift. The tab row is a fixed row zero and the status bar a
+fixed last row; only pane `y`s come from the layout pass, and a header is always the row directly
+above a grid (`area.y - 1`), which is why the header row *is* the top border rather than a separate
+one. Pane bodies go through `chrome::body_span` so dimming stays the one-place `dim_cells` policy —
+a body and its header recede by the same rule — and the composition returns a pure `Vec<Span>`, never
+touching a descriptor.

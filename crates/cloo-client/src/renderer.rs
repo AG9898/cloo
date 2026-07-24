@@ -25,8 +25,15 @@
 
 use std::fmt;
 
-use cloo_proto::{Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, Size, TermCaps};
+use cloo_proto::{
+    Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, SessionId, Size, TabSummary, TermCaps,
+};
 
+use crate::chrome::{
+    AttentionQueue, ChromeOptions, PaneChrome, body_span, header_span, status_bar_span,
+    tab_row_span,
+};
+use crate::input::PaneArea;
 use crate::motion::{MotionKind, Phase, phase_cell};
 
 /// Everything the renderer can refuse to do.
@@ -199,6 +206,99 @@ impl Span {
     pub const fn new(at: Point, cells: Vec<Cell>) -> Self {
         Self { at, cells }
     }
+}
+
+/// One pane's place in a composed frame.
+///
+/// Pairs the geometry the client resolved — a [`PaneArea`], the very rect the
+/// hit-tester answers a mouse report against — with the two things only the
+/// client holds: its cached [`Grid`] and the [`PaneChrome`] its header reads
+/// from. Composing a frame from these is what keeps the picture a user points at
+/// and the picture the client drew one and the same.
+#[derive(Debug, Clone)]
+pub struct FramePane<'a> {
+    /// Where the pane's grid sits, and whether a header was drawn above it.
+    pub area: PaneArea,
+    /// The client's cache of the pane's visible cells.
+    pub grid: &'a Grid,
+    /// What the pane's header row says, and whether the pane is focused.
+    pub header: PaneChrome,
+}
+
+impl<'a> FramePane<'a> {
+    /// Pairs a resolved area with its grid cache and header description.
+    #[must_use]
+    pub fn new(area: PaneArea, grid: &'a Grid, header: PaneChrome) -> Self {
+        Self { area, grid, header }
+    }
+}
+
+/// Composes the whole attached frame into positioned [`Span`]s.
+///
+/// One projection of one already-resolved layout: the tab bar owns row zero, the
+/// status bar owns the last row, and every visible pane's grid drops into its
+/// own [`PaneArea`] with a header on the row above it. Nothing here guesses an
+/// offset — the tab and status rows are the frame's fixed edges, and each pane
+/// carries the rect the same layout pass gave the hit-tester, so the drawn frame
+/// and the mouse map cannot disagree. Chrome (headers, the tab row, the status
+/// row and the attention summary it carries) and pane bodies alike come back as
+/// spans [`Renderer::render_spans`] draws, which keeps this a pure function into
+/// cells and leaves the renderer the only place bytes are produced.
+///
+/// The spans are ordered top to bottom — the tab row, then each pane's header
+/// and body, then the status row — but they never overlap, so the order is for a
+/// reader's sake rather than for correctness. A zero-width or zero-height frame,
+/// which a violent resize can produce, composes nothing rather than panicking.
+#[must_use]
+pub fn compose_frame(
+    size: Size,
+    tabs: &[TabSummary],
+    session: SessionId,
+    panes: &[FramePane<'_>],
+    queue: &AttentionQueue,
+    options: ChromeOptions,
+) -> Vec<Span> {
+    let mut spans = Vec::new();
+    if size.cols == 0 || size.rows == 0 {
+        return spans;
+    }
+
+    if !tabs.is_empty() {
+        spans.push(tab_row_span(Point::new(0, 0), tabs, size.cols));
+    }
+
+    for pane in panes {
+        let area = pane.area;
+        if area.header && area.y > 0 {
+            spans.push(header_span(
+                Point::new(area.x, area.y - 1),
+                &pane.header,
+                area.size.cols,
+                options,
+            ));
+        }
+        for row in 0..pane.grid.size().rows {
+            let Some(cells) = pane.grid.row(row) else {
+                continue;
+            };
+            spans.push(body_span(
+                Point::new(area.x, area.y.saturating_add(row)),
+                cells,
+                pane.header.focused,
+                options,
+            ));
+        }
+    }
+
+    spans.push(status_bar_span(
+        Point::new(0, size.rows - 1),
+        session,
+        tabs,
+        queue,
+        size.cols,
+    ));
+
+    spans
 }
 
 /// The rendition currently active on the outer terminal.
@@ -1053,5 +1153,218 @@ mod tests {
         let mut renderer = Renderer::new(TermCaps::default());
         let frame = renderer.render_full(&grid, None).to_vec();
         assert_eq!(renderer.output(), frame.as_slice());
+    }
+
+    // -- Frame composition ------------------------------------------------
+
+    use cloo_proto::{PaneId, SessionId, TabId};
+
+    use crate::chrome::Attention;
+
+    /// A grid every cell of which is `ch`.
+    fn filled_grid(size: Size, ch: char) -> Grid {
+        let mut grid = Grid::new(size);
+        for row in 0..size.rows {
+            grid.apply(&RowUpdate {
+                row,
+                cells: (0..size.cols)
+                    .map(|_| Cell {
+                        ch,
+                        ..Cell::default()
+                    })
+                    .collect(),
+            })
+            .expect("a full-width row fits");
+        }
+        grid
+    }
+
+    fn text_of(cells: &[Cell]) -> String {
+        cells.iter().map(|c| c.ch).collect()
+    }
+
+    fn one_tab() -> Vec<TabSummary> {
+        vec![TabSummary {
+            tab: TabId::new(1),
+            title: "work".into(),
+            active: true,
+        }]
+    }
+
+    #[test]
+    fn compose_lays_every_pane_grid_into_its_rect_with_chrome_around_it() {
+        let size = Size::new(20, 6);
+        let tabs = one_tab();
+        let left_grid = filled_grid(Size::new(9, 3), 'a');
+        let right_grid = filled_grid(Size::new(9, 3), 'b');
+        let panes = [
+            FramePane::new(
+                PaneArea::new(PaneId::new(1), 0, 2, Size::new(9, 3)),
+                &left_grid,
+                PaneChrome::new(1, "one").focused(true),
+            ),
+            FramePane::new(
+                PaneArea::new(PaneId::new(2), 11, 2, Size::new(9, 3)),
+                &right_grid,
+                PaneChrome::new(2, "two").attention(Attention::NeedsInput),
+            ),
+        ];
+        let queue = crate::chrome::AttentionQueue::new();
+
+        let spans = compose_frame(
+            size,
+            &tabs,
+            SessionId::new(1),
+            &panes,
+            &queue,
+            ChromeOptions::default(),
+        );
+
+        // Tab row, then pane one (header + three body rows), then pane two, then
+        // the status row: never guessed offsets, one span per drawn thing.
+        assert_eq!(spans.len(), 1 + (1 + 3) + (1 + 3) + 1);
+
+        // The tab row owns row zero, full width.
+        assert_eq!(spans[0].at, Point::new(0, 0));
+        assert_eq!(spans[0].cells.len(), 20);
+
+        // Pane one's header sits on the row directly above its grid.
+        assert_eq!(spans[1].at, Point::new(0, 1));
+        assert_eq!(text_of(&spans[1].cells), "> 1 one ?");
+
+        // Its focused body drops in undimmed, byte-for-byte the cached grid, at
+        // exactly the pane's rect origin — row by row.
+        for (offset, span) in spans[2..5].iter().enumerate() {
+            let row = u16::try_from(offset).expect("small");
+            assert_eq!(span.at, Point::new(0, 2 + row));
+            assert_eq!(span.cells, left_grid.row(row).expect("row exists"));
+        }
+
+        // Pane two starts at its own left edge, header above grid.
+        assert_eq!(spans[5].at, Point::new(11, 1));
+        assert!(text_of(&spans[5].cells).contains("two"));
+        assert!(text_of(&spans[5].cells).contains('!'));
+        assert_eq!(spans[6].at, Point::new(11, 2));
+
+        // The status row owns the last row, full width, and carries the session
+        // (in its width-20 short form) and the prefix hint.
+        let status = spans.last().expect("a status span");
+        assert_eq!(status.at, Point::new(0, 5));
+        assert_eq!(status.cells.len(), 20);
+        let status_text = text_of(&status.cells);
+        assert!(
+            status_text.contains("s1"),
+            "session marker: {status_text:?}"
+        );
+        assert!(status_text.contains("C-b"), "prefix hint: {status_text:?}");
+    }
+
+    #[test]
+    fn an_unfocused_pane_body_is_dimmed_and_a_focused_one_is_not() {
+        let grid = filled_grid(Size::new(4, 1), 'x');
+        let make = |focused: bool| {
+            let panes = [FramePane::new(
+                PaneArea::new(PaneId::new(1), 0, 1, Size::new(4, 1)),
+                &grid,
+                PaneChrome::new(1, "p").focused(focused),
+            )];
+            compose_frame(
+                Size::new(4, 3),
+                &[],
+                SessionId::new(1),
+                &panes,
+                &crate::chrome::AttentionQueue::new(),
+                ChromeOptions::default(),
+            )
+        };
+        // With no tabs the frame is header + body + status; the body is index 1.
+        let focused = make(true);
+        let unfocused = make(false);
+        assert_eq!(
+            focused[1].cells,
+            grid.row(0).expect("row exists"),
+            "a focused body is the grid untouched"
+        );
+        assert_ne!(
+            unfocused[1].cells,
+            grid.row(0).expect("row exists"),
+            "an unfocused body recedes"
+        );
+        assert_eq!(
+            text_of(&unfocused[1].cells),
+            "xxxx",
+            "dimming changes colour, never the text"
+        );
+    }
+
+    #[test]
+    fn a_headerless_pane_composes_no_header_row() {
+        let grid = filled_grid(Size::new(4, 2), 'q');
+        let panes = [FramePane::new(
+            PaneArea::new(PaneId::new(1), 0, 0, Size::new(4, 2)).headerless(),
+            &grid,
+            PaneChrome::new(1, "p"),
+        )];
+        let spans = compose_frame(
+            Size::new(4, 3),
+            &[],
+            SessionId::new(1),
+            &panes,
+            &crate::chrome::AttentionQueue::new(),
+            ChromeOptions::default(),
+        );
+        // Two body rows and the status row; no header was drawn.
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].at, Point::new(0, 0));
+        assert_eq!(spans[1].at, Point::new(0, 1));
+    }
+
+    #[test]
+    fn a_composed_frame_renders_the_grid_at_its_rect_origin() {
+        let size = Size::new(6, 3);
+        let grid = filled_grid(Size::new(3, 1), 'z');
+        let panes = [FramePane::new(
+            PaneArea::new(PaneId::new(1), 2, 1, Size::new(3, 1)),
+            &grid,
+            PaneChrome::new(1, "p").focused(true),
+        )];
+        let spans = compose_frame(
+            size,
+            &[],
+            SessionId::new(1),
+            &panes,
+            &crate::chrome::AttentionQueue::new(),
+            ChromeOptions::default(),
+        );
+        let mut renderer = Renderer::new(TermCaps::default());
+        let frame = String::from_utf8(renderer.render_spans(&spans, None).to_vec())
+            .expect("output is valid utf-8");
+        // The grid's row lands at column 2, row 1 (CUP is one-based): row 2,
+        // column 3.
+        assert!(
+            frame.contains("\x1b[2;3H\x1b[0mzzz"),
+            "the grid did not land at its rect origin: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn a_zero_sized_frame_composes_nothing() {
+        let grid = Grid::new(Size::new(0, 0));
+        let panes = [FramePane::new(
+            PaneArea::new(PaneId::new(1), 0, 0, Size::new(0, 0)),
+            &grid,
+            PaneChrome::new(1, "p"),
+        )];
+        assert!(
+            compose_frame(
+                Size::new(0, 0),
+                &one_tab(),
+                SessionId::new(1),
+                &panes,
+                &crate::chrome::AttentionQueue::new(),
+                ChromeOptions::default(),
+            )
+            .is_empty()
+        );
     }
 }

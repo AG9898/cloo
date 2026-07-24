@@ -461,6 +461,18 @@ own origin, because a header or a status row belongs to the client alone and can
 while pane *contents* always come from a validated `Grid` at column zero. Keeping chrome on its own
 path is what stops client-composed cells from ever being mistaken for server-owned ones.
 
+`compose_frame` (M6-05) assembles the whole attached picture into those spans from one already-
+resolved layout. The tab row owns row zero and the status bar owns the last row — fixed edges, not
+guessed offsets — and every visible pane's grid drops into its own `PaneArea` with a header on the
+row above it. `PaneArea` is the *same* rect the mouse hit-tester answers against, so the frame a
+user sees and the map a click is resolved through cannot drift apart. Each pane arrives as a
+`FramePane`: the resolved area plus the two things only the client holds, its cached `Grid` and the
+`PaneChrome` its header reads from. Bodies come back through `chrome::body_span`, which applies the
+one-place dimming policy so an unfocused body recedes by the same rule as its header; everything
+else — tabs, headers, the status row and the attention summary it carries — comes from the existing
+chrome span helpers. The result is a pure `Vec<Span>` the render loop draws, so the composition
+never touches a descriptor and the renderer stays the only place bytes are produced.
+
 #### Chrome
 
 `cloo-client::chrome` turns a pane description — index, title, task label, attention state, focus,

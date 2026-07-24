@@ -9,7 +9,9 @@
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
 //! - [`renderer`] — the client-side [`Grid`] cache and the escape sequences
-//!   that draw it, including the positioned [`Span`]s chrome is painted from.
+//!   that draw it, the positioned [`Span`]s chrome is painted from, and
+//!   [`compose_frame`], which assembles the whole attached multi-pane picture
+//!   from one resolved layout.
 //! - [`chrome`] — pane headers, the focus and attention treatment, the dimming
 //!   policy, and the attention queue, summary, and toast deck, as pure functions
 //!   into cells.
@@ -66,7 +68,7 @@ pub use capabilities::{
 };
 pub use chrome::{
     Attention, AttentionQueue, ChromeOptions, DEFAULT_PREFIX_HINT, PaneChrome, QueueEntry, Toast,
-    ToastDeck, dim_cell, dim_cell_with_theme, dim_cells, header_cells, header_span,
+    ToastDeck, body_span, dim_cell, dim_cell_with_theme, dim_cells, header_cells, header_span,
     queue_row_cells, queue_row_span, status_bar_cells, status_bar_span, summary_cells,
     summary_span, tab_row_cells, tab_row_span, toast_cells, toast_span,
 };
@@ -91,6 +93,6 @@ pub use overlay::{
     backdrop_cells, backdrop_span, hint_cells, overlay_cells, overlay_spans, title_cells,
 };
 pub use raw_mode::{RawMode, RawModeError};
-pub use renderer::{Cursor, Grid, RenderError, Renderer, Span};
+pub use renderer::{Cursor, FramePane, Grid, RenderError, Renderer, Span, compose_frame};
 pub use resize::ResizeWatch;
 pub use theme::{Theme, ThemeToken};

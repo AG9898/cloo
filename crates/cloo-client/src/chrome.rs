@@ -410,6 +410,19 @@ pub fn dim_cells(cells: &[Cell], focused: bool, options: ChromeOptions) -> Vec<C
         .collect()
 }
 
+/// Positions one row of a pane's body as a span, dimmed when the pane is
+/// unfocused.
+///
+/// A pane's contents are the server's, arriving as whole grid rows; this is the
+/// one place they are turned into a positioned run so a multi-pane frame can
+/// drop each pane's grid into its own rect. Dimming stays the single-place
+/// [`dim_cells`] policy rather than being re-decided here, so a body row and a
+/// header row recede by the same rule.
+#[must_use]
+pub fn body_span(at: Point, cells: &[Cell], focused: bool, options: ChromeOptions) -> Span {
+    Span::new(at, dim_cells(cells, focused, options))
+}
+
 // ---------------------------------------------------------------------------
 // Header
 // ---------------------------------------------------------------------------
