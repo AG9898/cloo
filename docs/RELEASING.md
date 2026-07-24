@@ -54,28 +54,21 @@ npm rejects `cloo` under its similarity policy. Installing it provides the `cloo
 
 ## Publish from the maintainer terminal
 
-The ignored repository-root `.env` may contain only `NPM_TOKEN`. Load it only into the current
-shell and configure npm with a temporary file; never print, commit, or persist the token.
+Authenticate the maintainer's terminal with npm. Do not print, commit, or persist a token in this
+repository.
 
 ```bash
-set -a
-. ./.env
-set +a
-test -n "${NPM_TOKEN:-}"
+npm login
+npm whoami
 
-release_npmrc="$(mktemp)"
-trap 'rm -f "$release_npmrc"' EXIT
-umask 077
-printf '//registry.npmjs.org/:_authToken=%s\n' "$NPM_TOKEN" > "$release_npmrc"
-npm --userconfig="$release_npmrc" whoami
-
-npm --userconfig="$release_npmrc" publish dist/npm/clooterminal-linux-x64-0.0.4.tgz --access public
-npm --userconfig="$release_npmrc" publish dist/npm/clooterminal-0.0.4.tgz --access public
+npm publish dist/npm/clooterminal-linux-x64-0.0.4.tgz --access public
+npm publish dist/npm/clooterminal-0.0.4.tgz --access public
 ```
 
 Publish the native package first. Do not rerun a successful `npm publish`: a published version
 cannot be overwritten. If the native package succeeds and the launcher fails, resolve the launcher
-issue and publish only that missing tarball.
+issue and publish only that missing tarball. A valid npm PAT may be used instead of interactive
+login for a non-interactive release, but it needs permission to publish both packages.
 
 ## Verify the public install and tag the source
 
@@ -84,7 +77,7 @@ npm view clooterminal version dist-tags --json
 npm view clooterminal-linux-x64@0.0.4 version
 
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir" "$release_npmrc"' EXIT
+trap 'rm -rf "$work_dir"' EXIT
 npm install --prefix "$work_dir" --ignore-scripts clooterminal@0.0.4
 "$work_dir/node_modules/.bin/cloo" --version
 
