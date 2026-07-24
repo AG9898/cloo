@@ -70,6 +70,11 @@ cannot be overwritten. If the native package succeeds and the launcher fails, re
 issue and publish only that missing tarball. A valid npm PAT may be used instead of interactive
 login for a non-interactive release, but it needs permission to publish both packages.
 
+If the npm account requires two-factor authentication for writes, run the same two commands from
+the maintainer terminal with a current authenticator code, for example
+`npm publish <tarball> --access public --otp=<code>`. Do not send a one-time code to an agent or
+commit it anywhere.
+
 ## Verify the public install and tag the source
 
 ```bash
