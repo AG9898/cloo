@@ -2,11 +2,10 @@
 
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
 
-> **Pre-alpha.** The current `cloo` command runs one local pane: it launches `$SHELL`, renders it,
-> and forwards your keystrokes. The source tree already implements the daemon/session,
-> detach/reattach transport, multipane workspace model, and chrome composition, but M6-06 has not
-> yet connected that attached-client loop to the CLI. The published 0.0.1 release predates the
-> local-pane runtime and only prints its status.
+> **Pre-alpha.** Plain `cloo` runs one local pane: it launches `$SHELL`, renders it, and forwards
+> your keystrokes. `cloo attach [session]` connects the composed multipane client to an existing
+> daemon, with detach/reattach transport and terminal restoration. The published 0.0.1 release
+> predates both runtime paths and only prints its status.
 >
 > Design doc and roadmap: **https://github.com/AG9898/cloo**
 
@@ -28,9 +27,8 @@ The difference is what it looks like. cloo aims to be a functional peer of tmux 
 spending its effort on pane borders and focus treatment, a status bar worth looking at, theming
 that inherits your existing palette, and considered motion when panes split and close.
 
-## Remaining before the workspace is usable from the CLI
+## Remaining workspace work
 
-- M6-06: attached-client command and render loop
 - M6-07: live overlays, copy highlights, and motion
 - M7-03: manual Codex and Claude compatibility matrix
 - M7-04: supported-target packaging

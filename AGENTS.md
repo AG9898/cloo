@@ -10,12 +10,11 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning is complete and the design is settled. M0–M5,
-M6-01–M6-05, and M7-01–M7-02 are done in the tree; the daemon/session, workspace, chrome, and
-compatibility foundations are implemented and tested. The current `cloo` CLI still launches one
-local pane in-process, so **M6-06** is the active runtime boundary: connect the attached client's
-composed multipane frame and input loop to the command users run. See [`docs/PRD.md`](docs/PRD.md)
-and [`docs/workboard.json`](docs/workboard.json).
+**The project is pre-alpha.** Planning is complete and the design is settled. M0–M6-06 and
+M7-01–M7-02 are done in the tree; the daemon/session, workspace, chrome, attached-client runtime,
+and compatibility foundations are implemented and tested. Plain `cloo` still launches one local
+pane in-process, while `cloo attach [session]` joins the daemon with the composed multipane frame
+and input loop. See [`docs/PRD.md`](docs/PRD.md) and [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
 M0–M7 tasks.
@@ -87,9 +86,9 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-All six crates are wired together. M1–M5, M6-01–M6-05, and M7-01–M7-02 supply the daemon,
-workspace, client primitives, and compatibility foundations; M6-06 remains the live attached-client
-integration. Dependencies are declared in the root `[workspace.dependencies]` and are constrained by a
+All six crates are wired together. M1–M6-06 and M7-01–M7-02 supply the daemon, workspace, client
+primitives, live attached-client integration, and compatibility foundations. Dependencies are
+declared in the root `[workspace.dependencies]` and are constrained by a
 **layering**, not a single chain: `cloo` over {`cloo-server`, `cloo-client`} over `cloo-core` over
 the leaves {`cloo-proto`, `cloo-term`}. Any crate may name any crate in a lower layer — in
 particular every crate that speaks the wire names `cloo-proto` directly. Forbidden: a back-edge, a
@@ -411,6 +410,10 @@ snapshot's grids into their `PaneArea`s with the tab row on row zero, a header d
 grid, and the status row on the last row — a focused body dropping in undimmed and byte-equal to the
 cache at its rect origin, an unfocused body receding through the shared `chrome::body_span` dimming,
 a headerless area drawing no header, and a zero-sized frame composing nothing.
+M6-06 drives that frame from the command users run: `cloo attach [session]` enters raw mode before
+connecting, watches `SIGWINCH`, routes decoded input through the configured prefix keymap and mouse
+ownership, and restores the outer terminal after detach. Its real-PTY binary fixture proves the
+composed frame, prefix detach, raw-mode restoration, and a second attachment reaching the same child.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 

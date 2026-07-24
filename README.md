@@ -20,9 +20,9 @@
   <img src="docs/assets/cloo-ui-single-pane.png" alt="cloo intended single-pane terminal interface" width="900">
 </p>
 
-> **Pre-alpha, but executable.** Today, cloo runs `$SHELL`, an explicit program, or a configured
-> profile in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling. The
-> attached multi-pane client is the active remaining runtime path; this is not a released package
+> **Pre-alpha, but executable.** `cloo` runs `$SHELL`, an explicit program, or a configured profile
+> in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling; `cloo attach
+> [session]` joins an existing daemon through the multi-pane client. This is not a released package
 > or a replacement for tmux yet.
 
 ## The idea
@@ -76,9 +76,9 @@ The intended v1 experience includes:
 | Track | Current state |
 |---|---|
 | Product and identity | Settled—the Storm terminal language and the external [brand system](docs/BRANDING.md) share one deliberate visual direction. |
-| Core and workspace model | Implemented and tested—M0–M5 plus M6-01–M6-05 and M7-01–M7-02: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, and compatibility fixtures are in place. |
-| What runs today | One local pane: launch `$SHELL`, a program, or a profile with raw-mode restoration, resize handling, and terminal emulation. |
-| Active runtime work | M6-06 is next: connect the attached-client command, composed multi-pane frame, input, resize, and layout controls into the live CLI. M6-07 then layers overlays, copy highlights, and motion onto it. |
+| Core and workspace model | Implemented and tested—M0–M6-06 plus M7-01–M7-02: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, the attached client loop, and compatibility fixtures are in place. |
+| What runs today | Plain `cloo` launches one local pane; `cloo attach [session]` joins a daemon with composed chrome, input routing, resize handling, and layout controls. |
+| Active runtime work | M6-07 layers overlays, copy highlights, and motion onto the live attached-client loop. |
 | Compatibility and release | Reconnect/capability hardening and deterministic fixtures are done. Manual harness coverage, supported-target packaging, and external brand application remain. |
 
 ## Follow the build

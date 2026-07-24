@@ -4,11 +4,9 @@
 //! `cloo-server` and `cloo-client` together. It holds no session state and
 //! emits no escape sequences of its own.
 //!
-//! Today the command-line surface exposes the M0 path — one pane, one child,
-//! in-process, with no socket — from an explicit launch. See [`local`] and
-//! [`cli`]. The daemon, attach transport, multipane model, and composed chrome
-//! are implemented below this surface; M6-06 connects their attached-client
-//! loop to the CLI.
+//! The bare command retains the M0 local path — one pane, one child, in
+//! process — while `cloo attach` connects the client-owned multipane render
+//! loop to a daemon. See [`local`] and [`cli`].
 
 mod cli;
 mod local;
@@ -46,10 +44,34 @@ fn main() -> ExitCode {
                 ExitCode::from(EXIT_USAGE)
             }
         },
+        Ok(cli::Invocation::Attach(request)) => attach(request),
         Err(err) => {
             eprintln!("cloo: {err}");
             eprintln!("Try 'cloo --help'.");
             ExitCode::from(EXIT_USAGE)
+        }
+    }
+}
+
+/// Attaches the interactive client to the named daemon session.
+fn attach(request: cli::AttachRequest) -> ExitCode {
+    let loaded = cloo_server::config::load_from_environment();
+    for diagnostic in loaded.diagnostics {
+        eprintln!("cloo: warning: {diagnostic}");
+    }
+    let socket = match cloo_server::socket::session_socket_path(&request.session) {
+        Ok(socket) => socket,
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+
+    match cloo_client::attach::run(&socket, loaded.config.keys().clone()) {
+        Ok(status) => ExitCode::from(u8::try_from(status).unwrap_or(EXIT_FAILURE)),
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            ExitCode::from(EXIT_FAILURE)
         }
     }
 }
@@ -75,14 +97,14 @@ fn help() {
     println!("cloo {VERSION} — a terminal multiplexer");
     println!();
     println!("STATUS");
-    println!("    Pre-alpha. This command currently runs one local pane.");
-    println!("    The attached multipane client loop is the next runtime milestone.");
+    println!("    Pre-alpha. `cloo` runs one local pane; `cloo attach` joins a daemon.");
     println!("    Design and roadmap: {REPO}");
     println!();
     println!("USAGE");
     println!("    cloo                       run $SHELL in a single pane");
     println!("    cloo <program> [args...]   run a program in a single pane");
     println!("    cloo --profile <id>        run a launch profile in a single pane");
+    println!("    cloo attach [session]      attach to a daemon (default: default)");
     println!("    cloo [-V | --version]");
     println!("    cloo [-h | --help]");
     println!();

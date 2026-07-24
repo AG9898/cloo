@@ -15,9 +15,13 @@
 //! The scripted children block on `read` rather than exiting, because the
 //! property under test is that they are still there afterwards.
 
+use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 use std::{fs, io};
 
 use cloo_client::attach::{AttachError, Attached, attach};
@@ -70,6 +74,209 @@ impl TempDir {
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A pseudoterminal pair standing in for the outer terminal of `cloo attach`.
+struct Tty {
+    master: OwnedFd,
+    slave: OwnedFd,
+}
+
+fn open_tty() -> Tty {
+    let mut master: RawFd = -1;
+    let mut slave: RawFd = -1;
+    let winsize = libc::winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: `openpty` writes one descriptor into each valid out parameter.
+    // The termios pointer is null (use defaults) and `winsize` is live.
+    let rc = unsafe {
+        libc::openpty(
+            &raw mut master,
+            &raw mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            &winsize,
+        )
+    };
+    assert_ne!(
+        rc,
+        -1,
+        "openpty failed: {}",
+        std::io::Error::last_os_error()
+    );
+    // SAFETY: `openpty` succeeded, so both unowned descriptors are open.
+    unsafe {
+        Tty {
+            master: OwnedFd::from_raw_fd(master),
+            slave: OwnedFd::from_raw_fd(slave),
+        }
+    }
+}
+
+/// Reads a pty until text appears, without blocking past [`PATIENCE`].
+fn read_until(fd: &OwnedFd, needle: &str) -> Result<String, String> {
+    let mut file = unsafe {
+        // SAFETY: the descriptor is owned by the caller and outlives this
+        // `ManuallyDrop`, which intentionally never closes it.
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(fd.as_raw_fd()))
+    };
+    let deadline = Instant::now() + PATIENCE;
+    let mut seen = Vec::new();
+    let mut buf = [0_u8; 4096];
+    while Instant::now() < deadline {
+        if !readable_before(fd, deadline) {
+            break;
+        }
+        match file.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(read) => {
+                seen.extend_from_slice(&buf[..read]);
+                if String::from_utf8_lossy(&seen).contains(needle) {
+                    return Ok(String::from_utf8_lossy(&seen).into_owned());
+                }
+            }
+        }
+    }
+    Err(String::from_utf8_lossy(&seen).into_owned())
+}
+
+/// Waits until the pty has data or the deadline expires.
+fn readable_before(fd: &OwnedFd, deadline: Instant) -> bool {
+    let mut poll = libc::pollfd {
+        fd: fd.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let millis = i32::try_from(
+        deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis(),
+    )
+    .unwrap_or(i32::MAX);
+    // SAFETY: `poll` receives one live `pollfd`, matching the count.
+    unsafe { libc::poll(&raw mut poll, 1, millis) != 0 }
+}
+
+/// Waits for a command to exit without allowing a broken client loop to hang
+/// the entire test process.
+fn wait_for_exit(client: &mut std::process::Child) -> std::process::ExitStatus {
+    let deadline = Instant::now() + PATIENCE;
+    while Instant::now() < deadline {
+        if let Some(status) = client
+            .try_wait()
+            .expect("the attached client remains waitable")
+        {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    client
+        .kill()
+        .expect("the wedged attached client can be stopped");
+    let _ = client.wait();
+    panic!("the attached client did not exit after its detach command");
+}
+
+/// Whether the slave terminal is currently in raw mode.
+fn is_raw(fd: &OwnedFd) -> bool {
+    let mut termios = std::mem::MaybeUninit::<libc::termios>::uninit();
+    // SAFETY: `tcgetattr` writes exactly one termios into the live pointer.
+    let rc = unsafe { libc::tcgetattr(fd.as_raw_fd(), termios.as_mut_ptr()) };
+    assert_ne!(rc, -1, "tcgetattr failed");
+    // SAFETY: the successful call initialized the value.
+    let termios = unsafe { termios.assume_init() };
+    termios.c_lflag & (libc::ECHO | libc::ICANON | libc::ISIG) == 0
+}
+
+/// Runs the binary attached to `socket` with all its stdio on `tty`.
+fn spawn_attached_on(tty: &Tty, socket: &Path) -> std::process::Child {
+    let stdio = || {
+        Stdio::from(
+            tty.slave
+                .try_clone()
+                .expect("the slave descriptor can be duplicated"),
+        )
+    };
+    Command::new(env!("CARGO_BIN_EXE_cloo"))
+        .arg("attach")
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .env("CLOO_SOCKET", socket)
+        .env("TERM", "xterm-256color")
+        .env_remove("COLORTERM")
+        .spawn()
+        .expect("the cloo binary is built before its integration tests")
+}
+
+/// A daemon running in the background for the synchronous command test.
+///
+/// Its stop channel is important: a daemon remains available after its child
+/// has exited so a later client can inspect the session, and therefore does
+/// not terminate on its own merely because this fixture has finished.
+struct ThreadDaemon {
+    stop: Option<tokio::sync::oneshot::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ThreadDaemon {
+    /// Stops the daemon and waits for its runtime to release the socket.
+    fn stop(mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            thread.join().expect("the daemon thread does not panic");
+        }
+    }
+}
+
+impl Drop for ThreadDaemon {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Runs a daemon in its own runtime so a blocking pty read in this synchronous
+/// binary test cannot prevent it from accepting or publishing damage.
+fn spawn_daemon_thread(socket: PathBuf, script: &'static str) -> ThreadDaemon {
+    let (ready_tx, ready_rx) = mpsc::sync_channel(1);
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
+    let thread = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .expect("the daemon runtime builds");
+        runtime.block_on(async move {
+            let listener = Listener::bind(&socket).expect("a fresh socket must bind");
+            let mut daemon =
+                Daemon::new(listener, &base(), scripted(script)).expect("the daemon starts");
+            ready_tx.send(()).expect("the test waits for the daemon");
+            tokio::select! {
+                result = daemon.run() => {
+                    result.expect("the daemon stays healthy");
+                }
+                _ = stop_rx => {}
+            }
+        });
+    });
+    ready_rx
+        .recv_timeout(PATIENCE)
+        .expect("the daemon must bind before the client starts");
+    ThreadDaemon {
+        stop: Some(stop_tx),
+        thread: Some(thread),
     }
 }
 
@@ -315,6 +522,59 @@ async fn await_panes(attached: &mut Attached<UnixStream>) -> Vec<cloo_proto::Pan
     })
     .await
     .expect("pane identity must reach an attached client")
+}
+
+#[test]
+fn cli_attach_composes_the_frame_and_detaches_without_losing_the_session() {
+    let dir = TempDir::new("cli-live-loop");
+    let socket = dir.socket();
+    let daemon = spawn_daemon_thread(socket.clone(), "printf attached-client-ok; read _; exit 0");
+    let tty = open_tty();
+    let mut client = spawn_attached_on(&tty, &socket);
+
+    let seen = read_until(&tty.master, "attached-client-ok")
+        .unwrap_or_else(|seen| panic!("the attached frame never rendered; saw:\n{seen}"));
+    assert!(
+        seen.contains("\x1b[?25l"),
+        "the client did not render a frame; saw:\n{seen}"
+    );
+    assert!(
+        seen.contains("api"),
+        "the pane header was not composed; saw:\n{seen}"
+    );
+    assert!(is_raw(&tty.slave), "the attach loop enters raw mode");
+
+    let mut master = unsafe {
+        // SAFETY: `tty.master` outlives this wrapper, which never closes it.
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(tty.master.as_raw_fd()))
+    };
+    master
+        .write_all(b"\x02d")
+        .expect("the prefix detach reaches cloo");
+    let status = wait_for_exit(&mut client);
+    assert!(status.success(), "cloo attach exited with {status}");
+    assert!(
+        !is_raw(&tty.slave),
+        "cloo attach left the terminal raw after detach"
+    );
+
+    // Detach is only a client event. A fresh attachment can still reach the
+    // child and unblock it, proving the command's loop did not own the PTY.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the reattach runtime builds");
+    runtime.block_on(async {
+        let mut reattached = attach(&socket, Size::new(80, 24), TermCaps::default(), None)
+            .await
+            .expect("the detached session accepts another client");
+        reattached
+            .send_input(b"\n".to_vec())
+            .await
+            .expect("the reattached client reaches the child");
+    });
+    daemon.stop();
 }
 
 #[tokio::test]

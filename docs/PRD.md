@@ -5,9 +5,9 @@
 > | Track | State |
 > |---|---|
 > | Shipped | Nothing published. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders. |
-> | Implemented in the tree | M0–M5, M6-01 through M6-05, and M7-01 through M7-02: the daemon/session model, attach transport, multipane workspace primitives, chrome composition, and deterministic compatibility fixtures are built and tested. |
-> | Current CLI | `cloo` still exposes the M0 local one-pane path. It launches `$SHELL`, an explicit program, or a profile, but does not yet run the attached multipane render loop. |
-> | Next | M6-06 wires the attached client’s composed frame, input, resize, and layout commands into the CLI. M6-07 then layers overlays, copy highlights, and motion onto that live loop. |
+> | Implemented in the tree | M0–M6-06 and M7-01 through M7-02: the daemon/session model, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, and deterministic compatibility fixtures are built and tested. |
+> | Current CLI | `cloo` launches the M0 local one-pane path; `cloo attach [session]` joins an existing daemon with the composed multipane frame, decoded input, resize, and layout controls. |
+> | Next | M6-07 layers overlays, copy highlights, and motion onto the live attached loop. |
 > | Remaining release work | M7-03 records manual Codex/Claude compatibility, M7-04 packages supported targets, and M7-05 applies the approved external brand system. See `docs/workboard.json`. |
 
 ---
@@ -54,9 +54,9 @@ There is no admin role, no accounts, and no multi-tenancy. cloo is a single-user
   No socket, no daemon, no detach — the child dies with the client, and that is the boundary M1
   moves.
 - Daemonize; Unix socket; one full-screen pane. **Implemented and integration-tested across
-  M1-01–M1-05.** The attach transport is not yet exposed by the `cloo` command.
+  M1-01–M1-05; exposed as `cloo attach [session]` at M6-06.**
 - Client raw mode, damage rendering, input forwarding, terminal restore on exit. **Implemented
-  across M0–M1**, with the live attached-client loop still pending in M6-06.
+  across M0–M1 and driven by the attached-client loop at M6-06.**
 - `SIGWINCH` → `Resize`. **Done at M1-03.** The signal becomes a command on the session task's
   single `mpsc<Command>`, which runs one layout pass and issues `TIOCSWINSZ` — one serialized
   owner for the grid-and-child race, and the same channel the local in-process path uses.
@@ -64,7 +64,7 @@ There is no admin role, no accounts, and no multi-tenancy. cloo is a single-user
   mouse routing, and a capability contract for terminal-dependent enhancements. **Implemented
   across M1-06–M1-09.**
 - **Delivery boundary:** the daemon/attach transport can run a shell, survive a disconnected
-  client, and reattach in the end-to-end test path. **Done at M1-05; CLI exposure remains M6-06.**
+  client, and reattach from the `cloo attach` command. **Done at M6-06.**
 
 Proving this before anything visual is the point. If the ownership model is wrong, M1 is when
 that should surface — not after splits are built on top of it.
@@ -84,16 +84,15 @@ that should surface — not after splits are built on top of it.
 - **M5 copy mode + search.** **Implemented.** Server-side, since scrollback lives there: vim-ish motions,
   selection, regex search with match highlighting, clipboard out via OSC 52 through the client.
 - **M6 mouse and live client integration.** Mouse ownership, click-to-focus, divider drag, wheel
-  actions, wire command routing, and composed multipane frames are implemented. **M6-06** is the
-  remaining live attached-client render loop; **M6-07** layers overlays, copy highlights, and
-  motion onto it.
+  actions, wire command routing, composed multipane frames, and the `cloo attach` live loop are
+  implemented. **M6-07** layers overlays, copy highlights, and motion onto it.
 - **M7 hardening + packaging.** True-color detection, reconnect/resize-race handling, and the
   deterministic compatibility fixture suite are implemented. The manual compatibility matrix,
   release packaging, and external brand application remain.
 
-The runtime integration boundary is deliberate: many workspace capabilities are implemented below
-the binary, but the current `cloo` command still starts the local one-pane path. It will not show
-tabs, headers, status chrome, splits, or themes until M6-06 connects the attached client loop.
+The runtime boundary is now explicit: plain `cloo` remains the local one-pane launcher, while
+`cloo attach [session]` renders the daemon-owned workspace with tabs, headers, status chrome,
+splits, and themes.
 
 ### Out of Scope
 

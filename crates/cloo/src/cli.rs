@@ -29,6 +29,26 @@ pub enum Invocation {
     Help,
     /// Run a pane.
     Run(Request),
+    /// Attach a terminal client to an existing session.
+    Attach(AttachRequest),
+}
+
+/// The session an attached client wants to render.
+///
+/// The socket resolver owns validation because a session name becomes a file
+/// name there; this pure request holds exactly the words the user typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttachRequest {
+    /// The named session, or `default` when omitted.
+    pub session: String,
+}
+
+impl Default for AttachRequest {
+    fn default() -> Self {
+        Self {
+            session: "default".to_owned(),
+        }
+    }
 }
 
 /// The launch options as typed, before any of them are validated.
@@ -64,6 +84,8 @@ pub enum CliError {
     /// The process's own directory could not be read, so a relative `--cwd`
     /// could not be resolved.
     NoCurrentDir(String),
+    /// `attach` accepts at most one optional session name.
+    AttachArguments,
 }
 
 impl core::fmt::Display for CliError {
@@ -86,6 +108,7 @@ impl core::fmt::Display for CliError {
             Self::NoCurrentDir(err) => {
                 write!(f, "could not read the current directory: {err}")
             }
+            Self::AttachArguments => f.write_str("attach accepts at most one session name"),
         }
     }
 }
@@ -120,6 +143,9 @@ pub fn profile_ids() -> String {
 ///
 /// Returns the [`CliError`] describing the first thing that was wrong.
 pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
+    if args.first().is_some_and(|arg| arg == "attach") {
+        return parse_attach(&args[1..]);
+    }
     let mut request = Request::default();
     let mut rest = args.iter();
 
@@ -154,6 +180,19 @@ pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
         return Err(CliError::ProfileAndProgram);
     }
     Ok(Invocation::Run(request))
+}
+
+/// Parses the small attach-only command surface.
+fn parse_attach(args: &[String]) -> Result<Invocation, CliError> {
+    match args {
+        [] => Ok(Invocation::Attach(AttachRequest::default())),
+        [session] if !session.starts_with('-') => Ok(Invocation::Attach(AttachRequest {
+            session: session.clone(),
+        })),
+        [flag] if flag == "-h" || flag == "--help" => Ok(Invocation::Help),
+        [flag] if flag.starts_with('-') => Err(CliError::UnknownFlag(flag.clone())),
+        _ => Err(CliError::AttachArguments),
+    }
 }
 
 /// Fills one option, refusing a repeat rather than silently keeping the last.
@@ -275,6 +314,32 @@ mod tests {
     #[test]
     fn a_bare_invocation_asks_for_nothing_in_particular() {
         assert_eq!(request(&[]), Request::default());
+    }
+
+    #[test]
+    fn attach_uses_the_default_session_or_the_one_named_by_the_user() {
+        assert_eq!(
+            parse(&args(&["attach"])),
+            Ok(Invocation::Attach(AttachRequest::default()))
+        );
+        assert_eq!(
+            parse(&args(&["attach", "work"])),
+            Ok(Invocation::Attach(AttachRequest {
+                session: "work".to_owned(),
+            }))
+        );
+    }
+
+    #[test]
+    fn attach_refuses_flags_and_more_than_one_session() {
+        assert_eq!(
+            parse(&args(&["attach", "--socket"])),
+            Err(CliError::UnknownFlag("--socket".to_owned()))
+        );
+        assert_eq!(
+            parse(&args(&["attach", "one", "two"])),
+            Err(CliError::AttachArguments)
+        );
     }
 
     #[test]

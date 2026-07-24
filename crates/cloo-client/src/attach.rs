@@ -18,18 +18,39 @@
 //! acknowledgement, and drops the connection. Nothing about it reaches the
 //! child — that is the point.
 
+use std::collections::BTreeMap;
 use std::fmt;
-use std::io;
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use cloo_core::keymap::Keymap;
 use cloo_proto::{
-    Action, ClientMessage, FrameStream, MouseEvent, PROTOCOL_VERSION, ProtoError, ServerMessage,
+    Action, AttentionState, ClientMessage, CursorShape, FrameStream, LayoutSnapshot, MouseEvent,
+    PROTOCOL_VERSION, PaneAttention, PaneId, PaneInfo, PaneModes, Point, ProtoError, ServerMessage,
     SessionId, Size, StreamError, TabSummary, TermCaps, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
-use crate::capabilities::CapsError;
+use crate::capabilities::{CapsError, detect_attach_caps};
+use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome};
+use crate::effects::{EffectPolicy, apply_effect};
+use crate::input::{
+    ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
+    OuterModes, PaneArea, ScreenLayout, route_mouse,
+};
+use crate::outer::current_size;
+use crate::raw_mode::{RawMode, RawModeError};
+use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
+use crate::resize::ResizeWatch;
+
+/// The render tick shared with the daemon: roughly 60 frames per second.
+const FRAME_INTERVAL: Duration = Duration::from_millis(16);
+/// Size of a single blocking stdin read on the helper thread.
+const INPUT_BUF_LEN: usize = 1024;
+/// The chrome rows a one-pane attached frame reserves: tab, header, status.
+const CHROME_ROWS: u16 = 3;
 
 /// Everything attaching can refuse to do.
 #[derive(Debug)]
@@ -102,6 +123,70 @@ impl From<StreamError> for AttachError {
 impl From<CapsError> for AttachError {
     fn from(value: CapsError) -> Self {
         Self::Capabilities(value)
+    }
+}
+
+/// Everything the live attached-client loop can refuse to do.
+///
+/// The handshake errors remain [`AttachError`] because they are the useful
+/// explanation when no session can be reached. The other variants name the
+/// local boundary that failed after the socket was already a valid choice.
+#[derive(Debug)]
+pub enum AttachRunError {
+    /// The outer terminal could not enter or leave raw mode.
+    RawMode(RawModeError),
+    /// Capabilities could not be negotiated before attaching.
+    Capabilities(CapsError),
+    /// The daemon refused or lost the attachment.
+    Attach(AttachError),
+    /// A server row disagreed with the client cache.
+    Render(RenderError),
+    /// The client's terminal could not be written.
+    Output(io::Error),
+    /// The single-thread Tokio runtime could not be built.
+    Runtime(io::Error),
+    /// A `SIGWINCH` watcher could not be installed.
+    Signal(io::Error),
+}
+
+impl fmt::Display for AttachRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RawMode(RawModeError::NotATerminal) => {
+                f.write_str("cloo attach must be run from a terminal")
+            }
+            Self::RawMode(err) => write!(f, "{err}"),
+            Self::Capabilities(err) => write!(f, "{err}"),
+            Self::Attach(err) => write!(f, "{err}"),
+            Self::Render(err) => write!(f, "render failed: {err}"),
+            Self::Output(err) => write!(f, "could not write to the terminal: {err}"),
+            Self::Runtime(err) => write!(f, "could not start the runtime: {err}"),
+            Self::Signal(err) => write!(f, "could not watch for terminal resizes: {err}"),
+        }
+    }
+}
+
+impl std::error::Error for AttachRunError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::RawMode(err) => Some(err),
+            Self::Capabilities(err) => Some(err),
+            Self::Attach(err) => Some(err),
+            Self::Render(err) => Some(err),
+            Self::Output(err) | Self::Runtime(err) | Self::Signal(err) => Some(err),
+        }
+    }
+}
+
+impl From<AttachError> for AttachRunError {
+    fn from(value: AttachError) -> Self {
+        Self::Attach(value)
+    }
+}
+
+impl From<RenderError> for AttachRunError {
+    fn from(value: RenderError) -> Self {
+        Self::Render(value)
     }
 }
 
@@ -329,10 +414,551 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
     }
 }
 
+/// Runs one attached client until it detaches, the daemon exits, or the socket
+/// closes.
+///
+/// The caller supplies the resolved keymap so the client applies the same
+/// configurable prefix table it advertises in its chrome. Entering raw mode,
+/// enabling outer-terminal reporting, restoring both on every exit path, and
+/// owning the render loop all live here because they are client concerns — the
+/// daemon never writes a byte to the user's terminal.
+///
+/// # Errors
+///
+/// Returns an actionable attach, terminal, rendering, or signal error. The raw
+/// mode guard restores the terminal before an error reaches the caller.
+pub fn run(path: &Path, keymap: Keymap) -> Result<i32, AttachRunError> {
+    // This has to be first. A pipe should explain that this is not an attached
+    // terminal, and no attach attempt or reporting mode should precede it.
+    let raw = RawMode::stdin().map_err(AttachRunError::RawMode)?;
+    let outer_size = current_size();
+    let caps = detect_attach_caps().map_err(AttachRunError::Capabilities)?;
+    let modes = OuterModes::negotiated(caps);
+    raw.on_restore(&modes.disable())
+        .map_err(AttachRunError::RawMode)?;
+    enable_modes(modes)?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .map_err(AttachRunError::Runtime)?;
+    let result = runtime.block_on(live_loop(path, outer_size, caps, modes, keymap));
+
+    // Restore before `main` prints an error: diagnostics written while raw are
+    // unreadable, and `RawMode` also turns reporting modes back off here.
+    let restored = raw.restore().map_err(AttachRunError::RawMode);
+    let status = result?;
+    restored?;
+    Ok(status)
+}
+
+/// A terminal's usable session area after the frame's fixed chrome rows.
+///
+/// A client reports the pane area rather than its full outer-terminal height:
+/// tab, pane-header, and status rows are client-owned and must not become a
+/// child's last three grid rows. The server remains authoritative for how that
+/// usable rectangle is divided among panes.
+const fn session_size(outer: Size) -> Size {
+    Size::new(outer.cols, outer.rows.saturating_sub(CHROME_ROWS))
+}
+
+/// The async attached-client body, entered only after raw mode is armed.
+async fn live_loop(
+    path: &Path,
+    outer_size: Size,
+    caps: TermCaps,
+    modes: OuterModes,
+    keymap: Keymap,
+) -> Result<i32, AttachRunError> {
+    // Install this before attaching, so the one `SIGWINCH` that happens while
+    // the socket handshake is in flight cannot be lost.
+    let mut resizes = ResizeWatch::new(outer_size).map_err(AttachRunError::Signal)?;
+    let mut attached = attach(path, session_size(outer_size), caps, None).await?;
+    let mut state = LiveState::new(outer_size, attached.session(), attached.tabs().to_vec());
+    let mut renderer = Renderer::new(caps);
+    let mut out = io::stdout();
+    let policy = EffectPolicy::default();
+    let mut input = spawn_input_reader();
+    let mut input_open = true;
+    let mut decoder = InputDecoder::new(modes);
+    let mut keys = KeyRouter::new(keymap);
+    let mut chrome = ChromeMouse::new();
+    let mut frames = tokio::time::interval(FRAME_INTERVAL);
+    frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut dirty = true;
+    let mut detaching = false;
+
+    loop {
+        let step = tokio::select! {
+            message = attached.recv() => Step::Server(message.map_err(AttachError::from)?),
+            received = input.recv(), if input_open && !detaching => match received {
+                Some(bytes) => Step::Input(bytes),
+                None => Step::InputClosed,
+            },
+            resized = resizes.changed(), if !detaching => Step::Resized(resized),
+            _ = frames.tick() => Step::Frame,
+        };
+
+        match step {
+            Step::Server(Some(ServerMessage::Effect { effect, .. })) => {
+                let _ = apply_effect(&mut out, caps, policy, &effect)
+                    .map_err(AttachRunError::Output)?;
+            }
+            Step::Server(Some(ServerMessage::Exit(status))) => {
+                if dirty {
+                    draw(&mut out, &mut renderer, &state)?;
+                }
+                return Ok(status);
+            }
+            Step::Server(Some(ServerMessage::Detached)) | Step::Server(None) => return Ok(0),
+            Step::Server(Some(message)) => {
+                dirty |= state.apply(message)?;
+                state.tabs = attached.tabs().to_vec();
+            }
+            Step::Input(bytes) => {
+                if route(
+                    &mut attached,
+                    &state,
+                    &mut chrome,
+                    &mut keys,
+                    &mut decoder,
+                    bytes,
+                )
+                .await?
+                {
+                    detaching = true;
+                }
+            }
+            Step::InputClosed => input_open = false,
+            Step::Resized(size) => {
+                state.set_outer_size(size);
+                attached
+                    .send_resize(session_size(size))
+                    .await
+                    .map_err(AttachError::from)?;
+                dirty = true;
+            }
+            Step::Frame => {
+                if let Some(InputEvent::Keys(bytes)) = decoder.flush() {
+                    if route_keys(&mut attached, &mut keys, bytes).await? {
+                        detaching = true;
+                    }
+                }
+                if dirty {
+                    draw(&mut out, &mut renderer, &state)?;
+                    dirty = false;
+                }
+            }
+        }
+    }
+}
+
+/// One selected branch of the live loop.
+enum Step {
+    /// A framed server message, or the connection's clean close.
+    Server(Option<ServerMessage>),
+    /// Bytes read from stdin.
+    Input(Vec<u8>),
+    /// Stdin reached EOF.
+    InputClosed,
+    /// The outer terminal resized.
+    Resized(Size),
+    /// The render clock advanced.
+    Frame,
+}
+
+/// The client-owned projection of the server's latest frame.
+///
+/// This is deliberately a cache, not another session model. The server decides
+/// every pane rectangle and state transition; this structure only joins those
+/// independent wire clocks into the grids, headers, cursor, and hit-test map
+/// that one terminal frame needs.
+struct LiveState {
+    outer_size: Size,
+    session: SessionId,
+    tabs: Vec<TabSummary>,
+    layout: Option<LayoutSnapshot>,
+    areas: BTreeMap<PaneId, PaneArea>,
+    panes: BTreeMap<PaneId, PaneInfo>,
+    attention: BTreeMap<PaneId, PaneAttention>,
+    grids: BTreeMap<PaneId, Grid>,
+    cursors: BTreeMap<PaneId, (Point, CursorShape, bool)>,
+    modes: BTreeMap<PaneId, PaneModes>,
+    copy_mode: Option<PaneId>,
+    queue: AttentionQueue,
+    screen: ScreenLayout,
+}
+
+impl LiveState {
+    fn new(outer_size: Size, session: SessionId, tabs: Vec<TabSummary>) -> Self {
+        Self {
+            outer_size,
+            session,
+            tabs,
+            layout: None,
+            areas: BTreeMap::new(),
+            panes: BTreeMap::new(),
+            attention: BTreeMap::new(),
+            grids: BTreeMap::new(),
+            cursors: BTreeMap::new(),
+            modes: BTreeMap::new(),
+            copy_mode: None,
+            queue: AttentionQueue::new(),
+            screen: ScreenLayout::new(outer_size)
+                .tab_row(0)
+                .status_row(outer_size.rows.saturating_sub(1)),
+        }
+    }
+
+    /// Applies one server clock tick and reports whether it changes the frame.
+    fn apply(&mut self, message: ServerMessage) -> Result<bool, RenderError> {
+        match message {
+            ServerMessage::Damage { pane, rows } => {
+                let Some(grid) = self.grids.get_mut(&pane) else {
+                    // A peer is allowed to resend an already-obsolete damage
+                    // frame while a newer layout resync is in flight. There is
+                    // no pane left to draw it into, so dropping it is safer than
+                    // associating it with a successor.
+                    return Ok(false);
+                };
+                for row in &rows {
+                    grid.apply(row)?;
+                }
+                Ok(true)
+            }
+            ServerMessage::CursorMoved {
+                pane,
+                pos,
+                shape,
+                visible,
+            } => {
+                self.cursors.insert(pane, (pos, shape, visible));
+                Ok(true)
+            }
+            ServerMessage::Layout(layout) => {
+                self.set_layout(layout);
+                Ok(true)
+            }
+            ServerMessage::Panes(panes) => {
+                self.panes = panes.into_iter().map(|pane| (pane.pane, pane)).collect();
+                self.rebuild_queue();
+                Ok(true)
+            }
+            ServerMessage::Attention(attention) => {
+                self.attention = attention
+                    .into_iter()
+                    .map(|state| (state.pane, state))
+                    .collect();
+                self.rebuild_queue();
+                Ok(true)
+            }
+            ServerMessage::CopyMode(copy_mode) => {
+                self.copy_mode = copy_mode.map(|state| state.pane);
+                Ok(false)
+            }
+            ServerMessage::Modes { pane, modes } => {
+                self.modes.insert(pane, modes);
+                Ok(false)
+            }
+            ServerMessage::Tabs(tabs) => {
+                self.tabs = tabs;
+                Ok(true)
+            }
+            ServerMessage::Hello { .. }
+            | ServerMessage::Refused { .. }
+            | ServerMessage::Effect { .. }
+            | ServerMessage::Bell(_)
+            | ServerMessage::Detached
+            | ServerMessage::Exit(_) => Ok(false),
+        }
+    }
+
+    /// Changes the outer frame without pretending the session geometry changed.
+    fn set_outer_size(&mut self, outer_size: Size) {
+        self.outer_size = outer_size;
+        if let Some(layout) = self.layout.clone() {
+            self.set_layout(layout);
+        } else {
+            self.screen = ScreenLayout::new(outer_size)
+                .tab_row(0)
+                .status_row(outer_size.rows.saturating_sub(1));
+        }
+    }
+
+    /// Rebuilds client-owned areas from the server's one resolved layout pass.
+    fn set_layout(&mut self, layout: LayoutSnapshot) {
+        let mut areas = BTreeMap::new();
+        let mut live = BTreeMap::new();
+        for rect in &layout.panes {
+            // The server was given the usable area (without the fixed tab,
+            // header, and status rows), so its grid origin is shifted below the
+            // first pane header when it is painted in the outer terminal.
+            let area = PaneArea::new(
+                rect.pane,
+                rect.x,
+                rect.y.saturating_add(CHROME_ROWS - 1),
+                rect.size,
+            );
+            let grid = self.grids.remove(&rect.pane).map_or_else(
+                || Grid::new(rect.size),
+                |mut grid| {
+                    if grid.size() != rect.size {
+                        grid.resize(rect.size);
+                    }
+                    grid
+                },
+            );
+            areas.insert(rect.pane, area);
+            live.insert(rect.pane, grid);
+        }
+        self.grids = live;
+        self.areas = areas;
+        self.cursors.retain(|pane, _| self.areas.contains_key(pane));
+        self.modes.retain(|pane, _| self.areas.contains_key(pane));
+        self.layout = Some(layout.clone());
+
+        let mut screen = ScreenLayout::new(self.outer_size)
+            .tab_row(0)
+            .status_row(self.outer_size.rows.saturating_sub(1))
+            .focus(layout.focused);
+        for area in self.areas.values().copied() {
+            screen = screen.pane(area);
+        }
+        self.screen = screen;
+    }
+
+    /// The pane modes that decide whether a mouse report belongs to the app.
+    fn focused_modes(&self) -> PaneModes {
+        self.layout
+            .as_ref()
+            .and_then(|layout| layout.focused)
+            .and_then(|pane| self.modes.get(&pane).copied())
+            .unwrap_or_default()
+    }
+
+    /// Draws an attention queue only from the complete server projection.
+    fn rebuild_queue(&mut self) {
+        self.queue = AttentionQueue::new();
+        for (index, pane) in self.panes.values().enumerate() {
+            let Some(state) = self.attention.get(&pane.pane) else {
+                continue;
+            };
+            if !state.acknowledged {
+                self.queue.record(
+                    u16::try_from(index + 1).unwrap_or(u16::MAX),
+                    &pane.name,
+                    attention(state.state),
+                );
+            }
+        }
+    }
+
+    /// Composes the frame from the exact areas the mouse hit tester uses.
+    fn spans(&self) -> Vec<crate::renderer::Span> {
+        let Some(layout) = &self.layout else {
+            return Vec::new();
+        };
+        let panes = layout
+            .panes
+            .iter()
+            .enumerate()
+            .filter_map(|(index, rect)| {
+                let area = *self.areas.get(&rect.pane)?;
+                let grid = self.grids.get(&rect.pane)?;
+                let meta = self.panes.get(&rect.pane);
+                let title = meta.map_or_else(|| "pane".to_owned(), |meta| meta.name.clone());
+                let mut header =
+                    PaneChrome::new(u16::try_from(index + 1).unwrap_or(u16::MAX), title)
+                        .attention(
+                            self.attention
+                                .get(&rect.pane)
+                                .map_or(Attention::Unknown, |state| attention(state.state)),
+                        )
+                        .focused(layout.focused == Some(rect.pane))
+                        .zoomed(layout.zoomed == Some(rect.pane));
+                if let Some(task) = meta.and_then(|meta| meta.task.clone()) {
+                    header = header.task(task);
+                }
+                Some(FramePane::new(area, grid, header))
+            })
+            .collect::<Vec<_>>();
+        compose_frame(
+            self.outer_size,
+            &self.tabs,
+            self.session,
+            &panes,
+            &self.queue,
+            ChromeOptions::default(),
+        )
+    }
+
+    /// The focused pane's cursor, translated into outer-terminal coordinates.
+    fn cursor(&self) -> Option<Cursor> {
+        let pane = self.layout.as_ref()?.focused?;
+        let area = self.areas.get(&pane)?;
+        let (pos, shape, visible) = self.cursors.get(&pane).copied()?;
+        if !visible || pos.col >= area.size.cols || pos.row >= area.size.rows {
+            return None;
+        }
+        Some(Cursor::new(
+            Point::new(
+                area.x.saturating_add(pos.col),
+                area.y.saturating_add(pos.row),
+            ),
+            shape,
+        ))
+    }
+}
+
+/// Turns the wire's explicit attention state into the chrome vocabulary.
+const fn attention(state: AttentionState) -> Attention {
+    match state {
+        AttentionState::Unknown => Attention::Unknown,
+        AttentionState::Working => Attention::Working,
+        AttentionState::NeedsInput => Attention::NeedsInput,
+        AttentionState::Ready => Attention::Ready,
+        AttentionState::Failed => Attention::Failed,
+        AttentionState::Quiet => Attention::Quiet,
+    }
+}
+
+/// Writes one complete composed frame.
+fn draw(
+    out: &mut io::Stdout,
+    renderer: &mut Renderer,
+    state: &LiveState,
+) -> Result<(), AttachRunError> {
+    out.write_all(renderer.render_spans(&state.spans(), state.cursor()))
+        .map_err(AttachRunError::Output)?;
+    out.flush().map_err(AttachRunError::Output)
+}
+
+/// Sends one decoded event through the correct client or application path.
+async fn route(
+    attached: &mut Attached<UnixStream>,
+    state: &LiveState,
+    chrome: &mut ChromeMouse,
+    keys: &mut KeyRouter,
+    decoder: &mut InputDecoder,
+    bytes: Vec<u8>,
+) -> Result<bool, AttachRunError> {
+    let mut detach = false;
+    for event in decoder.feed(&bytes) {
+        match event {
+            InputEvent::Keys(bytes) => detach |= route_keys(attached, keys, bytes).await?,
+            InputEvent::Paste(text) => {
+                attached.send_paste(text).await.map_err(AttachError::from)?
+            }
+            InputEvent::Focus(focused) => {
+                if !focused {
+                    keys.reset();
+                }
+                attached
+                    .send_focus(focused)
+                    .await
+                    .map_err(AttachError::from)?;
+            }
+            InputEvent::Mouse(report) => {
+                match route_mouse(&state.screen, state.focused_modes(), &report) {
+                    MouseRoute::Application(event) => {
+                        attached
+                            .send_mouse(event)
+                            .await
+                            .map_err(AttachError::from)?;
+                    }
+                    MouseRoute::Chrome(target) => {
+                        if let Some(action) = chrome.feed(&state.screen, target, &report) {
+                            detach |= apply_chrome(attached, action, state.copy_mode).await?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Ok(detach)
+}
+
+/// Resolves prefix chords and sends the resulting application bytes or actions.
+async fn route_keys(
+    attached: &mut Attached<UnixStream>,
+    keys: &mut KeyRouter,
+    bytes: Vec<u8>,
+) -> Result<bool, AttachRunError> {
+    let mut detach = false;
+    for route in keys.feed(&bytes) {
+        match route {
+            KeyRoute::Pane(bytes) => attached
+                .send_input(bytes)
+                .await
+                .map_err(AttachError::from)?,
+            KeyRoute::Command(Action::DetachClient) => {
+                attached
+                    .send_command(Action::DetachClient)
+                    .await
+                    .map_err(AttachError::from)?;
+                detach = true;
+            }
+            KeyRoute::Command(action) => attached
+                .send_command(action)
+                .await
+                .map_err(AttachError::from)?,
+            KeyRoute::Pending | KeyRoute::Unbound => {}
+        }
+    }
+    Ok(detach)
+}
+
+/// Sends chrome gestures through the same command vocabulary as the keyboard.
+async fn apply_chrome(
+    attached: &mut Attached<UnixStream>,
+    action: ChromeAction,
+    copy_mode: Option<PaneId>,
+) -> Result<bool, AttachRunError> {
+    let mut detach = false;
+    for command in action.commands(copy_mode) {
+        if command == Action::DetachClient {
+            detach = true;
+        }
+        attached
+            .send_command(command)
+            .await
+            .map_err(AttachError::from)?;
+    }
+    Ok(detach)
+}
+
+/// Asks the outer terminal to enable only the reporting modes it negotiated.
+fn enable_modes(modes: OuterModes) -> Result<(), AttachRunError> {
+    let mut out = io::stdout();
+    out.write_all(&modes.enable())
+        .map_err(AttachRunError::Output)?;
+    out.flush().map_err(AttachRunError::Output)
+}
+
+/// Reads stdin without changing the shell's shared descriptor flags.
+fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    std::thread::spawn(move || {
+        let mut stdin = io::stdin().lock();
+        let mut buf = [0_u8; INPUT_BUF_LEN];
+        loop {
+            match stdin.read(&mut buf) {
+                Ok(0) => break,
+                Ok(read) if tx.send(buf[..read].to_vec()).is_err() => break,
+                Ok(_) => {}
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+    });
+    rx
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cloo_proto::{PaneId, TabId};
+    use cloo_proto::{Cell, PaneRect, RowUpdate, TabId};
     use tokio::io::duplex;
 
     /// The server half of a handshake, scripted by the test.
@@ -604,5 +1230,98 @@ mod tests {
         .expect("the attach succeeds");
         attached.detach().await.expect("detach succeeds");
         scripted.await.expect("the scripted server finishes");
+    }
+
+    #[test]
+    fn a_live_state_places_the_server_grid_below_attached_chrome() {
+        let pane = PaneId::new(1);
+        let mut state = LiveState::new(Size::new(8, 5), SessionId::new(1), hello_tabs());
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: vec![PaneRect {
+                    pane,
+                    x: 0,
+                    y: 0,
+                    size: Size::new(8, 2),
+                }],
+                focused: Some(pane),
+                zoomed: None,
+            }))
+            .expect("the layout applies");
+        state
+            .apply(ServerMessage::Panes(vec![PaneInfo {
+                pane,
+                profile: "generic".into(),
+                name: "build".into(),
+                task: Some("test it".into()),
+                cwd: "/".into(),
+            }]))
+            .expect("the pane metadata applies");
+        state
+            .apply(ServerMessage::Attention(vec![PaneAttention {
+                pane,
+                state: AttentionState::NeedsInput,
+                source: cloo_proto::AttentionSource::Bell,
+                acknowledged: false,
+            }]))
+            .expect("the attention applies");
+        state
+            .apply(ServerMessage::Damage {
+                pane,
+                rows: vec![
+                    RowUpdate {
+                        row: 0,
+                        cells: vec![
+                            Cell {
+                                ch: 'a',
+                                ..Cell::default()
+                            };
+                            8
+                        ],
+                    },
+                    RowUpdate {
+                        row: 1,
+                        cells: vec![
+                            Cell {
+                                ch: 'b',
+                                ..Cell::default()
+                            };
+                            8
+                        ],
+                    },
+                ],
+            })
+            .expect("the grid damage applies");
+
+        let spans = state.spans();
+        assert_eq!(spans[0].at, Point::new(0, 0), "the tab row is fixed");
+        assert_eq!(
+            spans[1].at,
+            Point::new(0, 1),
+            "the header is above the grid"
+        );
+        assert_eq!(
+            spans[2].at,
+            Point::new(0, 2),
+            "the grid starts below chrome"
+        );
+        assert_eq!(spans[2].cells[0].ch, 'a');
+        assert_eq!(spans[3].at, Point::new(0, 3));
+        assert_eq!(spans[3].cells[0].ch, 'b');
+        assert_eq!(
+            spans.last().map(|span| span.at),
+            Some(Point::new(0, 4)),
+            "the status row owns the last outer-terminal row"
+        );
+        assert_eq!(state.screen.hit(0, 2).pane(), Some(pane));
+    }
+
+    fn hello_tabs() -> Vec<TabSummary> {
+        vec![TabSummary {
+            tab: TabId::new(1),
+            title: "shell".into(),
+            active: true,
+        }]
     }
 }
