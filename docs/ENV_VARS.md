@@ -45,9 +45,10 @@ warns and does the same, and a failed `SIGHUP` reload retains the preceding vali
 ## Maintainer Release Credential
 
 The repository-root `.env` is not application configuration. It may contain `NPM_TOKEN` only for
-an explicitly user-authorized, non-interactive release of the public `clooterminal` package. A
-maintainer may instead use `npm login` for a direct terminal release; never print, log, commit, or
-persist the token value. See [`RELEASING.md`](RELEASING.md) for the active publication procedure.
+an explicitly user-authorized release of the public `clooterminal` package. A maintainer may
+instead use `npm login` for a direct terminal release; a valid token still does not bypass any
+publish-OTP policy. Never print, log, commit, or persist the token value. See
+[`RELEASING.md`](RELEASING.md) for the active publication procedure.
 
 ---
 

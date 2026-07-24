@@ -68,7 +68,8 @@ npm publish dist/npm/clooterminal-0.0.4.tgz --access public
 Publish the native package first. Do not rerun a successful `npm publish`: a published version
 cannot be overwritten. If the native package succeeds and the launcher fails, resolve the launcher
 issue and publish only that missing tarball. A valid npm PAT may be used instead of interactive
-login for a non-interactive release, but it needs permission to publish both packages.
+login for authenticated reads and publishing, but it needs permission to publish both packages and
+does not bypass an account's publish-OTP policy.
 
 If the npm account requires two-factor authentication for writes, run the same two commands from
 the maintainer terminal with a current authenticator code, for example
