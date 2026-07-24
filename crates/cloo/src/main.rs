@@ -4,10 +4,11 @@
 //! `cloo-server` and `cloo-client` together. It holds no session state and
 //! emits no escape sequences of its own.
 //!
-//! Today it runs the M0 smoke path — one pane, one child, in-process, no
-//! socket — from an explicit launch. See [`local`] and [`cli`]. The client/server
-//! split over a Unix socket, and the `cloo attach` and `cloo new` subcommands
-//! that go with it, land in M1.
+//! Today the command-line surface exposes the M0 path — one pane, one child,
+//! in-process, with no socket — from an explicit launch. See [`local`] and
+//! [`cli`]. The daemon, attach transport, multipane model, and composed chrome
+//! are implemented below this surface; M6-06 connects their attached-client
+//! loop to the CLI.
 
 mod cli;
 mod local;
@@ -74,7 +75,8 @@ fn help() {
     println!("cloo {VERSION} — a terminal multiplexer");
     println!();
     println!("STATUS");
-    println!("    Pre-alpha. One local pane; no sessions, detach, or splits yet.");
+    println!("    Pre-alpha. This command currently runs one local pane.");
+    println!("    The attached multipane client loop is the next runtime milestone.");
     println!("    Design and roadmap: {REPO}");
     println!();
     println!("USAGE");

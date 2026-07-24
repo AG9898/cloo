@@ -54,9 +54,11 @@ boundary, which is what makes the emulation backend replaceable.
 | `cloo-client` | Attach, raw mode, renderer, theming, input decoding and routing | Hold authoritative session state, or encode input for a pane |
 | `cloo` | The binary; client-vs-server dispatch, CLI surface | Contain logic that belongs in a library crate |
 
-All six crates exist in the workspace and are wired together end to end as of M0-07: `crates/cloo`
-runs one local pane by composing `cloo-server`'s PTY reactor with `cloo-client`'s renderer. The
-remaining contents land across M1–M2.
+All six crates exist in the workspace. The current `cloo` command still runs the M0 local one-pane
+path by composing `cloo-server`'s PTY reactor with `cloo-client`'s renderer, while M1–M5,
+M6-01–M6-05, and M7-01–M7-02 have built the daemon, session, workspace, chrome-composition, and
+compatibility foundations below it. M6-06 is the remaining boundary: it exposes the attached
+client's composed multipane frame and input loop through the CLI.
 
 Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
 manifest, so every member inherits the same path and version. The crates sit in four layers:
@@ -803,11 +805,13 @@ non-blocking would change a file description the user's shell shares, and a shel
 non-blocking after cloo exits is a worse bug than a parked thread.
 
 M1-01 added the socket lifecycle beneath this loop, M1-02 added a daemon and an attach client over
-it, and M1-03 put the session task under both, but none of them changed the CLI surface: `cloo`
-with no arguments still runs one pane in-process. `cloo attach` and `cloo new` land with the
-detach and reattach flow in M1-05. `crates/cloo/tests/attach.rs` drives the daemon and the client
-against each other in the meantime — that end-to-end coverage has to live in the binary crate,
-since `cloo-server` may never name `cloo-client`, not even as a dev-dependency.
+it, and M1-03 put the session task under both. M2–M5 then added the workspace model and its client
+primitives; M6-04 routes layout actions over the wire and M6-05 composes the resulting multipane
+frame. The CLI surface still has not changed: `cloo` with no arguments runs one pane in-process.
+M6-06 is the work that exposes the attached-client loop, including its composed frame and decoded
+input, through that surface. `crates/cloo/tests/attach.rs` drives the daemon and the client against
+each other in the meantime — that end-to-end coverage has to live in the binary crate, since
+`cloo-server` may never name `cloo-client`, not even as a dev-dependency.
 
 ### Agent pane metadata and attention
 

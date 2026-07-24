@@ -10,10 +10,12 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning is complete and the design is settled. M0 is done: `cloo`
-launches `$SHELL` in a single local pane, renders it, and forwards input — in-process, with no
-socket and no detach. Agents here are implementing the rest of the M0–M7 roadmap in
-[`docs/PRD.md`](docs/PRD.md), starting at the daemon.
+**The project is pre-alpha.** Planning is complete and the design is settled. M0–M5,
+M6-01–M6-05, and M7-01–M7-02 are done in the tree; the daemon/session, workspace, chrome, and
+compatibility foundations are implemented and tested. The current `cloo` CLI still launches one
+local pane in-process, so **M6-06** is the active runtime boundary: connect the attached client's
+composed multipane frame and input loop to the command users run. See [`docs/PRD.md`](docs/PRD.md)
+and [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
 M0–M7 tasks.
@@ -85,8 +87,9 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-All six crates are wired together end to end as of M0-07; the rest of their contents land across
-M1–M2. Dependencies are declared in the root `[workspace.dependencies]` and are constrained by a
+All six crates are wired together. M1–M5, M6-01–M6-05, and M7-01–M7-02 supply the daemon,
+workspace, client primitives, and compatibility foundations; M6-06 remains the live attached-client
+integration. Dependencies are declared in the root `[workspace.dependencies]` and are constrained by a
 **layering**, not a single chain: `cloo` over {`cloo-server`, `cloo-client`} over `cloo-core` over
 the leaves {`cloo-proto`, `cloo-term`}. Any crate may name any crate in a lower layer — in
 particular every crate that speaks the wire names `cloo-proto` directly. Forbidden: a back-edge, a

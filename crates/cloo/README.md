@@ -2,9 +2,11 @@
 
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
 
-> **Pre-alpha.** `cloo` runs one local pane today: it launches `$SHELL`, renders it, and forwards
-> your keystrokes. There are no sessions, no detach, and no splits yet — closing the pane closes
-> cloo. The published 0.0.1 release predates even that and only prints its status.
+> **Pre-alpha.** The current `cloo` command runs one local pane: it launches `$SHELL`, renders it,
+> and forwards your keystrokes. The source tree already implements the daemon/session,
+> detach/reattach transport, multipane workspace model, and chrome composition, but M6-06 has not
+> yet connected that attached-client loop to the CLI. The published 0.0.1 release predates the
+> local-pane runtime and only prints its status.
 >
 > Design doc and roadmap: **https://github.com/AG9898/cloo**
 
@@ -15,25 +17,24 @@ cloo                       # run $SHELL in a single pane
 cloo <program> [args...]   # run a program in a single pane
 ```
 
-## What it will be
+## What is implemented in the source tree
 
 A client-server terminal multiplexer: a background daemon owns your shells, and thin clients
-attach to it. Detach a session, close your terminal, reattach later and find everything still
-running — the same core deal as tmux and zellij.
+attach to it. The daemon/attach transport is integration-tested to preserve a child across client
+disconnect and reconnect, and the server-side workspace model supports splits, tabs, profiles,
+attention, copy/search, themes, and mouse actions.
 
 The difference is what it looks like. cloo aims to be a functional peer of tmux and zellij while
 spending its effort on pane borders and focus treatment, a status bar worth looking at, theming
 that inherits your existing palette, and considered motion when panes split and close.
 
-## Planned features
+## Remaining before the workspace is usable from the CLI
 
-- Session detach / reattach, multiple clients on one session
-- Split panes on a binary tree layout, with resize
-- Tabs
-- tmux-style prefix keybindings, fully rebindable
-- Copy mode with scrollback search and system clipboard via OSC 52
-- Mouse: click to focus, drag to resize, scroll to scrollback
-- TOML config with live reload, and themes
+- M6-06: attached-client command and render loop
+- M6-07: live overlays, copy highlights, and motion
+- M7-03: manual Codex and Claude compatibility matrix
+- M7-04: supported-target packaging
+- M7-05: approved external brand application
 
 ## Platforms
 

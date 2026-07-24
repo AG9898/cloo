@@ -2,8 +2,9 @@
 
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
 
-> **This is a placeholder release.** cloo is in active design and there is no working binary yet.
-> Installing this package does nothing. It exists to reserve the name for the project below.
+> **This is a placeholder release.** Installing this package does nothing; it exists only to
+> reserve the name. The current source tree does have a runnable local-pane binary, but the npm
+> package will not expose it until supported-target packaging is complete.
 >
 > Follow development at **https://github.com/AG9898/cloo**
 
@@ -11,25 +12,23 @@ A terminal multiplexer in Rust — tmux's functionality, a better-looking termin
 as `clooterminal` because npm's package-name similarity filter rejects `cloo`. Once binaries
 ship, `npm i -g clooterminal` will put a `cloo` command on your PATH.
 
-## What it will be
+## Source-tree status
 
 cloo is a client-server terminal multiplexer: a background daemon owns your shells, and thin
-clients attach to it. Detach a session, close your terminal, reattach later and find everything
-still running — the same core deal as tmux and zellij.
+clients attach to it. The source tree implements and tests the daemon/session model, the attach
+transport, multipane workspace primitives, chrome composition, and terminal compatibility
+foundations. Its user-facing CLI still runs a single local pane while the attached-client render
+loop is connected.
 
 The difference is what it looks like. cloo aims to be a functional peer of tmux and zellij while
 spending its effort on pane borders and focus treatment, a status bar worth looking at, theming
 that inherits your existing palette, and considered motion when panes split and close.
 
-## Planned features
+## Remaining before release
 
-- Session detach / reattach, multiple clients on one session
-- Split panes on a binary tree layout, with resize
-- Tabs
-- tmux-style prefix keybindings, fully rebindable
-- Copy mode with scrollback search and system clipboard via OSC 52
-- Mouse: click to focus, drag to resize, scroll to scrollback
-- TOML config with live reload, and themes
+- Live attached-client render loop, overlays, copy highlights, and motion
+- Manual Codex and Claude compatibility matrix
+- Supported-target packaging and release media
 
 ## Platforms
 

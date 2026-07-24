@@ -1,12 +1,14 @@
 # PRD — cloo
 
-> **Status** (2026-07-20)
+> **Status** (2026-07-24)
 >
 > | Track | State |
 > |---|---|
 > | Shipped | Nothing published. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders. |
-> | In Progress | M0 — the local one-pane path works in the tree: `cloo` launches `$SHELL`, renders it, and forwards input, with no socket and no detach. See `docs/workboard.json`. |
-> | Planned | M1 — daemon, socket, detach and reattach. This is the first real demo. |
+> | Implemented in the tree | M0–M5, M6-01 through M6-05, and M7-01 through M7-02: the daemon/session model, attach transport, multipane workspace primitives, chrome composition, and deterministic compatibility fixtures are built and tested. |
+> | Current CLI | `cloo` still exposes the M0 local one-pane path. It launches `$SHELL`, an explicit program, or a profile, but does not yet run the attached multipane render loop. |
+> | Next | M6-06 wires the attached client’s composed frame, input, resize, and layout commands into the CLI. M6-07 then layers overlays, copy highlights, and motion onto that live loop. |
+> | Remaining release work | M7-03 records manual Codex/Claude compatibility, M7-04 packages supported targets, and M7-05 applies the approved external brand system. See `docs/workboard.json`. |
 
 ---
 
@@ -51,38 +53,47 @@ There is no admin role, no accounts, and no multi-tenancy. cloo is a single-user
   full-screen pane, renders it at a capped frame rate, and forwards keystrokes. **Done at M0-07.**
   No socket, no daemon, no detach — the child dies with the client, and that is the boundary M1
   moves.
-- Daemonize; Unix socket; one full-screen pane.
-- Client raw mode, damage rendering, input forwarding, terminal restore on exit.
+- Daemonize; Unix socket; one full-screen pane. **Implemented and integration-tested across
+  M1-01–M1-05.** The attach transport is not yet exposed by the `cloo` command.
+- Client raw mode, damage rendering, input forwarding, terminal restore on exit. **Implemented
+  across M0–M1**, with the live attached-client loop still pending in M6-06.
 - `SIGWINCH` → `Resize`. **Done at M1-03.** The signal becomes a command on the session task's
   single `mpsc<Command>`, which runs one layout pass and issues `TIOCSWINSZ` — one serialized
   owner for the grid-and-child race, and the same channel the local in-process path uses.
 - Baseline harness compatibility: alternate screen, bracketed paste, extended keys, focus events,
-  mouse routing, and a capability contract for terminal-dependent enhancements.
-- **Delivery boundary:** run a shell, kill the client, reattach, find it alive. **Done at
-  M1-05.**
+  mouse routing, and a capability contract for terminal-dependent enhancements. **Implemented
+  across M1-06–M1-09.**
+- **Delivery boundary:** the daemon/attach transport can run a shell, survive a disconnected
+  client, and reattach in the end-to-end test path. **Done at M1-05; CLI exposure remains M6-06.**
 
 Proving this before anything visual is the point. If the ownership model is wrong, M1 is when
 that should surface — not after splits are built on top of it.
 
 ### Phase 2 — M2–M4: make it livable and make it cloo
 
-- **M2 splits + agent panes.** Binary layout tree, focus movement, resize, close-and-collapse.
+- **M2 splits + agent panes.** **Implemented.** Binary layout tree, focus movement, resize, close-and-collapse.
   Profiles launch generic shells, Codex, or Claude Code with explicit pane names, task labels,
   working directories, and attention state. Prefix keymap hardcoded.
-- **M3 tabs + attention navigation.** Multiple named tabs per session, an always-on status bar,
+- **M3 tabs + attention navigation.** **Implemented.** Multiple named tabs per session, an always-on status bar,
   and a compact queue for panes that need input, completed with unread output, or failed.
-- **M4 config + theming.** TOML at `~/.config/cloo/config.toml`, keybinds parsed into the
+- **M4 config + theming.** **Implemented.** TOML at `~/.config/cloo/config.toml`, keybinds parsed into the
   `Action` enum, theme definitions, live reload on `SIGHUP`. The dedicated visual-identity pass.
 
 ### Phase 3 — M5–M7: v1 completion
 
-- **M5 copy mode + search.** Server-side, since scrollback lives there: vim-ish motions,
+- **M5 copy mode + search.** **Implemented.** Server-side, since scrollback lives there: vim-ish motions,
   selection, regex search with match highlighting, clipboard out via OSC 52 through the client.
-- **M6 mouse.** SGR mode 1006. Click-to-focus, border drag to resize, wheel to scrollback, plus
-  pass-through to apps that requested mouse themselves.
-- **M7 hardening + packaging.** True color, reconnect races, `$TERM`/terminfo, optional
-  outer-terminal effects, and the full compatibility matrix. Then the npm wrapper with prebuilt
-  per-platform binaries.
+- **M6 mouse and live client integration.** Mouse ownership, click-to-focus, divider drag, wheel
+  actions, wire command routing, and composed multipane frames are implemented. **M6-06** is the
+  remaining live attached-client render loop; **M6-07** layers overlays, copy highlights, and
+  motion onto it.
+- **M7 hardening + packaging.** True-color detection, reconnect/resize-race handling, and the
+  deterministic compatibility fixture suite are implemented. The manual compatibility matrix,
+  release packaging, and external brand application remain.
+
+The runtime integration boundary is deliberate: many workspace capabilities are implemented below
+the binary, but the current `cloo` command still starts the local one-pane path. It will not show
+tabs, headers, status chrome, splits, or themes until M6-06 connects the attached client loop.
 
 ### Out of Scope
 
