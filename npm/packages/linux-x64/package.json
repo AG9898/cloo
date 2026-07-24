@@ -1,0 +1,13 @@
+{
+  "name": "clooterminal-linux-x64",
+  "version": "0.0.2",
+  "description": "cloo native binary for Linux x64",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AG9898/cloo.git"
+  },
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin/cloo"]
+}

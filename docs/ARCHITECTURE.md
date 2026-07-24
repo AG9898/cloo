@@ -1271,7 +1271,13 @@ of scope for v1.
 
 The npm package name is `clooterminal`, not `cloo` — npm's similarity filter rejects `cloo` as
 too close to existing packages. The installed command is `cloo` either way, via the `bin` field.
-See [`DECISIONS.md`](DECISIONS.md) — RESOLVED-05.
+`npm/bin/cloo.js` resolves the one matching optional dependency, which contains only the native
+`cloo` executable. `scripts/package-npm.sh` packages a release binary built for a named Rust
+target without an install hook. The artifact workflow runs the four native target triples —
+`aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
+`x86_64-unknown-linux-gnu` — then uploads the resulting npm tarballs. It deliberately has no
+registry-publish step; publishing stays an explicit maintainer action. See
+[`DECISIONS.md`](DECISIONS.md) — RESOLVED-05.
 
 See [`ENV_VARS.md`](ENV_VARS.md) for the runtime variable matrix.
 

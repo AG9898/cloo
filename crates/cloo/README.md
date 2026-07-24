@@ -31,7 +31,6 @@ that inherits your existing palette, and considered motion when panes split and 
 
 - M6-07: live overlays, copy highlights, and motion
 - M7-03: manual Codex and Claude compatibility matrix
-- M7-04: supported-target packaging
 - M7-05: approved external brand application
 
 ## Platforms

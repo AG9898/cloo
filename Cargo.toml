@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
@@ -12,11 +12,11 @@ repository = "https://github.com/AG9898/cloo"
 homepage = "https://github.com/AG9898/cloo"
 
 [workspace.dependencies]
-cloo-proto = { path = "crates/cloo-proto", version = "0.0.1" }
-cloo-term = { path = "crates/cloo-term", version = "0.0.1" }
-cloo-core = { path = "crates/cloo-core", version = "0.0.1" }
-cloo-server = { path = "crates/cloo-server", version = "0.0.1" }
-cloo-client = { path = "crates/cloo-client", version = "0.0.1" }
+cloo-proto = { path = "crates/cloo-proto", version = "0.0.2" }
+cloo-term = { path = "crates/cloo-term", version = "0.0.2" }
+cloo-core = { path = "crates/cloo-core", version = "0.0.2" }
+cloo-server = { path = "crates/cloo-server", version = "0.0.2" }
+cloo-client = { path = "crates/cloo-client", version = "0.0.2" }
 
 # Pinned exactly, never a caret range: the emulation backend is a bought
 # dependency and upgrades are deliberate. See docs/DECISIONS.md RESOLVED-02.

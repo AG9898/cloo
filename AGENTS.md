@@ -83,7 +83,7 @@ docs/
   workboard.schema.json  JSON Schema for the queue
   workboard.md      Workboard field definitions and usage rules
 npm/
-  package.json   The `clooterminal` npm package (name reservation, no bin yet)
+  package.json   The `clooterminal` npm launcher and optional native package metadata
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
@@ -425,8 +425,9 @@ Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md
 cloo ships as a locally installed binary through two channels:
 
 - **crates.io** — `cloo`, built from source via `cargo install cloo`.
-- **npm** — `clooterminal`, prebuilt per-platform binaries as optional deps (esbuild/swc
-  pattern). Not yet wired up; the published package is a name reservation with no `bin` entry.
+- **npm** — `clooterminal`, a `cloo` launcher with prebuilt per-platform binaries as optional
+  dependencies (esbuild/swc pattern). The artifact workflow packages the four supported targets
+  without publishing them.
 
 **Agents must never publish to either registry.** Both are irreversible and public: npm allows
 unpublishing only within 72 hours and burns the name afterward, and crates.io versions cannot
@@ -483,7 +484,7 @@ the `bin` field. Registry availability is not proof a name is publishable.
 
 ### 2026-07-20 — Intra-workspace deps carry both a path and a version
 The five library crates are declared once in the root `[workspace.dependencies]` with
-`{ path = "…", version = "0.0.1" }` and pulled in as `cloo-core.workspace = true`. A path-only
+`{ path = "…", version = "0.0.2" }` and pulled in as `cloo-core.workspace = true`. A path-only
 dependency builds locally but makes the crate unpublishable to crates.io, so the version is not
 optional even though nothing is published yet.
 
