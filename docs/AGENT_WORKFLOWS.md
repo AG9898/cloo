@@ -244,5 +244,7 @@ Before a supported profile is claimed compatible, test it manually in an install
 6. Verify unsupported outer-terminal effects degrade without corrupting the pane.
 
 The deterministic escape-sequence fixture suite described in [`TESTING.md`](TESTING.md) is the
-automated gate. Real Codex and Claude Code smoke runs are versioned manual evidence, not CI
-dependencies.
+automated gate. As of M7-02 it lives in `crates/cloo-server/tests/compat.rs`, with one scripted
+child per row of this matrix — screens, paste, keys, focus, mouse, effects, and resize — driven
+through the session actor and asserting cloo's semantics with no vendor CLI or account. Real Codex
+and Claude Code smoke runs are versioned manual evidence, not CI dependencies.

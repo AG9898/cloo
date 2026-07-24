@@ -945,3 +945,13 @@ whose size changed makes `DamageTracker` resend every row, a full-width row is n
 stale narrow cache. Assert it by waiting for a `Damage` row of the exact expected width (40 then
 80). Keep the scripted child a plain `read _; exit 0` — the grid reflow alone carries the width, so
 the child never needs to print, but it must still exit or the daemon join hangs.
+
+### 2026-07-24 — A dropped session handle makes the actor block the whole runtime on teardown
+`crates/cloo-server/tests/compat.rs` hung the entire `#[tokio::test]` (current-thread) runtime when
+its effects fixture destructured `SpawnedSession { mut events, .. }` and let the `handle` drop: the
+actor's command channel closed, `run` hit `Step::Command(None) => break`, and the cleanup path calls
+a *blocking* `reactor.wait()` on the surviving pane — a child stuck in `read _` never exits, so the
+single runtime thread wedged and no other future (including the test's own drain) could run. Keep the
+handle alive for the whole test, and let a child that must be drained exit on its own rather than
+block on `read`. Other tests only survive this because they *finish* and let runtime-drop abort the
+detached actor; a test that awaits after the handle drops does not get that reprieve.
