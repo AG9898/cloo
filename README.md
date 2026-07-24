@@ -102,6 +102,7 @@ Code without inferring their state from terminal text.
 - [Architecture](docs/ARCHITECTURE.md)
 - [Terminal style guide](docs/STYLEGUIDE.md)
 - [Brand system and source kit](docs/BRANDING.md)
+- [Maintainer npm release runbook](docs/RELEASING.md)
 - [Agent workflows and compatibility](docs/AGENT_WORKFLOWS.md)
 - [V1 implementation workboard](docs/workboard.json)
 - [UI handoff and source mock](references/design_handoff_cloo_ui/README.md)

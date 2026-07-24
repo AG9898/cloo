@@ -20,6 +20,7 @@ moving any file under `docs/`, update this file in the same commit.
 | [`docs/TESTING.md`](TESTING.md) | Test strategy, how to run, file inventory, and writing new tests |
 | [`docs/STYLEGUIDE.md`](STYLEGUIDE.md) | Canonical terminal-chrome visual language and degradation rules |
 | [`docs/BRANDING.md`](BRANDING.md) | Canonical external brand-mark system, applied surfaces, and export rules |
+| [`docs/RELEASING.md`](RELEASING.md) | Maintainer-only npm publication runbook and verification checklist |
 | [`docs/AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md) | Coding-harness profiles, attention states, and compatibility contract |
 | [`docs/workboard.json`](workboard.json) | Active task queue (canonical board) |
 | [`docs/workboard.schema.json`](workboard.schema.json) | JSON Schema contract for workboard structure and required task fields |
