@@ -321,6 +321,22 @@ Both were confirmed non-vacuous by breaking each half of `PtyReactor::resize` in
 the test fail. A degenerate resize — zero rows, which real terminals report mid-drag — has its own
 test asserting the child is still alive and still at its old geometry.
 
+The reconnect/resize race is hardened in M7-01 with two more fixtures in the same file, aimed at
+the multi-client minimum-size negotiation rather than the single-client `TIOCSWINSZ` path:
+
+- A narrower client joins, dragging the session down so the already-attached survivor's grid
+  reflows to the smaller width; the narrow client then *detaches*, and the survivor must receive a
+  full-width redraw rather than a cache left stuck at the narrow width. Both directions are
+  asserted by waiting for a `Damage` row exactly the expected width — 40 cells, then 80.
+- Two clients attached at different sizes both converge on the negotiated minimum width, which is
+  the "two clients stay visually consistent" success criterion made assertable: a 50-cell row must
+  reach *both*, not each client drawing its own size.
+
+True-colour detection is `cloo-client::capabilities::truecolor_from_env`, a pure two-argument
+function unit-tested directly (M7-01): each standard `COLORTERM` value in any case and a `*-direct`
+`TERM` entry establish it, while a `256color`-only terminal and an unrelated `COLORTERM` value do
+not — the ambiguous case answers `false`, because a wrongly claimed truecolor corrupts the screen.
+
 Input routing, as of M1-07, is covered at three levels because the property spans all three. The
 *decoder* is unit tested in `cloo-client::input`: one fixture per negotiated mode's request and
 its matching reset, one per mouse report kind, sequences split across reads held rather than

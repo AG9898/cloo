@@ -239,6 +239,32 @@ impl fmt::Display for CapsError {
 
 impl std::error::Error for CapsError {}
 
+/// Whether `term` and `colorterm` together establish 24-bit (true) color.
+///
+/// This is the whole of true-color detection, kept as one pure named function
+/// so the single signal that turns off the renderer's 256-colour downsample is
+/// testable in isolation and is byte-for-byte the same on the attach path and
+/// the local-pane path. It reads only these two conventions terminals actually
+/// set, and infers nothing beyond them:
+///
+/// - `COLORTERM` is `truecolor` or `24bit`, case-insensitively — the variable a
+///   capable terminal exports for exactly this purpose.
+/// - `TERM` names a direct-colour terminfo entry, which by convention carries
+///   `truecolor` or `direct` in its name (`xterm-direct`, `tmux-direct`) and
+///   encodes 24-bit colour in the entry rather than in the environment.
+///
+/// A `256color` entry establishes nothing here: 256 indexed colours are not
+/// 24-bit, and claiming a truecolor a terminal cannot draw corrupts the screen,
+/// whereas the documented downsample fallback never does. When in doubt this
+/// answers `false`, because `false` degrades safely and `true` does not.
+#[must_use]
+pub fn truecolor_from_env(term: &str, colorterm: &str) -> bool {
+    colorterm.eq_ignore_ascii_case("truecolor")
+        || colorterm.eq_ignore_ascii_case("24bit")
+        || term.contains("truecolor")
+        || term.contains("direct")
+}
+
 /// Decides what the outer terminal can draw, for a client that is attaching.
 ///
 /// Only capabilities that can be established without writing a query sequence
@@ -262,13 +288,8 @@ pub fn attach_caps(term: Option<&str>, colorterm: Option<&str>) -> Result<TermCa
     }
     let colorterm = colorterm.unwrap_or("");
 
-    let truecolor = colorterm.eq_ignore_ascii_case("truecolor")
-        || colorterm.eq_ignore_ascii_case("24bit")
-        || term.contains("truecolor")
-        || term.contains("direct");
-
     Ok(TermCaps {
-        truecolor,
+        truecolor: truecolor_from_env(term, colorterm),
         // Universal enough among terminals that report a `TERM` at all, and
         // harmless where unsupported: an unrecognized private mode is ignored.
         bracketed_paste: true,
@@ -364,6 +385,22 @@ mod tests {
     #[test]
     fn a_direct_color_term_entry_also_establishes_truecolor() {
         assert!(caps_from_env(Some("xterm-direct"), None).truecolor);
+    }
+
+    #[test]
+    fn truecolor_detection_reads_only_its_two_signals() {
+        // Either standard `COLORTERM` value, in any case, establishes it.
+        assert!(truecolor_from_env("xterm-256color", "truecolor"));
+        assert!(truecolor_from_env("xterm-256color", "24bit"));
+        assert!(truecolor_from_env("xterm-256color", "TrueColor"));
+        // A direct-colour terminfo entry establishes it with no `COLORTERM`.
+        assert!(truecolor_from_env("xterm-direct", ""));
+        assert!(truecolor_from_env("tmux-direct", ""));
+        // 256 indexed colours are not 24-bit, and an unrelated `COLORTERM`
+        // value is not one of the two that mean truecolor.
+        assert!(!truecolor_from_env("xterm-256color", ""));
+        assert!(!truecolor_from_env("xterm-256color", "8bit"));
+        assert!(!truecolor_from_env("", ""));
     }
 
     #[test]

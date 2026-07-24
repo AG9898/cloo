@@ -935,3 +935,13 @@ through a coalescing channel.
 The repository-root `.env` holds only the maintainer's `NPM_TOKEN` for an explicitly
 user-authorized `clooterminal` release. It is gitignored and must never be printed, logged,
 committed, or used for any command other than that one publish; cloo itself never reads it.
+
+### 2026-07-24 — The reconnect/resize race is a survivor-redraw property, provable without a client render loop
+There is no client-side render loop wiring wire messages into a `Grid` yet (M6-04+ composition is
+still to come), so M7-01's reconnect/resize race is asserted at the wire in `crates/cloo/tests/
+attach.rs` using the raw `Attached` transport. The corruption to rule out is a geometry
+disagreement: a departing narrower client must resize the *survivor* back up, and because a pane
+whose size changed makes `DamageTracker` resend every row, a full-width row is never applied to a
+stale narrow cache. Assert it by waiting for a `Damage` row of the exact expected width (40 then
+80). Keep the scripted child a plain `read _; exit 0` — the grid reflow alone carries the width, so
+the child never needs to print, but it must still exit or the daemon join hangs.

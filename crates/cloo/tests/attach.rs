@@ -229,6 +229,15 @@ async fn client_with_caps(socket: &Path, caps: TermCaps) -> Attached<UnixStream>
         .expect("the attach must succeed")
 }
 
+/// Attaches at a specific outer-terminal size, so a test can drive the session's
+/// minimum-size negotiation across several clients.
+async fn client_sized(socket: &Path, size: Size) -> Attached<UnixStream> {
+    tokio::time::timeout(PATIENCE, attach(socket, size, TermCaps::default(), None))
+        .await
+        .expect("the attach must not hang")
+        .expect("the attach must succeed")
+}
+
 /// Reads until one matching typed outer-terminal request arrives.
 async fn await_effect(
     attached: &mut Attached<UnixStream>,
@@ -623,6 +632,79 @@ async fn a_degenerate_resize_leaves_the_session_alone() {
         .expect("input must reach the child");
     await_text(&mut attached, "24 80").await;
 
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+/// The reconnect/resize race: a narrower client joins and then leaves, and the
+/// survivor's grid must track the negotiated minimum both down and back up.
+///
+/// If a departing client's resize did not reach the survivor, a later full-width
+/// row would be applied against a cache still stuck at the narrow width — the
+/// exact geometry disagreement that corrupts a client grid. Asserting the
+/// survivor sees rows first 40 then 80 cells wide is asserting that never happens.
+#[tokio::test]
+async fn a_shrinking_client_that_leaves_redraws_the_survivor_at_full_width() {
+    let dir = TempDir::new("resize-race");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, "printf 'ready\\n'; read _; exit 0");
+
+    let mut wide = client_sized(&socket, Size::new(80, 24)).await;
+    assert_eq!(wide.size(), Size::new(80, 24));
+    await_text(&mut wide, "ready").await;
+
+    // A narrower client drags the session down to the component-wise minimum.
+    // The survivor's grid reflows to 40 columns with it.
+    let narrow = client_sized(&socket, Size::new(40, 24)).await;
+    await_row_width(&mut wide, 40).await;
+
+    // The narrow client detaches. With only the wide client left the session
+    // grows back to 80, and that resize must reach the survivor as a full redraw
+    // rather than leaving its cache at the stale narrow width.
+    narrow
+        .detach()
+        .await
+        .expect("the narrow client detaches cleanly");
+    await_row_width(&mut wide, 80).await;
+
+    // Let the child exit so the daemon can reap and finish.
+    wide.send_input(b"\n".to_vec())
+        .await
+        .expect("input must reach the child");
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+/// Two clients at different sizes render the same session, so both must converge
+/// on the negotiated minimum rather than each drawing its own width.
+///
+/// Per-client independent sizing is explicitly out of scope; the guarantee is
+/// that two attached clients stay visually consistent. A row exactly 50 cells
+/// wide reaching *both* is that consistency made assertable.
+#[tokio::test]
+async fn two_clients_at_different_sizes_share_the_negotiated_minimum() {
+    let dir = TempDir::new("shared-min");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, "printf 'ready\\n'; read _; exit 0");
+
+    let mut wide = client_sized(&socket, Size::new(80, 24)).await;
+    await_text(&mut wide, "ready").await;
+
+    // The smaller client sets the minimum for the whole session, including the
+    // client that was already attached at a larger size.
+    let mut narrow = client_sized(&socket, Size::new(50, 24)).await;
+    await_row_width(&mut narrow, 50).await;
+    await_row_width(&mut wide, 50).await;
+
+    wide.send_input(b"\n".to_vec())
+        .await
+        .expect("input must reach the child");
     tokio::time::timeout(PATIENCE, daemon)
         .await
         .expect("the daemon must exit")

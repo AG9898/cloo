@@ -262,6 +262,11 @@ snapshot; a slow terminal can therefore delay only its own resync, never the ses
 The session geometry is the component-wise minimum of usable attached-client sizes. When a client
 attaches, disconnects, or resizes, the coordinator relays that minimum through the session task;
 with no clients it keeps the last usable geometry so a detached child is not surprised by a resize.
+This is what keeps two clients visually consistent, and it is also the reconnect/resize race the
+M7-01 fixtures pin down: a narrower client that joins shrinks the survivor's grid, and when it
+*leaves* the survivor must be redrawn back at the full width — because a pane whose size changed
+resends every row, a client cache is never left applying a full-width row against a stale narrow
+grid. The grid corruption those fixtures rule out is exactly that geometry disagreement.
 
 #### The session task
 
@@ -548,6 +553,10 @@ status a parent shell sees is the one it expects from a signalled child.
 `COLORTERM`. Detection is a pure function of those two values so it is testable without touching
 the process environment, and it claims only what can be established without writing a query
 sequence and waiting for a reply — everything else stays false and takes its documented fallback.
+True-colour detection is factored out as the named `truecolor_from_env` (M7-01): `COLORTERM` is
+`truecolor` or `24bit` (case-insensitive), or `TERM` names a direct-colour entry (`*-direct`). A
+`256color` entry is not truecolor, so it establishes nothing — a wrongly claimed truecolor corrupts
+the screen while the downsample fallback never does, so the ambiguous case answers `false`.
 Both belong to the client, never to session state, which is what keeps a capability difference
 between two attached clients from becoming something the server has to model.
 
