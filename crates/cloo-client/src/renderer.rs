@@ -449,6 +449,38 @@ impl Renderer {
         self.output()
     }
 
+    /// Draws a transition over chrome spans while leaving pane-content spans
+    /// untouched.
+    ///
+    /// `chrome` is parallel to `spans`: `true` selects the transition painter
+    /// and `false` keeps the server-owned pane cache at its ordinary rendition.
+    /// Keeping one ordered list is important — a settled layered frame must be
+    /// byte-identical to [`render_spans`](Self::render_spans), and partitioning
+    /// the list into two paint passes would change that byte stream even where
+    /// the painted cells did not overlap.
+    pub fn render_layered_transition(
+        &mut self,
+        spans: &[Span],
+        chrome: &[bool],
+        phase: Phase,
+        frame: Color,
+        cursor: Option<Cursor>,
+    ) -> &[u8] {
+        debug_assert_eq!(spans.len(), chrome.len());
+        self.out.clear();
+        self.out.push_str("\x1b[?25l");
+        for (span, chrome) in spans.iter().zip(chrome) {
+            if *chrome {
+                self.paint_span_in_phase(span, phase, frame);
+            } else {
+                self.paint_span(span);
+            }
+        }
+        self.finish(cursor);
+
+        self.output()
+    }
+
     /// Draws one positioned run of chrome cells.
     fn paint_span(&mut self, span: &Span) {
         self.paint_span_in_phase(span, Phase::settled(MotionKind::Focus), Color::Default);
@@ -1103,6 +1135,50 @@ mod tests {
         assert_eq!(
             settled, ordinary,
             "an interrupted transition must draw what no motion would"
+        );
+    }
+
+    #[test]
+    fn a_settled_layered_transition_keeps_pane_contents_out_of_motion() {
+        let spans = [
+            Span::new(
+                Point::new(0, 0),
+                row_of("header", Color::Rgb(0xbb, 0x9a, 0xf7), CellAttrs::BOLD),
+            ),
+            Span::new(
+                Point::new(0, 1),
+                row_of("child", Color::Rgb(0xc0, 0xca, 0xf5), CellAttrs::NONE),
+            ),
+        ];
+        let mut renderer = Renderer::new(truecolor());
+        let ordinary = renderer.render_spans(&spans, None).to_vec();
+        let settled = renderer
+            .render_layered_transition(
+                &spans,
+                &[true, false],
+                Phase::settled(MotionKind::Focus),
+                Color::Rgb(0x0f, 0x0f, 0x16),
+                None,
+            )
+            .to_vec();
+        assert_eq!(settled, ordinary);
+
+        let start =
+            crate::motion::Motion::default().start(MotionKind::Focus, std::time::Instant::now());
+        let moving = renderer
+            .render_layered_transition(
+                &spans,
+                &[true, false],
+                start,
+                Color::Rgb(0x0f, 0x0f, 0x16),
+                None,
+            )
+            .to_vec();
+        let moving = String::from_utf8(moving).expect("rendered terminal bytes are UTF-8");
+        assert!(moving.contains("child"));
+        assert!(
+            moving.contains("38;2;192;202;245"),
+            "the pane body keeps its original foreground"
         );
     }
 

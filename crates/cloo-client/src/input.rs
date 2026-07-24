@@ -1316,8 +1316,10 @@ pub enum KeyRoute {
     Command(Action),
     /// A chord after the prefix that no binding names. It is *consumed*: the
     /// user meant it for cloo, and passing it to the child instead is how a
-    /// mistyped command ends up in a shell.
-    Unbound,
+    /// mistyped command ends up in a shell. The unchanged bytes let client-only
+    /// surfaces claim a deliberately local shortcut without sending it across
+    /// the wire.
+    Unbound(Vec<u8>),
 }
 
 /// The prefix state machine: which keys are the pane's and which are cloo's.
@@ -1399,7 +1401,7 @@ impl KeyRouter {
                         } else if key == self.keymap.prefix() {
                             routes.push(KeyRoute::Pane(keys[index..index + len].to_vec()));
                         } else {
-                            routes.push(KeyRoute::Unbound);
+                            routes.push(KeyRoute::Unbound(keys[index..index + len].to_vec()));
                         }
                         index += len;
                     }
@@ -1407,7 +1409,7 @@ impl KeyRouter {
                     // cloo, so the rest of the run is consumed rather than
                     // delivered to a child as a fragment.
                     None => {
-                        routes.push(KeyRoute::Unbound);
+                        routes.push(KeyRoute::Unbound(keys[index..].to_vec()));
                         index = keys.len();
                     }
                 }
@@ -2615,7 +2617,7 @@ mod tests {
         let mut router = router();
         assert_eq!(
             router.feed(b"\x02Q"),
-            vec![KeyRoute::Pending, KeyRoute::Unbound]
+            vec![KeyRoute::Pending, KeyRoute::Unbound(b"Q".to_vec())]
         );
         assert!(!router.is_pending());
     }
@@ -2624,7 +2626,7 @@ mod tests {
     fn an_undecodable_sequence_after_the_prefix_is_consumed_whole() {
         assert_eq!(
             router().feed(b"\x02\x1b[?1;2c"),
-            vec![KeyRoute::Pending, KeyRoute::Unbound],
+            vec![KeyRoute::Pending, KeyRoute::Unbound(b"\x1b[?1;2c".to_vec())],
             "a fragment of what the user meant for cloo is not the child's"
         );
     }
@@ -2673,7 +2675,7 @@ mod tests {
         );
         assert_eq!(
             router.feed(b"\x02x"),
-            vec![KeyRoute::Pending, KeyRoute::Unbound],
+            vec![KeyRoute::Pending, KeyRoute::Unbound(b"x".to_vec())],
             "an unbound default is unbound, not a fallback to what it was"
         );
     }

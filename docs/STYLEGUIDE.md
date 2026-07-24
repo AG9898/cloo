@@ -233,6 +233,12 @@ command field, and a profile that fails validation is not offered rather than of
 at launch. The pane-details view shows only what the server reported — profile, name, task, working
 directory, and state — and a task the user never set is absent rather than blank.
 
+The attached client layers an open overlay over the already composed tab, header, pane-body, and
+status spans: it dims that existing frame without changing any character, then paints the raised
+overlay box above it. Its keys are consumed locally — they never become pane input. The currently
+available client-local entries are `C-b s` for the session surface and `C-b i` (or `C-b ?`) for the
+focused pane's details; they use the same Escape dismissal and keyboard vocabulary as every overlay.
+
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:
 
@@ -281,6 +287,11 @@ a duration, so two clients ticking together paint the same cells.
 Because a transition advances only on the render tick, and a tick that lands on a step already
 drawn produces no frame at all, sampling faster than the frame budget costs nothing: a whole
 transition is at most eight frames however often a busy loop asks.
+
+On the attached loop, a changed resolved layout starts focus, split, or close motion; input and a
+resize settle an in-flight transition before handling their work. The renderer applies the phase
+only to chrome and overlay spans. Pane-grid cells, copy highlights, and their text stay at their
+ordinary rendition throughout, so motion cannot make child output flicker or alter a selection.
 
 ## Density and Accessibility
 

@@ -22,28 +22,34 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cloo_core::keymap::Keymap;
 use cloo_proto::{
-    Action, AttentionState, ClientMessage, CursorShape, FrameStream, LayoutSnapshot, MouseEvent,
-    PROTOCOL_VERSION, PaneAttention, PaneId, PaneInfo, PaneModes, Point, ProtoError, ServerMessage,
-    SessionId, Size, StreamError, TabSummary, TermCaps, check_version,
+    Action, AttentionState, ClientMessage, CopyModeState, CursorShape, FrameStream, LayoutSnapshot,
+    MouseEvent, PROTOCOL_VERSION, PaneAttention, PaneId, PaneInfo, PaneModes, Point, ProtoError,
+    ServerMessage, SessionId, Size, StreamError, TabSummary, TermCaps, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
 use crate::capabilities::{CapsError, detect_attach_caps};
 use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome};
+use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
     ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
-    OuterModes, PaneArea, ScreenLayout, route_mouse,
+    OuterModes, PaneArea, ScreenLayout, overlay_action, route_mouse,
 };
+use crate::motion::{Motion, MotionKind, Phase};
 use crate::outer::current_size;
+use crate::overlay::{
+    Overlay, OverlayOutcome, PaneDetails, SessionEntry, backdrop_span, overlay_spans,
+};
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
 use crate::resize::ResizeWatch;
+use crate::theme::{Theme, ThemeToken};
 
 /// The render tick shared with the daemon: roughly 60 frames per second.
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -486,6 +492,8 @@ async fn live_loop(
     let mut chrome = ChromeMouse::new();
     let mut frames = tokio::time::interval(FRAME_INTERVAL);
     frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut motion = Motion::default();
+    let mut phase = None;
     let mut dirty = true;
     let mut detaching = false;
 
@@ -507,19 +515,28 @@ async fn live_loop(
             }
             Step::Server(Some(ServerMessage::Exit(status))) => {
                 if dirty {
-                    draw(&mut out, &mut renderer, &state)?;
+                    draw(&mut out, &mut renderer, &state, phase)?;
                 }
                 return Ok(status);
             }
             Step::Server(Some(ServerMessage::Detached)) | Step::Server(None) => return Ok(0),
             Step::Server(Some(message)) => {
+                let transition = state.transition_for(&message);
                 dirty |= state.apply(message)?;
                 state.tabs = attached.tabs().to_vec();
+                if let Some(kind) = transition {
+                    phase = Some(motion.start(kind, Instant::now()));
+                    dirty = true;
+                }
             }
             Step::Input(bytes) => {
+                if let Some(settled) = motion.interrupt() {
+                    phase = Some(settled);
+                }
+                let overlay_was_open = state.overlay.is_some();
                 if route(
                     &mut attached,
-                    &state,
+                    &mut state,
                     &mut chrome,
                     &mut keys,
                     &mut decoder,
@@ -529,9 +546,16 @@ async fn live_loop(
                 {
                     detaching = true;
                 }
+                if overlay_was_open != state.overlay.is_some() {
+                    phase = Some(motion.start(MotionKind::Overlay, Instant::now()));
+                }
+                dirty = true;
             }
             Step::InputClosed => input_open = false,
             Step::Resized(size) => {
+                if let Some(settled) = motion.interrupt() {
+                    phase = Some(settled);
+                }
                 state.set_outer_size(size);
                 attached
                     .send_resize(session_size(size))
@@ -541,12 +565,24 @@ async fn live_loop(
             }
             Step::Frame => {
                 if let Some(InputEvent::Keys(bytes)) = decoder.flush() {
-                    if route_keys(&mut attached, &mut keys, bytes).await? {
+                    if let Some(settled) = motion.interrupt() {
+                        phase = Some(settled);
+                    }
+                    let overlay_was_open = state.overlay.is_some();
+                    if route_keys(&mut attached, &mut keys, &mut state, bytes).await? {
                         detaching = true;
                     }
+                    if overlay_was_open != state.overlay.is_some() {
+                        phase = Some(motion.start(MotionKind::Overlay, Instant::now()));
+                    }
+                    dirty = true;
+                }
+                if let Some(next) = motion.tick(Instant::now()) {
+                    phase = Some(next);
+                    dirty = true;
                 }
                 if dirty {
-                    draw(&mut out, &mut renderer, &state)?;
+                    draw(&mut out, &mut renderer, &state, phase)?;
                     dirty = false;
                 }
             }
@@ -585,7 +621,8 @@ struct LiveState {
     grids: BTreeMap<PaneId, Grid>,
     cursors: BTreeMap<PaneId, (Point, CursorShape, bool)>,
     modes: BTreeMap<PaneId, PaneModes>,
-    copy_mode: Option<PaneId>,
+    copy_mode: Option<CopyModeState>,
+    overlay: Option<Overlay>,
     queue: AttentionQueue,
     screen: ScreenLayout,
 }
@@ -604,6 +641,7 @@ impl LiveState {
             cursors: BTreeMap::new(),
             modes: BTreeMap::new(),
             copy_mode: None,
+            overlay: None,
             queue: AttentionQueue::new(),
             screen: ScreenLayout::new(outer_size)
                 .tab_row(0)
@@ -654,8 +692,8 @@ impl LiveState {
                 Ok(true)
             }
             ServerMessage::CopyMode(copy_mode) => {
-                self.copy_mode = copy_mode.map(|state| state.pane);
-                Ok(false)
+                self.copy_mode = copy_mode;
+                Ok(true)
             }
             ServerMessage::Modes { pane, modes } => {
                 self.modes.insert(pane, modes);
@@ -684,6 +722,25 @@ impl LiveState {
                 .tab_row(0)
                 .status_row(outer_size.rows.saturating_sub(1));
         }
+    }
+
+    /// The layout change a freshly received message makes legible.
+    ///
+    /// Only resolved layout changes start motion. Damage, attention, and copy
+    /// state all arrive on data clocks and must never turn a busy child into an
+    /// animation source.
+    fn transition_for(&self, message: &ServerMessage) -> Option<MotionKind> {
+        let ServerMessage::Layout(next) = message else {
+            return None;
+        };
+        let previous = self.layout.as_ref()?;
+        if previous.panes.len() < next.panes.len() {
+            return Some(MotionKind::Split);
+        }
+        if previous.panes.len() > next.panes.len() {
+            return Some(MotionKind::Close);
+        }
+        (previous.focused != next.focused).then_some(MotionKind::Focus)
     }
 
     /// Rebuilds client-owned areas from the server's one resolved layout pass.
@@ -783,14 +840,135 @@ impl LiveState {
                 Some(FramePane::new(area, grid, header))
             })
             .collect::<Vec<_>>();
-        compose_frame(
+        let mut spans = compose_frame(
             self.outer_size,
             &self.tabs,
             self.session,
             &panes,
             &self.queue,
             ChromeOptions::default(),
-        )
+        );
+        if let Some(copy_mode) = &self.copy_mode {
+            if let (Some(area), Some(grid)) = (
+                self.areas.get(&copy_mode.pane),
+                self.grids.get(&copy_mode.pane),
+            ) {
+                spans.extend(highlight_spans(
+                    Point::new(area.x, area.y),
+                    grid,
+                    copy_mode,
+                    Theme::storm(),
+                ));
+                spans.push(copy_status_span(
+                    Point::new(0, self.outer_size.rows.saturating_sub(1)),
+                    copy_mode,
+                    self.outer_size.cols,
+                    Theme::storm(),
+                ));
+            }
+        }
+        spans
+    }
+
+    /// Composes normal pane contents plus client-owned visual layers.
+    fn frame(&self) -> RenderFrame {
+        let base = self.spans();
+        let mut chrome: Vec<bool> = base.iter().map(|span| !self.is_body_span(span)).collect();
+        let mut spans = if self.overlay.is_some() {
+            base.iter()
+                .map(|span| backdrop_span(span.at, &span.cells, Theme::storm()))
+                .collect()
+        } else {
+            base
+        };
+
+        if let Some(overlay) = &self.overlay {
+            let size = self.overlay_size(overlay);
+            let at = Point::new(
+                self.outer_size.cols.saturating_sub(size.cols) / 2,
+                self.outer_size.rows.saturating_sub(size.rows) / 2,
+            );
+            let overlays = overlay_spans(at, overlay, size, Theme::storm());
+            chrome.extend(std::iter::repeat_n(true, overlays.len()));
+            spans.extend(overlays);
+        }
+
+        RenderFrame { spans, chrome }
+    }
+
+    /// Starts a client-local overlay after an otherwise unbound prefix chord.
+    ///
+    /// These shortcuts never cross the wire. The session switcher can honestly
+    /// list only the session this daemon exposed, while pane details are built
+    /// solely from the server metadata and attention already cached locally.
+    fn open_overlay(&mut self, chord: &[u8]) -> bool {
+        let next = match chord {
+            b"s" => Some(Overlay::sessions(vec![
+                SessionEntry::new(self.session, "current", self.areas.len()).attached(true),
+            ])),
+            b"i" | b"?" => self
+                .layout
+                .as_ref()
+                .and_then(|layout| layout.focused)
+                .and_then(|pane| {
+                    self.panes.get(&pane).map(|info| {
+                        Overlay::details(PaneDetails::from_info(
+                            info,
+                            self.attention
+                                .get(&pane)
+                                .map_or(Attention::Unknown, |state| attention(state.state)),
+                        ))
+                    })
+                }),
+            _ => None,
+        };
+        if let Some(next) = next {
+            self.overlay = Some(next);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Applies an open overlay's own keyboard vocabulary.
+    fn apply_overlay_keys(&mut self, keys: &[u8]) -> bool {
+        let Some(action) = overlay_action(keys) else {
+            return false;
+        };
+        let Some(overlay) = self.overlay.as_mut() else {
+            return false;
+        };
+        match overlay.apply(action) {
+            OverlayOutcome::Open => true,
+            OverlayOutcome::Dismissed
+            | OverlayOutcome::SwitchSession(_)
+            | OverlayOutcome::Launch(_) => {
+                self.overlay = None;
+                true
+            }
+        }
+    }
+
+    /// Whether a span is pane content or a client-owned visual layer.
+    fn is_body_span(&self, span: &crate::renderer::Span) -> bool {
+        self.areas.values().any(|area| {
+            let end = span
+                .at
+                .col
+                .saturating_add(u16::try_from(span.cells.len()).unwrap_or(u16::MAX));
+            span.at.row >= area.y
+                && span.at.row < area.y.saturating_add(area.size.rows)
+                && span.at.col >= area.x
+                && end <= area.x.saturating_add(area.size.cols)
+        })
+    }
+
+    fn overlay_size(&self, overlay: &Overlay) -> Size {
+        let rows = u16::try_from(overlay.len().saturating_add(2))
+            .unwrap_or(u16::MAX)
+            .clamp(2, 12)
+            .min(self.outer_size.rows);
+        Size::new(self.outer_size.cols.min(60), rows)
     }
 
     /// The focused pane's cursor, translated into outer-terminal coordinates.
@@ -811,6 +989,12 @@ impl LiveState {
     }
 }
 
+/// One frame, with the server-owned pane cells marked apart from chrome.
+struct RenderFrame {
+    spans: Vec<crate::renderer::Span>,
+    chrome: Vec<bool>,
+}
+
 /// Turns the wire's explicit attention state into the chrome vocabulary.
 const fn attention(state: AttentionState) -> Attention {
     match state {
@@ -828,16 +1012,27 @@ fn draw(
     out: &mut io::Stdout,
     renderer: &mut Renderer,
     state: &LiveState,
+    phase: Option<Phase>,
 ) -> Result<(), AttachRunError> {
-    out.write_all(renderer.render_spans(&state.spans(), state.cursor()))
-        .map_err(AttachRunError::Output)?;
+    let frame = state.frame();
+    let rendered = match phase {
+        Some(phase) => renderer.render_layered_transition(
+            &frame.spans,
+            &frame.chrome,
+            phase,
+            Theme::storm().color(ThemeToken::Frame),
+            state.cursor(),
+        ),
+        None => renderer.render_spans(&frame.spans, state.cursor()),
+    };
+    out.write_all(rendered).map_err(AttachRunError::Output)?;
     out.flush().map_err(AttachRunError::Output)
 }
 
 /// Sends one decoded event through the correct client or application path.
 async fn route(
     attached: &mut Attached<UnixStream>,
-    state: &LiveState,
+    state: &mut LiveState,
     chrome: &mut ChromeMouse,
     keys: &mut KeyRouter,
     decoder: &mut InputDecoder,
@@ -846,7 +1041,7 @@ async fn route(
     let mut detach = false;
     for event in decoder.feed(&bytes) {
         match event {
-            InputEvent::Keys(bytes) => detach |= route_keys(attached, keys, bytes).await?,
+            InputEvent::Keys(bytes) => detach |= route_keys(attached, keys, state, bytes).await?,
             InputEvent::Paste(text) => {
                 attached.send_paste(text).await.map_err(AttachError::from)?
             }
@@ -869,7 +1064,12 @@ async fn route(
                     }
                     MouseRoute::Chrome(target) => {
                         if let Some(action) = chrome.feed(&state.screen, target, &report) {
-                            detach |= apply_chrome(attached, action, state.copy_mode).await?;
+                            detach |= apply_chrome(
+                                attached,
+                                action,
+                                state.copy_mode.as_ref().map(|copy_mode| copy_mode.pane),
+                            )
+                            .await?;
                         }
                     }
                 }
@@ -883,8 +1083,15 @@ async fn route(
 async fn route_keys(
     attached: &mut Attached<UnixStream>,
     keys: &mut KeyRouter,
+    state: &mut LiveState,
     bytes: Vec<u8>,
 ) -> Result<bool, AttachRunError> {
+    if state.overlay.is_some() {
+        keys.reset();
+        let _ = state.apply_overlay_keys(&bytes);
+        return Ok(false);
+    }
+
     let mut detach = false;
     for route in keys.feed(&bytes) {
         match route {
@@ -903,7 +1110,10 @@ async fn route_keys(
                 .send_command(action)
                 .await
                 .map_err(AttachError::from)?,
-            KeyRoute::Pending | KeyRoute::Unbound => {}
+            KeyRoute::Unbound(chord) => {
+                let _ = state.open_overlay(&chord);
+            }
+            KeyRoute::Pending => {}
         }
     }
     Ok(detach)
@@ -958,7 +1168,7 @@ fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cloo_proto::{Cell, PaneRect, RowUpdate, TabId};
+    use cloo_proto::{Cell, CellAttrs, CopySelection, PaneRect, RowUpdate, ScrollPoint, TabId};
     use tokio::io::duplex;
 
     /// The server half of a handshake, scripted by the test.
@@ -1315,6 +1525,129 @@ mod tests {
             "the status row owns the last outer-terminal row"
         );
         assert_eq!(state.screen.hit(0, 2).pane(), Some(pane));
+    }
+
+    #[test]
+    fn a_live_copy_state_layers_highlights_and_its_status_over_the_composed_frame() {
+        let pane = PaneId::new(1);
+        let mut state = LiveState::new(Size::new(9, 5), SessionId::new(1), hello_tabs());
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: vec![PaneRect {
+                    pane,
+                    x: 0,
+                    y: 0,
+                    size: Size::new(9, 2),
+                }],
+                focused: Some(pane),
+                zoomed: None,
+            }))
+            .expect("the layout applies");
+        state
+            .apply(ServerMessage::Damage {
+                pane,
+                rows: vec![RowUpdate {
+                    row: 0,
+                    cells: "copy this"
+                        .chars()
+                        .map(|ch| Cell {
+                            ch,
+                            ..Cell::default()
+                        })
+                        .collect(),
+                }],
+            })
+            .expect("the grid damage applies");
+        state
+            .apply(ServerMessage::CopyMode(Some(CopyModeState {
+                pane,
+                viewport_top: 12,
+                cursor: ScrollPoint::new(12, 5),
+                selection: Some(CopySelection {
+                    anchor: ScrollPoint::new(12, 0),
+                    head: ScrollPoint::new(12, 3),
+                }),
+                query: None,
+                matches: Vec::new(),
+            })))
+            .expect("copy state applies");
+
+        let spans = state.spans();
+        assert!(spans.iter().any(|span| {
+            span.at == Point::new(0, 2)
+                && span.cells.iter().map(|cell| cell.ch).collect::<String>() == "copy"
+        }));
+        assert_eq!(
+            spans
+                .last()
+                .expect("copy mode replaces the status row")
+                .cells
+                .iter()
+                .take(4)
+                .map(|cell| cell.ch)
+                .collect::<String>(),
+            "COPY"
+        );
+    }
+
+    #[test]
+    fn an_open_overlay_dims_the_composed_frame_and_keeps_its_keys_client_side() {
+        let pane = PaneId::new(1);
+        let mut state = LiveState::new(Size::new(20, 6), SessionId::new(1), hello_tabs());
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: vec![PaneRect {
+                    pane,
+                    x: 0,
+                    y: 0,
+                    size: Size::new(20, 3),
+                }],
+                focused: Some(pane),
+                zoomed: None,
+            }))
+            .expect("the layout applies");
+        state
+            .apply(ServerMessage::Damage {
+                pane,
+                rows: vec![RowUpdate {
+                    row: 0,
+                    cells: vec![
+                        Cell {
+                            ch: 'x',
+                            ..Cell::default()
+                        };
+                        20
+                    ],
+                }],
+            })
+            .expect("the grid damage applies");
+        assert!(state.open_overlay(b"s"));
+        assert!(state.apply_overlay_keys(b"j"), "an overlay owns navigation");
+
+        let frame = state.frame();
+        assert!(frame.spans.iter().any(|span| {
+            span.cells
+                .iter()
+                .map(|cell| cell.ch)
+                .collect::<String>()
+                .starts_with("  sessions 1/1")
+        }));
+        assert!(
+            frame.chrome.iter().rev().take(3).all(|chrome| *chrome),
+            "the overlay is client chrome, never a pane span"
+        );
+        assert!(
+            frame.spans.iter().any(|span| {
+                span.at == Point::new(0, 2)
+                    && span
+                        .cells
+                        .first()
+                        .is_some_and(|cell| cell.attrs.contains(CellAttrs::DIM))
+            }),
+            "the pane body remains visible beneath a dimmed backdrop"
+        );
     }
 
     fn hello_tabs() -> Vec<TabSummary> {
