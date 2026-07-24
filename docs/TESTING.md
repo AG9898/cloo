@@ -28,25 +28,23 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Release Package Verification
 
-The artifact workflow uses native runners for all four release targets. It runs the following
-steps for each target, producing an npm optional-dependency tarball without publishing it:
+The maintainer release path builds the Linux x64 native package locally, then packs the JavaScript
+launcher without publishing either package:
 
 ```bash
-cargo build --locked --release --package cloo --target <rust-target>
-scripts/package-npm.sh <rust-target>
+cargo build --locked --release --package cloo --target x86_64-unknown-linux-gnu
+scripts/package-npm.sh x86_64-unknown-linux-gnu
 ```
 
-`<rust-target>` is one of `aarch64-apple-darwin`, `x86_64-apple-darwin`,
-`aarch64-unknown-linux-gnu`, or `x86_64-unknown-linux-gnu`. On a supported development host,
-also pack the JavaScript launcher with:
+On the supported Linux x64 development host, pack the JavaScript launcher with:
 
 ```bash
 mkdir -p dist/npm
 (cd npm && npm pack --ignore-scripts --pack-destination ../dist/npm)
 ```
 
-These commands create only ignored `dist/` artifacts. The workflow uploads those artifacts for
-maintainer review and contains no registry-publish command.
+These commands create only ignored `dist/` artifacts. The maintainer then follows
+[`RELEASING.md`](RELEASING.md) to publish the two inspected tarballs from the terminal.
 
 ---
 

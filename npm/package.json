@@ -1,6 +1,6 @@
 {
   "name": "clooterminal",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.",
   "keywords": [
     "terminal",
@@ -33,18 +33,13 @@
     "assets/cloo-product-128.svg"
   ],
   "optionalDependencies": {
-    "clooterminal-darwin-arm64": "0.0.3",
-    "clooterminal-darwin-x64": "0.0.3",
-    "clooterminal-linux-arm64": "0.0.3",
-    "clooterminal-linux-x64": "0.0.3"
+    "clooterminal-linux-x64": "0.0.4"
   },
   "engines": {
     "node": ">=18"
   },
-  "os": [
-    "darwin",
-    "linux"
-  ],
+  "os": ["linux"],
+  "cpu": ["x64"],
   "private": false,
   "publishConfig": {
     "access": "public"

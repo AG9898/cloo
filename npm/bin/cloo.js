@@ -4,12 +4,7 @@
 const { spawnSync } = require("node:child_process");
 
 const PACKAGES = {
-  darwin: {
-    arm64: "clooterminal-darwin-arm64",
-    x64: "clooterminal-darwin-x64",
-  },
   linux: {
-    arm64: "clooterminal-linux-arm64",
     x64: "clooterminal-linux-x64",
   },
 };

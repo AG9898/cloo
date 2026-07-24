@@ -7,8 +7,8 @@
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.
 
 > **Pre-alpha.** This package installs the `cloo` command and selects the native binary for your
-> supported macOS or Linux platform. The 0.0.1 name-reservation release did not include a binary;
-> use 0.0.3 or later for the working command.
+> supported Linux x64 platform. The 0.0.1 name-reservation release did not include a binary;
+> use 0.0.4 or later for the working command.
 >
 > Follow development at **https://github.com/AG9898/cloo**
 
@@ -28,16 +28,14 @@ The difference is what it looks like. cloo aims to be a functional peer of tmux 
 spending its effort on pane borders and focus treatment, a status bar worth looking at, theming
 that inherits your existing palette, and considered motion when panes split and close.
 
-## Remaining before release
+## Current distribution
 
-- Live overlays, copy highlights, and motion
-- Manual Codex and Claude compatibility matrix
-- External brand application and release media
+The published package currently supports Linux x64 only. macOS and Linux ARM users can build from
+source; those prebuilt npm packages are not distributed yet.
 
 ## Platforms
 
-macOS and Linux. The published optional binary packages cover `darwin-arm64`, `darwin-x64`,
-`linux-arm64`, and `linux-x64`. Windows is out of scope for v1.
+Linux x64. Windows is out of scope for v1.
 
 ## License
 

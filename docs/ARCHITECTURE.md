@@ -1281,20 +1281,18 @@ cloo is a locally installed binary. There is no hosted environment.
 | Channel | Artifact | Notes |
 |---|---|---|
 | crates.io | `cloo` | `cargo install cloo` — builds from source |
-| npm | `clooterminal` | Prebuilt per-platform binaries as optional deps, esbuild/swc pattern |
+| npm | `clooterminal` | Linux x64 prebuilt binary as an optional dependency |
 | Local dev | `cargo run -p cloo` | — |
 
-Supported platforms: `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`. Windows is out
-of scope for v1.
+The npm distribution currently supports `linux-x64`. Other Unix platforms can build from source;
+Windows is out of scope for v1.
 
 The npm package name is `clooterminal`, not `cloo` — npm's similarity filter rejects `cloo` as
 too close to existing packages. The installed command is `cloo` either way, via the `bin` field.
-`npm/bin/cloo.js` resolves the one matching optional dependency, which contains only the native
-`cloo` executable. `scripts/package-npm.sh` packages a release binary built for a named Rust
-target without an install hook. The artifact workflow runs the four native target triples —
-`aarch64-apple-darwin`, `x86_64-apple-darwin`, `aarch64-unknown-linux-gnu`, and
-`x86_64-unknown-linux-gnu` — then uploads the resulting npm tarballs. It deliberately has no
-registry-publish step; publishing stays an explicit maintainer action. See
+`npm/bin/cloo.js` resolves the Linux x64 optional dependency, which contains only the native
+`cloo` executable. `scripts/package-npm.sh x86_64-unknown-linux-gnu` packages that release
+binary without an install hook. A maintainer publishes the two resulting tarballs directly from a
+terminal; see [`RELEASING.md`](RELEASING.md). Other prebuilt targets are deferred. See
 [`DECISIONS.md`](DECISIONS.md) — RESOLVED-05.
 
 See [`ENV_VARS.md`](ENV_VARS.md) for the runtime variable matrix.

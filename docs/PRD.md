@@ -4,11 +4,11 @@
 >
 > | Track | State |
 > |---|---|
-> | Shipped | Nothing published from this tree. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders; the working release line starts at 0.0.3. |
+> | Shipped | `clooterminal` 0.0.4 is the working npm package for Linux x64; the older 0.0.1 package remains the name-reservation placeholder. `cloo` 0.0.1 on crates.io is also a placeholder. |
 > | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
 > | Current CLI | `cloo` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
 > | Next | M8 is planned: plain `cloo` will attach to, or safely create, one persistent default workspace; the attached UI will expose the essential workspace actions and their shortcuts. Manual release validation and registry publishing remain maintainer-owned actions. |
-> | Packaging | M7-04 builds native artifacts for the four supported targets and packages a `cloo` npm launcher plus optional native dependencies. M7-05 adds the approved product mark to the distribution README. The workflow uploads artifacts only; it does not publish either registry. |
+> | Packaging | M7-04 supplies the package structure. The working npm distribution is published directly from a maintainer terminal and currently carries a Linux x64 native dependency only; other prebuilt targets remain deferred. M7-05 adds the approved product mark to the distribution README. |
 > | Remaining release work | M8 is active pre-release product work. Publishing to npm or crates.io still requires explicit maintainer authorization. |
 
 ---
@@ -141,8 +141,8 @@ Explicitly not in v1:
   outer-terminal graphics may degrade without breaking the harness.
 - The author uses cloo as their only multiplexer for a full week without reaching for tmux.
 - Every visual treatment degrades legibly on a plain 16-color TTY.
-- Installing via `npm i -g clooterminal` or `cargo install cloo` yields a working `cloo`
-  command on all four supported platform targets.
+- Installing via `npm i -g clooterminal` yields a working `cloo` command on Linux x64; the
+  other prebuilt platform targets remain deferred.
 - From a clean supported terminal, `cloo` attaches to the default workspace in one command;
   a concurrent invocation joins that same workspace rather than creating a second daemon.
 - The first attached frame makes split and help controls discoverable without interpreting a
@@ -152,8 +152,8 @@ Explicitly not in v1:
 
 ## Constraints
 
-- **macOS and Linux only.** Windows is out of scope for v1 and no code should carry Windows
-  compatibility shims.
+- **Linux x64 distribution only.** Other Unix platforms remain source-build targets for now;
+  Windows is out of scope for v1 and no code should carry Windows compatibility shims.
 - **Terminal emulation is a dependency, not a rewrite.** See [`DECISIONS.md`](DECISIONS.md)
   RESOLVED-02. Hand-rolling the ANSI/CSI parser is off the table.
 - **Motion must be frame-budgeted and interruptible**, with a reduce-motion setting. Animation

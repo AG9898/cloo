@@ -428,9 +428,8 @@ Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md
 cloo ships as a locally installed binary through two channels:
 
 - **crates.io** — `cloo`, built from source via `cargo install cloo`.
-- **npm** — `clooterminal`, a `cloo` launcher with prebuilt per-platform binaries as optional
-  dependencies (esbuild/swc pattern). The artifact workflow packages the four supported targets
-  without publishing them.
+- **npm** — `clooterminal`, a `cloo` launcher with the Linux x64 native binary as an optional
+  dependency. A maintainer builds and publishes the two tarballs directly from the terminal.
 
 **Agents must never publish to either registry.** Both are irreversible and public: npm allows
 unpublishing only within 72 hours and burns the name afterward, and crates.io versions cannot

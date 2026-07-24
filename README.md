@@ -10,7 +10,7 @@
 
 <br><br>
 
-<code>PRE-ALPHA</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>RUST</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>MACOS + LINUX</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>LOCAL-FIRST</code>
+<code>PRE-ALPHA</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>RUST</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>LINUX X64</code>&nbsp;&nbsp;·&nbsp;&nbsp;<code>LOCAL-FIRST</code>
 
 </div>
 
@@ -124,15 +124,14 @@ npm install -g clooterminal   # prebuilt binaries
 cargo install cloo            # build from source
 ```
 
-No supported release install is available yet. The currently published 0.0.1 `clooterminal`
-package is only a name reservation, but the artifact workflow now builds the 0.0.3 npm launcher
-and its four optional native packages; publishing those artifacts remains a maintainer action.
-The npm package uses `clooterminal` because npm rejects `cloo` through its package-name
-similarity filter.
+The first working npm release is `clooterminal` 0.0.4 for Linux x64. It installs the `cloo`
+command without a downloader or install hook. The npm package uses `clooterminal` because npm
+rejects `cloo` through its package-name similarity filter.
 
 ## Platforms
 
-macOS and Linux. Windows is out of scope for v1.
+The npm distribution currently supports Linux x64 only. macOS and Linux ARM builds remain
+source-only; Windows is out of scope for v1.
 
 ## License
 
