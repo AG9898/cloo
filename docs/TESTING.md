@@ -710,6 +710,27 @@ Manual smoke runs of installed Codex and Claude Code cover one pane, splits, zoo
 detach/reattach, large paste, mouse, and attention notification. Record the harness and terminal
 versions in the test result when a manual behavior changes.
 
+#### Recorded manual smoke — 2026-07-24
+
+The recorded baseline used cloo `0.0.1` at commit `0650bd0` in util-linux `script` 2.39.3's
+pseudoterminal with `TERM=xterm-256color`; `COLORTERM` and `TERM_PROGRAM` were unset. This is an
+xterm-compatible fallback run, not a claim for a separately identified terminal emulator. The
+harnesses were Codex CLI `0.145.0` and Claude Code `2.1.218`.
+
+For each harness, an isolated foreground server accepted an attachment, the harness reached its
+first interactive frame, and a bracketed `matrix-paste` payload reached its input without a
+submission. The same session split with `C-b %`, zoomed and unzoomed with `C-b z`, detached with
+`C-b d`, and reattached successfully. Closing the harness pane, exiting the survivor, and observing
+the isolated socket disappear completed both runs. No prompt was submitted, and no credential,
+account, or model output was collected.
+
+This evidence confirms the vendor TUI startup, paste, layout, and lifecycle path. The
+alternate-screen, extended-key, focus, SGR mouse, typed-effect, and resize rows remain asserted by
+`crates/cloo-server/tests/compat.rs`; they must not be made contingent on a live vendor account.
+Inline graphics are optional: the xterm-compatible baseline offered none, and cloo suppresses the
+typed unavailable-graphics effect without forwarding a graphics payload. Thus a missing Codex pet
+or comparable optional graphic is a successful degradation, not a smoke failure.
+
 The consolidated deterministic suite is `crates/cloo-server/tests/compat.rs`, added at M7-02 — the
 automated gate the [compatibility contract](AGENT_WORKFLOWS.md#compatibility-matrix) refers to. It
 drives one scripted `sh -c` child per category the contract names, through the session actor, and

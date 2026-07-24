@@ -248,3 +248,31 @@ automated gate. As of M7-02 it lives in `crates/cloo-server/tests/compat.rs`, wi
 child per row of this matrix — screens, paste, keys, focus, mouse, effects, and resize — driven
 through the session actor and asserting cloo's semantics with no vendor CLI or account. Real Codex
 and Claude Code smoke runs are versioned manual evidence, not CI dependencies.
+
+### Recorded smoke results
+
+2026-07-24 recorded the first manual baseline against cloo `0.0.1` at commit `0650bd0`. The outer
+terminal was the util-linux `script` 2.39.3 pseudoterminal (`TERM=xterm-256color`; `COLORTERM` and
+`TERM_PROGRAM` unset), which exercises the documented xterm-compatible fallback rather than
+claiming a vendor-specific terminal integration. The run used installed Codex CLI `0.145.0` and
+Claude Code `2.1.218`; no prompt was submitted and no credential, account, or model result is part
+of this record.
+
+| Check | Codex CLI 0.145.0 | Claude Code 2.1.218 |
+|---|---|---|
+| First interactive frame through cloo | Pass | Pass |
+| Bracketed `matrix-paste` reaches the harness input without submission | Pass | Pass |
+| Split, zoom, unzoom, detach, and reattach in a live daemon session | Pass | Pass |
+| Close the harness pane, exit the survivor, and remove only that session socket | Pass | Pass |
+
+The manual sequence started an isolated `cloo server`, launched the harness from its initial shell,
+sent the bracketed paste payload, ran `C-b %`, `C-b z` twice, and detached with `C-b d`. A second
+attachment recovered the live layout; closing the harness and exiting the remaining shell stopped
+the daemon with its own socket removed. Focus/mouse reports, alternate-screen semantics, extended
+keys, effects, and resize remain covered by the deterministic fixture suite rather than a
+vendor-account-dependent manual interaction.
+
+Inline graphics remain optional and unavailable in this xterm-compatible baseline. cloo exposes no
+graphics payload or passthrough: an unavailable graphics request is a typed, suppressed effect, so
+Codex pets or any comparable optional display may be absent without breaking the harness or the
+session. The smoke run neither configured graphics nor recorded credentials.
