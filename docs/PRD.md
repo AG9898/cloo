@@ -4,7 +4,7 @@
 >
 > | Track | State |
 > |---|---|
-> | Shipped | `clooterminal` 0.0.4 is the working npm package for Linux x64; the older 0.0.1 package remains the name-reservation placeholder. `cloo` 0.0.1 on crates.io is also a placeholder. |
+> | Shipped | `clooterminal` 0.0.1 is a name-reservation placeholder. The Linux x64 0.0.4 package is prepared for maintainer publication; `cloo` 0.0.1 on crates.io is also a placeholder. |
 > | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
 > | Current CLI | `cloo` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
 > | Next | M8 is planned: plain `cloo` will attach to, or safely create, one persistent default workspace; the attached UI will expose the essential workspace actions and their shortcuts. Manual release validation and registry publishing remain maintainer-owned actions. |

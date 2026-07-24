@@ -124,9 +124,10 @@ npm install -g clooterminal   # prebuilt binaries
 cargo install cloo            # build from source
 ```
 
-The first working npm release is `clooterminal` 0.0.4 for Linux x64. It installs the `cloo`
-command without a downloader or install hook. The npm package uses `clooterminal` because npm
-rejects `cloo` through its package-name similarity filter.
+No supported release install is available yet. The published 0.0.1 `clooterminal` package is a
+name reservation; the prepared 0.0.4 Linux x64 package awaits maintainer publication. It installs
+the `cloo` command without a downloader or install hook. The npm package uses `clooterminal`
+because npm rejects `cloo` through its package-name similarity filter.
 
 ## Platforms
 
