@@ -45,10 +45,77 @@ fn main() -> ExitCode {
             }
         },
         Ok(cli::Invocation::Attach(request)) => attach(request),
+        Ok(cli::Invocation::Server(request)) => server(request),
         Err(err) => {
             eprintln!("cloo: {err}");
             eprintln!("Try 'cloo --help'.");
             ExitCode::from(EXIT_USAGE)
+        }
+    }
+}
+
+/// Runs one foreground daemon that owns the named session.
+///
+/// A server is deliberately not a terminal client: it neither enters raw mode
+/// nor enables reporting. Its initial generic pane starts at the conventional
+/// 80×24 until an attached terminal negotiates the session's real geometry.
+fn server(request: cli::ServerRequest) -> ExitCode {
+    let launch = match cli::Request::default().into_launch() {
+        Ok(launch) => launch,
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let socket = match cloo_server::socket::session_socket_path(&request.session) {
+        Ok(socket) => socket,
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            return ExitCode::from(EXIT_USAGE);
+        }
+    };
+    let listener = match cloo_server::socket::Listener::bind(&socket) {
+        Ok(listener) => listener,
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+    let size = cloo_proto::Size::new(
+        cloo_server::pty::PtyConfig::DEFAULT_COLS,
+        cloo_server::pty::PtyConfig::DEFAULT_ROWS,
+    );
+    let base = match cloo_server::pty::PtyConfig::session(size) {
+        Ok(base) => base,
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(err) => {
+            eprintln!("cloo: could not start the runtime: {err}");
+            return ExitCode::from(EXIT_FAILURE);
+        }
+    };
+
+    let outcome = runtime.block_on(async {
+        let mut daemon = cloo_server::daemon::Daemon::new(listener, &base, launch)?;
+        daemon.run().await
+    });
+    match outcome {
+        Ok(status) => match status.code() {
+            Some(code) => ExitCode::from(u8::try_from(code).unwrap_or(EXIT_FAILURE)),
+            None => ExitCode::from(EXIT_FAILURE),
+        },
+        Err(err) => {
+            eprintln!("cloo: {err}");
+            ExitCode::from(EXIT_FAILURE)
         }
     }
 }
@@ -104,6 +171,7 @@ fn help() {
     println!("    cloo                       run $SHELL in a single pane");
     println!("    cloo <program> [args...]   run a program in a single pane");
     println!("    cloo --profile <id>        run a launch profile in a single pane");
+    println!("    cloo server [session]      run a foreground daemon (default: default)");
     println!("    cloo attach [session]      attach to a daemon (default: default)");
     println!("    cloo [-V | --version]");
     println!("    cloo [-h | --help]");

@@ -10,11 +10,12 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning is complete and the design is settled. M0–M6-06 and
-M7-01–M7-02 are done in the tree; the daemon/session, workspace, chrome, attached-client runtime,
-and compatibility foundations are implemented and tested. Plain `cloo` still launches one local
-pane in-process, while `cloo attach [session]` joins the daemon with the composed multipane frame
-and input loop. See [`docs/PRD.md`](docs/PRD.md) and [`docs/workboard.json`](docs/workboard.json).
+**The project is pre-alpha.** Planning is complete and the design is settled. M0–M6-06, M6-08,
+and M7-01–M7-02 are done in the tree; the daemon/session, workspace, chrome, attached-client
+runtime, public server lifecycle, and compatibility foundations are implemented and tested. Plain
+`cloo` still launches one local pane in-process, `cloo server [session]` owns a daemon, and
+`cloo attach [session]` joins it with the composed multipane frame and input loop. See
+[`docs/PRD.md`](docs/PRD.md) and [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
 M0–M7 tasks.
@@ -41,7 +42,7 @@ cargo fmt --check    # verify
 cargo run -p cloo -- --help
 ```
 
-There is no server to start, no database, and no `.env` file.
+`cloo server [session]` starts a foreground daemon; there is no database and no `.env` file.
 
 ---
 
@@ -985,3 +986,9 @@ And `Action::ClosePane` carries no pane id — a bound `close-pane` names none �
 `SessionHandle::close(pane)`; it needs `Command::CloseFocused`, which resolves the target from the
 session's own focus, the keyboard's mirror of `Action::FocusPane` being the mouse's. None of this
 touched the wire (the `Action` variants already existed), so the handshake did not bump.
+
+### 2026-07-24 — Keep an attached test client alive until its final command is observed
+A foreground-server fixture that sent `exit` and immediately dropped `Attached` could close its
+socket before the daemon consumed the queued input, leaving the generic shell alive. Await frames
+until EOF after the command; that proves the session processed it and gives the foreground server a
+clean, ownership-driven shutdown instead of a signal-killed one.

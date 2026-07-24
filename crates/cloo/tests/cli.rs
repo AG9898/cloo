@@ -12,10 +12,13 @@
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
+
+use cloo_client::attach::attach;
+use cloo_proto::{Size, TermCaps};
 
 /// How long a smoke test waits for expected output before failing.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -47,6 +50,31 @@ impl TempConfig {
 }
 
 impl Drop for TempConfig {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// An isolated runtime directory for a foreground server test.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    fn new(tag: &str) -> Self {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let directory =
+            std::env::temp_dir().join(format!("cloo-cli-{tag}-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).expect("the temporary runtime directory is creatable");
+        Self(directory)
+    }
+
+    fn runtime_dir(&self) -> PathBuf {
+        self.0.join("runtime")
+    }
+}
+
+impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
@@ -196,6 +224,75 @@ fn spawn_on(tty: &Tty, args: &[&str]) -> std::process::Child {
         .expect("the cloo binary is built before its integration tests")
 }
 
+/// Runs `cloo server` on a pty without making that pty part of its protocol.
+fn spawn_server_on(tty: &Tty, runtime_dir: &Path, session: &str) -> std::process::Child {
+    let stdio = || {
+        Stdio::from(
+            tty.slave
+                .try_clone()
+                .expect("the slave descriptor can be duplicated"),
+        )
+    };
+    cloo()
+        .args(["server", session])
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("CLOO_SOCKET")
+        .env("TERM", "xterm-256color")
+        .spawn()
+        .expect("the cloo binary is built before its integration tests")
+}
+
+/// Runs `cloo attach` against a foreground server on a pty.
+fn spawn_attached_on(tty: &Tty, runtime_dir: &Path, session: &str) -> std::process::Child {
+    let stdio = || {
+        Stdio::from(
+            tty.slave
+                .try_clone()
+                .expect("the slave descriptor can be duplicated"),
+        )
+    };
+    cloo()
+        .args(["attach", session])
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("CLOO_SOCKET")
+        .env("TERM", "xterm-256color")
+        .env_remove("COLORTERM")
+        .spawn()
+        .expect("the cloo binary is built before its integration tests")
+}
+
+/// Waits for a foreground server to bind its session socket.
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("the server never bound {}", path.display());
+}
+
+/// Waits for a child without allowing a broken daemon to hang the whole suite.
+fn wait_for_exit(child: &mut std::process::Child, name: &str) -> std::process::ExitStatus {
+    let deadline = Instant::now() + TIMEOUT;
+    while Instant::now() < deadline {
+        if let Some(status) = child.try_wait().expect("the child remains waitable") {
+            return status;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    panic!("{name} did not exit before the deadline");
+}
+
 // -- The command line ------------------------------------------------------
 
 #[test]
@@ -234,6 +331,7 @@ fn help_documents_the_launch_options_and_the_built_in_profiles() {
         "--name",
         "--task",
         "--cwd",
+        "server [session]",
         "generic",
         "codex",
         "claude",
@@ -243,6 +341,99 @@ fn help_documents_the_launch_options_and_the_built_in_profiles() {
             "{expected} missing from:\n{stdout}"
         );
     }
+}
+
+#[test]
+fn foreground_server_owns_one_named_session_without_touching_its_terminal() {
+    let dir = TempDir::new("foreground-server");
+    let runtime_dir = dir.runtime_dir();
+    let socket_dir = runtime_dir.join("cloo");
+    std::fs::create_dir_all(&socket_dir).expect("the isolated socket directory is creatable");
+    let unrelated = socket_dir.join("other.sock");
+    std::fs::write(&unrelated, "keep").expect("the unrelated fixture is writable");
+    let socket = socket_dir.join("work.sock");
+
+    let server_tty = open_tty();
+    let mut server = spawn_server_on(&server_tty, &runtime_dir, "work");
+    wait_for_path(&socket);
+    assert!(
+        !is_raw(&server_tty.slave),
+        "a foreground server must not alter its terminal"
+    );
+
+    let duplicate = cloo()
+        .args(["server", "work"])
+        .env("XDG_RUNTIME_DIR", &runtime_dir)
+        .env_remove("CLOO_SOCKET")
+        .output()
+        .expect("the duplicate server command runs");
+    assert_eq!(duplicate.status.code(), Some(125));
+    assert!(
+        String::from_utf8_lossy(&duplicate.stderr).contains("already running"),
+        "the ownership refusal must explain how to recover"
+    );
+
+    let client_tty = open_tty();
+    let mut client = spawn_attached_on(&client_tty, &runtime_dir, "work");
+    read_until(&client_tty.master, "\x1b[?25l")
+        .unwrap_or_else(|seen| panic!("the public attach never reached the server; saw:\n{seen}"));
+    assert!(
+        is_raw(&client_tty.slave),
+        "an attached client enters raw mode"
+    );
+    let mut master = unsafe {
+        // SAFETY: `client_tty.master` outlives this wrapper, which never closes it.
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(client_tty.master.as_raw_fd()))
+    };
+    master
+        .write_all(b"\x02d")
+        .expect("the prefix detach reaches the attached client");
+    assert!(
+        wait_for_exit(&mut client, "attached client").success(),
+        "attach must detach cleanly"
+    );
+    assert!(
+        !is_raw(&client_tty.slave),
+        "attach restores the terminal after detaching"
+    );
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the test runtime builds");
+    runtime.block_on(async {
+        let mut attached = attach(&socket, Size::new(80, 24), TermCaps::default(), None)
+            .await
+            .expect("the detached foreground session accepts another client");
+        attached
+            .send_input(b"exit\r".to_vec())
+            .await
+            .expect("input reaches the generic pane");
+        tokio::time::timeout(TIMEOUT, async {
+            while attached
+                .recv()
+                .await
+                .expect("the foreground session stays connected")
+                .is_some()
+            {}
+        })
+        .await
+        .expect("the generic pane exits after its exit command");
+    });
+
+    assert!(
+        wait_for_exit(&mut server, "foreground server").success(),
+        "the server exits with its shell"
+    );
+    assert!(
+        !socket.exists(),
+        "the foreground server removes its own session socket"
+    );
+    assert!(
+        unrelated.exists(),
+        "the foreground server never removes another session's path"
+    );
 }
 
 #[test]

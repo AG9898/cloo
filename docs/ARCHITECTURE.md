@@ -54,10 +54,10 @@ boundary, which is what makes the emulation backend replaceable.
 | `cloo-client` | Attach, raw mode, renderer, theming, input decoding and routing | Hold authoritative session state, or encode input for a pane |
 | `cloo` | The binary; client-vs-server dispatch, CLI surface | Contain logic that belongs in a library crate |
 
-All six crates exist in the workspace. `cloo` retains the M0 local one-pane path, while
-`cloo attach [session]` connects the live attached client to an existing daemon. M1–M6-06 and
-M7-01–M7-02 provide the daemon, session, workspace, composed chrome, attached render loop, and
-compatibility foundations behind those two entry points.
+All six crates exist in the workspace. `cloo` retains the M0 local one-pane path, `cloo server
+[session]` starts and owns a daemon session, and `cloo attach [session]` connects the live attached
+client to it. M1–M6-06, M6-08, and M7-01–M7-02 provide the daemon, session, workspace, composed
+chrome, attached render loop, and compatibility foundations behind those entry points.
 
 Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
 manifest, so every member inherits the same path and version. The crates sit in four layers:
@@ -811,9 +811,13 @@ negotiates outer-terminal reporting, watches `SIGWINCH`, and reports the usable 
 daemon. Its client cache applies snapshot and damage clocks into `PaneArea`s, renders a composed
 frame at the shared 60fps cadence, and routes decoded paste, focus, mouse, prefix-keymap, and chrome
 actions over the appropriate wire message. Detach is a command rather than a PTY event, so restoring
-the outer terminal and reattaching never interrupts the child. `crates/cloo/tests/attach.rs` drives
-the binary, daemon, and client against each other because that end-to-end coverage must live in the
-composition root: `cloo-server` may never name `cloo-client`, not even as a dev-dependency.
+the outer terminal and reattaching never interrupts the child. M6-08 adds `cloo server [session]`,
+which resolves and exclusively owns the session socket, starts one generic pane at the conventional
+80×24 size, and serves independent attaches until that pane exits. The server is intentionally not a
+client: it never enters raw mode or enables outer-terminal reporting, and the first attached client
+negotiates the session's usable size. `crates/cloo/tests/attach.rs` drives the binary, daemon, and
+client against each other because that end-to-end coverage must live in the composition root:
+`cloo-server` may never name `cloo-client`, not even as a dev-dependency.
 
 ### Agent pane metadata and attention
 

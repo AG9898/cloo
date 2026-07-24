@@ -31,6 +31,8 @@ pub enum Invocation {
     Run(Request),
     /// Attach a terminal client to an existing session.
     Attach(AttachRequest),
+    /// Run the daemon that owns a named session.
+    Server(ServerRequest),
 }
 
 /// The session an attached client wants to render.
@@ -41,6 +43,24 @@ pub enum Invocation {
 pub struct AttachRequest {
     /// The named session, or `default` when omitted.
     pub session: String,
+}
+
+/// The session a foreground daemon will own.
+///
+/// The socket resolver owns validation because a session name becomes a file
+/// name there; this pure request holds exactly the words the user typed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerRequest {
+    /// The named session, or `default` when omitted.
+    pub session: String,
+}
+
+impl Default for ServerRequest {
+    fn default() -> Self {
+        Self {
+            session: "default".to_owned(),
+        }
+    }
 }
 
 impl Default for AttachRequest {
@@ -86,6 +106,8 @@ pub enum CliError {
     NoCurrentDir(String),
     /// `attach` accepts at most one optional session name.
     AttachArguments,
+    /// `server` accepts at most one optional session name.
+    ServerArguments,
 }
 
 impl core::fmt::Display for CliError {
@@ -109,6 +131,7 @@ impl core::fmt::Display for CliError {
                 write!(f, "could not read the current directory: {err}")
             }
             Self::AttachArguments => f.write_str("attach accepts at most one session name"),
+            Self::ServerArguments => f.write_str("server accepts at most one session name"),
         }
     }
 }
@@ -145,6 +168,9 @@ pub fn profile_ids() -> String {
 pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
     if args.first().is_some_and(|arg| arg == "attach") {
         return parse_attach(&args[1..]);
+    }
+    if args.first().is_some_and(|arg| arg == "server") {
+        return parse_server(&args[1..]);
     }
     let mut request = Request::default();
     let mut rest = args.iter();
@@ -192,6 +218,19 @@ fn parse_attach(args: &[String]) -> Result<Invocation, CliError> {
         [flag] if flag == "-h" || flag == "--help" => Ok(Invocation::Help),
         [flag] if flag.starts_with('-') => Err(CliError::UnknownFlag(flag.clone())),
         _ => Err(CliError::AttachArguments),
+    }
+}
+
+/// Parses the small server-only command surface.
+fn parse_server(args: &[String]) -> Result<Invocation, CliError> {
+    match args {
+        [] => Ok(Invocation::Server(ServerRequest::default())),
+        [session] if !session.starts_with('-') => Ok(Invocation::Server(ServerRequest {
+            session: session.clone(),
+        })),
+        [flag] if flag == "-h" || flag == "--help" => Ok(Invocation::Help),
+        [flag] if flag.starts_with('-') => Err(CliError::UnknownFlag(flag.clone())),
+        _ => Err(CliError::ServerArguments),
     }
 }
 
@@ -339,6 +378,32 @@ mod tests {
         assert_eq!(
             parse(&args(&["attach", "one", "two"])),
             Err(CliError::AttachArguments)
+        );
+    }
+
+    #[test]
+    fn server_uses_the_default_session_or_the_one_named_by_the_user() {
+        assert_eq!(
+            parse(&args(&["server"])),
+            Ok(Invocation::Server(ServerRequest::default()))
+        );
+        assert_eq!(
+            parse(&args(&["server", "work"])),
+            Ok(Invocation::Server(ServerRequest {
+                session: "work".to_owned(),
+            }))
+        );
+    }
+
+    #[test]
+    fn server_refuses_flags_and_more_than_one_session() {
+        assert_eq!(
+            parse(&args(&["server", "--socket"])),
+            Err(CliError::UnknownFlag("--socket".to_owned()))
+        );
+        assert_eq!(
+            parse(&args(&["server", "one", "two"])),
+            Err(CliError::ServerArguments)
         );
     }
 
