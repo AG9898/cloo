@@ -8,7 +8,7 @@ A terminal multiplexer in Rust — tmux's functionality, a better-looking termin
 
 > **Pre-alpha.** This package installs the `cloo` command and selects the native binary for your
 > supported macOS or Linux platform. The 0.0.1 name-reservation release did not include a binary;
-> use 0.0.2 or later for the working command.
+> use 0.0.3 or later for the working command.
 >
 > Follow development at **https://github.com/AG9898/cloo**
 

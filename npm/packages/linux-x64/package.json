@@ -1,6 +1,6 @@
 {
   "name": "clooterminal-linux-x64",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "cloo native binary for Linux x64",
   "license": "MIT",
   "repository": {

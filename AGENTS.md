@@ -1002,3 +1002,8 @@ The root npm package's `files` allowlist and each native package's staging manif
 assets from one another. A README image shipped with all five packages therefore needs both an
 allowlist entry and an explicit copy in `scripts/package-npm.sh`; `npm pack --dry-run` proves the
 artifact contains the image before any maintainer publishes it.
+
+### 2026-07-24 — `openpty` has target-specific pointer mutability
+Linux accepts immutable terminal-settings and window-size pointers, but Apple declares both
+`openpty` parameters mutable. Keep the local `winsize` mutable and pass `null_mut` for the omitted
+`termios`, so the portable call type-checks on both targets without changing inherited defaults.

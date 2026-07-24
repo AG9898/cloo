@@ -125,7 +125,7 @@ cargo install cloo            # build from source
 ```
 
 No supported release install is available yet. The currently published 0.0.1 `clooterminal`
-package is only a name reservation, but the artifact workflow now builds the 0.0.2 npm launcher
+package is only a name reservation, but the artifact workflow now builds the 0.0.3 npm launcher
 and its four optional native packages; publishing those artifacts remains a maintainer action.
 The npm package uses `clooterminal` because npm rejects `cloo` through its package-name
 similarity filter.

@@ -733,7 +733,8 @@ impl PtyReactor {
 fn open_pty(size: TermSize) -> Result<(OwnedFd, OwnedFd), PtyError> {
     let mut master: RawFd = -1;
     let mut slave: RawFd = -1;
-    let winsize = winsize_for(size);
+    let mut winsize = winsize_for(size);
+    let winsize = &raw mut winsize;
     // SAFETY: `openpty` writes one descriptor to each of the two out
     // parameters, both of which are valid, initialized locals. The termios
     // pointer is null (inherit defaults) and the winsize pointer refers to a
@@ -743,8 +744,8 @@ fn open_pty(size: TermSize) -> Result<(OwnedFd, OwnedFd), PtyError> {
             &raw mut master,
             &raw mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &winsize,
+            std::ptr::null_mut(),
+            winsize,
         )
     };
     if rc == -1 {

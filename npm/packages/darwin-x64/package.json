@@ -1,6 +1,6 @@
 {
   "name": "clooterminal-darwin-x64",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "cloo native binary for macOS x64",
   "license": "MIT",
   "repository": {
