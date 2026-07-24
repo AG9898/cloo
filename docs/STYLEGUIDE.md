@@ -147,6 +147,22 @@ from that compact form rather than making up a different layout. `status_bar_cel
 `status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
 non-truecolor fallback down-samples colours while leaving these ASCII signals intact.
 
+### First attachment and command discovery (M8, planned)
+
+The first attached frame must explain enough to act without turning chrome into a dashboard. While
+the default workspace has one pane, the status row spends available trailing width on the configured
+prefix followed by `split %`, `stack "`, and `help ?`; it yields those clues from the end using the
+same width ladder as every other status segment. Once there is more than one pane, the ordinary
+session, tab, attention, and prefix/help summary wins that space back. A pending prefix is visibly
+distinct from its settled hint and never lets the next key reach the child.
+
+`<prefix> ?` opens a client-owned help/command overlay rather than pane details. It lists the
+currently effective prefix and the short controls for split, focus, zoom, tabs, launcher, copy,
+and detach, with every key also available from the overlay's keyboard navigation. Pane details stay
+on `<prefix> i`; `<prefix> a` opens the profile launcher. Selecting a valid profile asks the server
+to add its pane, and no shell text is parsed as a cloo command. Both overlays retain the existing
+dimmed backdrop, Escape dismissal, exact width ladder, and 16-colour-safe text hints.
+
 ### Mouse gestures on chrome
 
 The mouse is a convenience over the chrome, never a second way to reach it. As of M6-02 every
@@ -236,9 +252,10 @@ directory, and state — and a task the user never set is absent rather than bla
 
 The attached client layers an open overlay over the already composed tab, header, pane-body, and
 status spans: it dims that existing frame without changing any character, then paints the raised
-overlay box above it. Its keys are consumed locally — they never become pane input. The currently
-available client-local entries are `C-b s` for the session surface and `C-b i` (or `C-b ?`) for the
-focused pane's details; they use the same Escape dismissal and keyboard vocabulary as every overlay.
+overlay box above it. Its keys are consumed locally — they never become pane input. Before M8,
+the available client-local entries are `C-b s` for the session surface and `C-b i` (or `C-b ?`) for
+the focused pane's details. M8 moves details to `C-b i` alone and makes `C-b ?` the help surface
+defined above; all use the same Escape dismissal and keyboard vocabulary as every overlay.
 
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:

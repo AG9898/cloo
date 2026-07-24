@@ -7,9 +7,9 @@
 > | Shipped | Nothing published from this tree. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders; the working release line starts at 0.0.2. |
 > | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
 > | Current CLI | `cloo` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | The implementation workboard is complete. Manual release validation and registry publishing remain maintainer-owned actions. |
+> | Next | M8 is planned: plain `cloo` will attach to, or safely create, one persistent default workspace; the attached UI will expose the essential workspace actions and their shortcuts. Manual release validation and registry publishing remain maintainer-owned actions. |
 > | Packaging | M7-04 builds native artifacts for the four supported targets and packages a `cloo` npm launcher plus optional native dependencies. M7-05 adds the approved product mark to the distribution README. The workflow uploads artifacts only; it does not publish either registry. |
-> | Remaining release work | No implementation task remains. Publishing to npm or crates.io requires explicit maintainer authorization. |
+> | Remaining release work | M8 is active pre-release product work. Publishing to npm or crates.io still requires explicit maintainer authorization. |
 
 ---
 
@@ -98,6 +98,22 @@ The runtime boundary is now explicit: plain `cloo` remains the local one-pane la
 [session]` renders that daemon-owned workspace with tabs, headers, status chrome, splits, and
 themes.
 
+### Phase 4 — M8: make the workspace the default entry
+
+**Planned.** The ordinary command will become `cloo`: it will attach to the global `default`
+workspace when its daemon is already running, or create that daemon in the background and attach
+when it is not. The first creation inherits the caller's working directory; later invocations only
+reattach and never retarget the existing workspace. Detach continues to leave panes alive.
+
+The foreground `cloo server [session]` and explicit `cloo attach [session]` commands remain for
+debugging, automation, and named-session work. `cloo <program> [args…]` deliberately preserves the
+M0 one-pane, non-persistent path rather than silently adding a program to an existing workspace.
+
+The attached client will make its own operations discoverable: a first-attach status hint exposes
+the prefix and split/help shortcuts, `C-b ?` opens an actual command/help surface, and the existing
+profile launcher becomes a live way to add a generic, Codex, or Claude pane. Clues live in cloo's
+chrome after its prefix, never in text typed for the child shell.
+
 ### Out of Scope
 
 Explicitly not in v1:
@@ -127,6 +143,10 @@ Explicitly not in v1:
 - Every visual treatment degrades legibly on a plain 16-color TTY.
 - Installing via `npm i -g clooterminal` or `cargo install cloo` yields a working `cloo`
   command on all four supported platform targets.
+- From a clean supported terminal, `cloo` attaches to the default workspace in one command;
+  a concurrent invocation joins that same workspace rather than creating a second daemon.
+- The first attached frame makes split and help controls discoverable without interpreting a
+  command intended for a pane.
 
 ---
 

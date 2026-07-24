@@ -20,10 +20,11 @@
   <img src="docs/assets/cloo-ui-single-pane.png" alt="cloo intended single-pane terminal interface" width="900">
 </p>
 
-> **Pre-alpha, but executable.** `cloo` runs `$SHELL`, an explicit program, or a configured profile
-> in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling; `cloo server
-> [session]` owns a foreground daemon and `cloo attach [session]` joins it through the multi-pane
-> client. This is not a released package or a replacement for tmux yet.
+> **Pre-alpha, but executable.** Today `cloo` runs `$SHELL`, an explicit program, or a configured
+> profile in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling;
+> `cloo server [session]` owns a foreground daemon and `cloo attach [session]` joins it through the
+> multi-pane client. M8 is planned to make plain `cloo` create-or-attach the default workspace in
+> one step. This is not a released package or a replacement for tmux yet.
 
 ## The idea
 
@@ -92,7 +93,7 @@ Code without inferring their state from terminal text.
 | Product and identity | Settled—the Storm terminal language and the external [brand system](docs/BRANDING.md) share one deliberate visual direction. |
 | Core and workspace model | Implemented and tested—M0–M6-08 plus M7-01–M7-04: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, the attached client loop, live visual states, compatibility fixtures, and supported-target packaging are in place. |
 | What runs today | Plain `cloo` launches one local pane; `cloo server [session]` owns a foreground daemon; `cloo attach [session]` joins it with composed chrome, input routing, resize handling, and layout controls. |
-| Active runtime work | Manual Codex and Claude compatibility coverage is the remaining runtime validation. |
+| Active runtime work | M8 is planned to make plain `cloo` create-or-attach the global default workspace and expose first-attach keyboard hints plus an in-app help/command surface. |
 | Compatibility and release | Reconnect/capability hardening, deterministic fixtures, supported-target packaging, and the external brand system are in place. |
 
 ## Follow the build

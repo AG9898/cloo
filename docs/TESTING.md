@@ -334,6 +334,15 @@ work` binds an isolated named socket without entering raw mode, a second server 
 existing ownership refusal while `cloo attach work` renders and detaches, and a final attachment
 exits the generic shell so the server removes only its own socket path.
 
+M8 will add the ordinary entry fixture in that same binary crate: a bare `cloo` with an isolated
+default socket starts and attaches one managed daemon, a second bare invocation attaches to the
+same child rather than spawning another, and a failed bootstrap restores the outer terminal and
+leaves no child or socket behind. Client tests will also prove that a first attached one-pane frame
+contains the configured prefix plus split and help hints; `<prefix> ?` must claim the keyboard for
+the help surface, while pane details remain on `<prefix> i`. The live launcher fixture will prove a
+selected valid profile reaches the actor and creates the named pane without treating ordinary shell
+input as a command.
+
 Resize is covered there too, as of M1-03, and it is the one case where a single assertion would
 be worthless. A resize is two things — the grid reflows and the child is told through
 `TIOCSWINSZ` — and a test that checked only one would pass with the other missing. So both halves

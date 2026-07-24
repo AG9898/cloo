@@ -99,6 +99,30 @@ the terminal must resolve this first.
 
 ## Resolved Decisions
 
+### RESOLVED-17 — One-command entry targets one global default workspace
+
+**Resolved:** 2026-07-24
+
+**Decision:** Plain `cloo` will attach to the global `default` workspace, creating its background
+daemon when absent. The first creation inherits that invocation's working directory; later plain
+invocations only attach. Foreground `server` and explicit `attach` remain expert commands, while
+`cloo <program> [args…]` remains the local, non-persistent path.
+
+**Why:** The client-server split should protect persistent work, not force people to manage a
+second terminal. A global default makes the habitual command deterministic and leaves named
+sessions available where they actually carry intent. Keeping program arguments local avoids the
+surprise of an arbitrary invocation mutating a workspace the user may already be sharing.
+
+**Alternatives rejected:** Per-directory automatic workspaces make a bare command depend on a
+hidden naming scheme; a picker delays the common case; interpreting shell text as cloo commands
+would corrupt the terminal-input ownership boundary.
+
+**Affects:** [`PRD.md`](PRD.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
+[`STYLEGUIDE.md`](STYLEGUIDE.md), [`ENV_VARS.md`](ENV_VARS.md), `crates/cloo`, and
+`crates/cloo-client`.
+
+---
+
 ### RESOLVED-01 — Client-server architecture with server-owned state
 
 **Resolved:** 2026-07-19

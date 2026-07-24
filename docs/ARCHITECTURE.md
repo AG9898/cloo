@@ -59,6 +59,24 @@ All six crates exist in the workspace. `cloo` retains the M0 local one-pane path
 client to it. M1–M6-06, M6-08, and M7-01–M7-02 provide the daemon, session, workspace, composed
 chrome, attached render loop, and compatibility foundations behind those entry points.
 
+### Default workspace entry (M8, planned)
+
+The normal interactive command will be `cloo`, not a foreground `server` plus a separate
+`attach`. It names the global `default` session and has exactly one of two outcomes: connect to an
+already-live daemon, or create a managed background daemon and connect once it owns the socket.
+The startup coordinator must treat the socket bind as the authority, so simultaneous first runs
+converge on one daemon; a stale socket follows the socket lifecycle's existing safe replacement
+rules, while a non-socket or symlink remains a refusal. A failed bootstrap must leave the caller in
+cooked mode and must not leave an orphaned daemon behind.
+
+Only the daemon process owns the default session. The invoking `cloo` process becomes its attached
+client and is the only process allowed to enter raw mode. The daemon inherits the working directory
+and generic launch only at first creation; an invocation that finds a live session changes neither.
+`CLOO_SOCKET` keeps its existing override meaning and is subject to the same attach-or-create rule,
+which preserves isolated development and test sessions. `cloo server [session]` remains a
+foreground, explicit lifecycle command, and `cloo attach [session]` remains the explicit
+named-session path. `cloo <program> [args…]` remains the separate local smoke path.
+
 Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
 manifest, so every member inherits the same path and version. The crates sit in four layers:
 

@@ -27,6 +27,13 @@ the user's shell and desktop session. cloo defines none of its own except `CLOO_
 | `CLOO_CONFIG` | No | Derived from `XDG_CONFIG_HOME` | Override the config file path. Intended for tests. **Read as of M4-01.** A non-empty value is taken verbatim and wins over `XDG_CONFIG_HOME`; an empty value counts as unset. |
 | `RUST_LOG` | No | Unset (no logging) | Standard `tracing`/`env_logger` filter. Development only. |
 
+### Default-workspace startup (M8, planned)
+
+Plain `cloo` will apply the existing socket resolution — including `CLOO_SOCKET` — before it either
+attaches or starts the default daemon. An override therefore remains the way a test or developer
+isolates a workspace; it does not create a second configuration mechanism. A path occupied by a
+regular file or symlink remains an actionable refusal, never a candidate for deletion.
+
 **Status:** `TERM`, `COLORTERM`, and `SHELL` are wired up as of M0-07 — `TERM`'s attach-side
 refusal as of M1-06 — `XDG_RUNTIME_DIR` and `CLOO_SOCKET` as of M1-01, and `XDG_CONFIG_HOME` and
 `CLOO_CONFIG` as of M4-01. `NO_COLOR` and `RUST_LOG` are not. The server reads config text and

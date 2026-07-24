@@ -14,11 +14,12 @@ A daemon owns the PTYs and all session state; thin clients attach over a Unix so
 daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
 foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
 still launches one local pane in-process, `cloo server [session]` owns a daemon, and `cloo attach
-[session]` joins it with the composed multipane frame and input loop. See [`docs/PRD.md`](docs/PRD.md)
-and [`docs/workboard.json`](docs/workboard.json).
+[session]` joins it with the composed multipane frame and input loop. M8 is planned to make bare
+`cloo` create-or-attach the default workspace and make its keyboard controls discoverable in that
+first frame. See [`docs/PRD.md`](docs/PRD.md) and [`docs/workboard.json`](docs/workboard.json).
 
-The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
-M0–M7 tasks.
+The canonical task queue is [`docs/workboard.json`](docs/workboard.json), which contains completed
+M0–M7 work and the planned M8 default-workspace and attached-UX tasks.
 
 ---
 
@@ -42,7 +43,9 @@ cargo fmt --check    # verify
 cargo run -p cloo -- --help
 ```
 
-`cloo server [session]` starts a foreground daemon; there is no database and no `.env` file.
+`cloo server [session]` starts a foreground daemon; there is no database and no `.env` file. M8
+will make plain `cloo` the create-or-attach default-workspace command while preserving the
+foreground server path for diagnostics and automation.
 
 ---
 
@@ -71,7 +74,7 @@ crates/
   cloo-client/   Attach, raw mode, renderer, theming, input encoding
 docs/
   INDEX.md          Documentation navigation map
-  PRD.md            Product scope, users, M0–M7 roadmap
+  PRD.md            Product scope, users, M0–M8 roadmap
   ARCHITECTURE.md   Topology, crate boundaries, wire protocol, layout
   CONVENTIONS.md    Rust standards and hard never/always rules
   DECISIONS.md      Decision log — resolved architecture and visual decisions
@@ -211,8 +214,8 @@ Targeted edit rules:
 - Only update the status fields of the task currently being worked.
 - Roll back `in_progress → todo` if blocked mid-task and unresolved.
 
-**The board is seeded with the M0–M7 tasks.** Milestone structure lives in
-[`docs/PRD.md`](docs/PRD.md) — M0 through M7, each independently runnable.
+**The board records completed M0–M7 work plus planned M8 tasks.** Milestone structure lives in
+[`docs/PRD.md`](docs/PRD.md) — M0 through M8, each independently runnable.
 
 ---
 
