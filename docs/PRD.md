@@ -6,9 +6,9 @@
 > |---|---|
 > | Shipped | Nothing published. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders. |
 > | Implemented in the tree | M0–M6-06 and M7-01 through M7-02: the daemon/session model, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, and deterministic compatibility fixtures are built and tested. |
-> | Current CLI | `cloo` launches the M0 local one-pane path; `cloo attach [session]` joins an existing daemon with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | M6-07 layers overlays, copy highlights, and motion onto the live attached loop. |
-> | Remaining release work | M7-03 records manual Codex/Claude compatibility, M7-04 packages supported targets, and M7-05 applies the approved external brand system. See `docs/workboard.json`. |
+> | Current CLI | `cloo` launches the M0 local one-pane path; `cloo attach [session]` joins an existing daemon with the composed multipane frame, decoded input, resize, and layout controls. No public command starts that daemon yet. |
+> | Next | M6-08 adds the foreground `cloo server [session]` lifecycle command; M6-07 then layers overlays, copy highlights, and motion onto the live attached loop. |
+> | Remaining release work | M6-08 exposes daemon/session startup, M7-03 records manual Codex/Claude compatibility, M7-04 packages supported targets, and M7-05 applies the approved external brand system. See `docs/workboard.json`. |
 
 ---
 
