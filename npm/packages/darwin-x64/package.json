@@ -9,5 +9,5 @@
   },
   "os": ["darwin"],
   "cpu": ["x64"],
-  "files": ["bin/cloo"]
+  "files": ["bin/cloo", "assets/cloo-product-128.svg"]
 }

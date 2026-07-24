@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/assets/brand/cloo-product.svg" alt="cloo product mark" width="132">
+<img src="docs/assets/brand/cloo-product.svg" alt="cloo product mark: a rounded terminal with a prompt, cursor, and underscore" width="132">
 
 # cloo
 
@@ -21,9 +21,9 @@
 </p>
 
 > **Pre-alpha, but executable.** `cloo` runs `$SHELL`, an explicit program, or a configured profile
-> in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling; `cloo attach
-> [session]` joins an existing daemon through the multi-pane client. This is not a released package
-> or a replacement for tmux yet.
+> in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling; `cloo server
+> [session]` owns a foreground daemon and `cloo attach [session]` joins it through the multi-pane
+> client. This is not a released package or a replacement for tmux yet.
 
 ## The idea
 
@@ -47,6 +47,10 @@ Code—not just as a better-looking shell container.
 ## Intended workspace
 
 <p align="center">
+  <img src="docs/assets/brand/cloo-workspace.svg" alt="cloo workspace mark: stacked terminals representing persistent multi-pane sessions" width="88">
+</p>
+
+<p align="center">
   <img src="docs/assets/cloo-ui-agent-workspace.png" alt="cloo intended nested multi-pane agent workspace" width="900">
 </p>
 
@@ -60,6 +64,16 @@ The intended v1 experience includes:
 - Bracketed paste, extended keys, focus, alternate screen, and mouse compatibility for modern terminal UIs
 - Copy mode, scrollback search, and policy-controlled OSC 52 clipboard support
 - TOML configuration, live reload, named themes, terminal palette inheritance, and reduce-motion support
+
+## Agent-aware workflows
+
+<p align="center">
+  <img src="docs/assets/brand/cloo-agent-signal.svg" alt="cloo agent signal mark: opposing prompts representing agent-workflow integrations" width="88">
+</p>
+
+cloo treats coding harnesses as ordinary programs with explicit, attributable workflow signals.
+Profiles, optional local adapters, and the attention queue help people coordinate Codex and Claude
+Code without inferring their state from terminal text.
 
 ## Design principles
 
@@ -76,10 +90,10 @@ The intended v1 experience includes:
 | Track | Current state |
 |---|---|
 | Product and identity | Settled—the Storm terminal language and the external [brand system](docs/BRANDING.md) share one deliberate visual direction. |
-| Core and workspace model | Implemented and tested—M0–M6-06 plus M7-01–M7-02: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, the attached client loop, and compatibility fixtures are in place. |
-| What runs today | Plain `cloo` launches one local pane; `cloo attach [session]` joins a daemon with composed chrome, input routing, resize handling, and layout controls. |
-| Active runtime work | M6-07 layers overlays, copy highlights, and motion onto the live attached-client loop. |
-| Compatibility and release | Reconnect/capability hardening and deterministic fixtures are done. Manual harness coverage, supported-target packaging, and external brand application remain. |
+| Core and workspace model | Implemented and tested—M0–M6-08 plus M7-01–M7-04: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, the attached client loop, live visual states, compatibility fixtures, and supported-target packaging are in place. |
+| What runs today | Plain `cloo` launches one local pane; `cloo server [session]` owns a foreground daemon; `cloo attach [session]` joins it with composed chrome, input routing, resize handling, and layout controls. |
+| Active runtime work | Manual Codex and Claude compatibility coverage is the remaining runtime validation. |
+| Compatibility and release | Reconnect/capability hardening, deterministic fixtures, supported-target packaging, and the external brand system are in place. |
 
 ## Follow the build
 
@@ -91,7 +105,7 @@ The intended v1 experience includes:
 - [V1 implementation workboard](docs/workboard.json)
 - [UI handoff and source mock](references/design_handoff_cloo_ui/README.md)
 
-## Build locally
+## <img src="docs/assets/brand/cloo-command.svg" alt="cloo command mark: a compact prompt and underscore" width="24"> Build locally
 
 cloo is not published yet, but the current local-pane runtime can be built and run from this
 repository:

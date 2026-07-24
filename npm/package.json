@@ -29,7 +29,8 @@
   },
   "files": [
     "README.md",
-    "bin/cloo.js"
+    "bin/cloo.js",
+    "assets/cloo-product-128.svg"
   ],
   "optionalDependencies": {
     "clooterminal-darwin-arm64": "0.0.2",

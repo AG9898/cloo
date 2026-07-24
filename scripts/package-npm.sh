@@ -44,9 +44,10 @@ fi
 
 mkdir -p "$output_dir"
 rm -rf "$stage_dir"
-mkdir -p "$stage_dir/bin"
+mkdir -p "$stage_dir/bin" "$stage_dir/assets"
 cp "$source_dir/package.json" "$stage_dir/package.json"
 cp "$repo_root/npm/README.md" "$stage_dir/README.md"
+cp "$repo_root/npm/assets/cloo-product-128.svg" "$stage_dir/assets/cloo-product-128.svg"
 cp "$binary" "$stage_dir/bin/cloo"
 chmod 755 "$stage_dir/bin/cloo"
 

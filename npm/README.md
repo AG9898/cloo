@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/cloo-product-128.svg" alt="cloo product mark: a rounded terminal with a prompt, cursor, and underscore" width="96">
+</p>
+
 # cloo
 
 A terminal multiplexer in Rust — tmux's functionality, a better-looking terminal.

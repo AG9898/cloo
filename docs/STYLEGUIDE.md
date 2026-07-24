@@ -16,7 +16,8 @@ specific font, this guide defines the cell-based equivalent.
 
 External product marks are governed separately by [`BRANDING.md`](BRANDING.md). They are never
 rendered in terminal chrome: the terminal keeps this guide's cell-based, ASCII-first treatments
-and deliberate 16-colour fallbacks.
+and deliberate 16-colour fallbacks. The marks applied to the repository and npm README are
+external documentation assets only; no terminal-renderer or launcher UI path consumes them.
 
 The design is intentionally dark, compact, and monospace. It supports normal terminal work and
 many concurrent coding-agent panes without turning the multiplexer into a dashboard.

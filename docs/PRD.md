@@ -5,11 +5,11 @@
 > | Track | State |
 > |---|---|
 > | Shipped | Nothing published from this tree. `cloo` 0.0.1 on crates.io and `clooterminal` 0.0.1 on npm are name-reservation placeholders; the working release line starts at 0.0.2. |
-> | Implemented in the tree | M0–M6-06, M6-08, and M7-01 through M7-02: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, and deterministic compatibility fixtures are built and tested. |
+> | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
 > | Current CLI | `cloo` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | M6-07 layers overlays, copy highlights, and motion onto the live attached loop. |
-> | Packaging | M7-04 builds native artifacts for the four supported targets and packages a `cloo` npm launcher plus optional native dependencies. The workflow uploads artifacts only; it does not publish either registry. |
-> | Remaining release work | M7-05 applies the approved external brand system. See `docs/workboard.json`. |
+> | Next | The implementation workboard is complete. Manual release validation and registry publishing remain maintainer-owned actions. |
+> | Packaging | M7-04 builds native artifacts for the four supported targets and packages a `cloo` npm launcher plus optional native dependencies. M7-05 adds the approved product mark to the distribution README. The workflow uploads artifacts only; it does not publish either registry. |
+> | Remaining release work | No implementation task remains. Publishing to npm or crates.io requires explicit maintainer authorization. |
 
 ---
 
@@ -86,11 +86,12 @@ that should surface — not after splits are built on top of it.
   selection, regex search with match highlighting, clipboard out via OSC 52 through the client.
 - **M6 mouse and live client integration.** Mouse ownership, click-to-focus, divider drag, wheel
   actions, wire command routing, composed multipane frames, the `cloo attach` live loop, and the
-  `cloo server` session lifecycle are implemented. **M6-07** layers overlays, copy highlights,
-  and motion onto it.
-- **M7 hardening + packaging.** True-color detection, reconnect/resize-race handling, and the
-  deterministic compatibility fixture suite are implemented. The manual compatibility matrix,
-  release packaging, and external brand application remain.
+  `cloo server` session lifecycle are implemented. **M6-07** adds overlays, copy highlights, and
+  motion to that live loop.
+- **M7 hardening + packaging.** True-color detection, reconnect/resize-race handling, the
+  deterministic compatibility fixture suite, the manual compatibility matrix, supported-target
+  release packaging, and external brand application are implemented. Publishing remains a
+  maintainer action.
 
 The runtime boundary is now explicit: plain `cloo` remains the local one-pane launcher,
 `cloo server [session]` owns a daemon session without altering its own terminal, and `cloo attach

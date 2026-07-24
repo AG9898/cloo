@@ -10,12 +10,12 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning is complete and the design is settled. M0–M6-06, M6-08,
-and M7-01–M7-02 are done in the tree; the daemon/session, workspace, chrome, attached-client
-runtime, public server lifecycle, and compatibility foundations are implemented and tested. Plain
-`cloo` still launches one local pane in-process, `cloo server [session]` owns a daemon, and
-`cloo attach [session]` joins it with the composed multipane frame and input loop. See
-[`docs/PRD.md`](docs/PRD.md) and [`docs/workboard.json`](docs/workboard.json).
+**The project is pre-alpha.** Planning and the M0–M7 implementation work are complete. The
+daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
+foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
+still launches one local pane in-process, `cloo server [session]` owns a daemon, and `cloo attach
+[session]` joins it with the composed multipane frame and input loop. See [`docs/PRD.md`](docs/PRD.md)
+and [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), seeded with the
 M0–M7 tasks.
@@ -993,3 +993,9 @@ A foreground-server fixture that sent `exit` and immediately dropped `Attached` 
 socket before the daemon consumed the queued input, leaving the generic shell alive. Await frames
 until EOF after the command; that proves the session processed it and gives the foreground server a
 clean, ownership-driven shutdown instead of a signal-killed one.
+
+### 2026-07-24 — Stage distribution README assets into every optional package
+The root npm package's `files` allowlist and each native package's staging manifest do not inherit
+assets from one another. A README image shipped with all five packages therefore needs both an
+allowlist entry and an explicit copy in `scripts/package-npm.sh`; `npm pack --dry-run` proves the
+artifact contains the image before any maintainer publishes it.

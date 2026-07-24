@@ -88,6 +88,24 @@ squeezing the product mark below its legibility threshold.
 | Agent profiles, adapters, attention workflow explanation | Agent signal as supporting art, never as status UI |
 | Terminal chrome, overlays, status bar, help text | No image mark. Follow [`STYLEGUIDE.md`](STYLEGUIDE.md) and use textual terminal-safe glyphs only. |
 
+## Applied repository and distribution surfaces
+
+The public repository README is the primary documentation entry point. Its hero uses the product
+mark; the persistent-session workspace explanation uses the workspace mark; the explicit adapter
+and attention explanation uses the agent-signal mark; and the local-run heading uses the compact
+command mark. Each image has alternative text that describes both the mark and the idea it
+communicates.
+
+The npm launcher and every native optional-dependency package include
+[`npm/assets/cloo-product-128.svg`](../npm/assets/cloo-product-128.svg), a 128 px export derived
+from the product SVG master. Their README is the consumer and presents the product mark with the
+same useful alternative text. The `package-npm.sh` staging path copies that export into each native
+package, so a packed README never points to an absent asset. The masters remain in
+[`docs/assets/brand/`](assets/brand/); do not edit an export in place when the mark changes.
+
+No terminal-renderer path, terminal package binary, or launcher UI consumes a brand image. The
+SVG export exists only for the distribution README and the text-glyph contract remains unchanged.
+
 ## Guardrails
 
 - Do not create a new product logo from a role-specific mark.
@@ -110,6 +128,8 @@ assets, export from the matching SVG and verify at its actual size:
 - Provide light-background/one-colour treatment only from the mono source, with tested contrast.
 - Confirm a meaningful `alt` string and keep the original SVG alongside any derived PNG, ICO, or
   platform-specific package asset.
+- For the npm README, use the checked-in 128 px product export and stage it through
+  `scripts/package-npm.sh`; it is a documentation asset, not a launcher icon.
 
 The [brand-direction board](../output/logo-explorations/cloo-brand-direction-board.png) that
 established this hierarchy is an exploratory preview only. The approved source system is the SVG
