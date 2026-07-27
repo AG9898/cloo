@@ -6,8 +6,8 @@
 > |---|---|
 > | Shipped | `clooterminal` 0.0.1 is a name-reservation placeholder. The Linux x64 0.0.4 package is prepared for maintainer publication; `cloo` 0.0.1 on crates.io is also a placeholder. |
 > | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
-> | Current CLI | `cloo` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | M8 is planned: plain `cloo` will attach to, or safely create, one persistent default workspace; the attached UI will expose the essential workspace actions and their shortcuts. Manual release validation and registry publishing remain maintainer-owned actions. |
+> | Current CLI | `cloo` attaches to the persistent `default` workspace, creating its background daemon when none is listening (M8-01); `cloo <program> [args…]` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
+> | Next | M8 continues: hardening the default-workspace startup races and making the attached UI expose the essential workspace actions and their shortcuts. Manual release validation and registry publishing remain maintainer-owned actions. |
 > | Packaging | M7-04 supplies the package structure. The working npm distribution is published directly from a maintainer terminal and currently carries a Linux x64 native dependency only; other prebuilt targets remain deferred. M7-05 adds the approved product mark to the distribution README. |
 > | Remaining release work | M8 is active pre-release product work. Publishing to npm or crates.io still requires explicit maintainer authorization. |
 
@@ -93,17 +93,19 @@ that should surface — not after splits are built on top of it.
   release packaging, and external brand application are implemented. Publishing remains a
   maintainer action.
 
-The runtime boundary is now explicit: plain `cloo` remains the local one-pane launcher,
+The runtime boundary is now explicit: `cloo <program>` remains the local one-pane launcher,
 `cloo server [session]` owns a daemon session without altering its own terminal, and `cloo attach
 [session]` renders that daemon-owned workspace with tabs, headers, status chrome, splits, and
 themes.
 
 ### Phase 4 — M8: make the workspace the default entry
 
-**Planned.** The ordinary command will become `cloo`: it will attach to the global `default`
-workspace when its daemon is already running, or create that daemon in the background and attach
-when it is not. The first creation inherits the caller's working directory; later invocations only
-reattach and never retarget the existing workspace. Detach continues to leave panes alive.
+**In progress.** The ordinary command is now `cloo`: **M8-01** attaches to the global `default`
+workspace when its daemon is already running, and creates that daemon in the background and
+attaches when it is not. The first creation inherits the caller's working directory; later
+invocations only reattach and never retarget the existing workspace. Detach continues to leave
+panes alive. Only a bare `cloo` takes this path — a program, a pane option, or an explicit
+`server`/`attach` keeps the meaning it already had.
 
 The foreground `cloo server [session]` and explicit `cloo attach [session]` commands remain for
 debugging, automation, and named-session work. `cloo <program> [args…]` deliberately preserves the

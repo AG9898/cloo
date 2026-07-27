@@ -267,6 +267,76 @@ fn spawn_attached_on(tty: &Tty, runtime_dir: &Path, session: &str) -> std::proce
         .expect("the cloo binary is built before its integration tests")
 }
 
+/// Runs a bare `cloo` — the managed default workspace — on a pty.
+fn spawn_workspace_on(tty: &Tty, runtime_dir: &Path) -> std::process::Child {
+    let stdio = || {
+        Stdio::from(
+            tty.slave
+                .try_clone()
+                .expect("the slave descriptor can be duplicated"),
+        )
+    };
+    cloo()
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env_remove("CLOO_SOCKET")
+        .env("TERM", "xterm-256color")
+        .env_remove("COLORTERM")
+        .spawn()
+        .expect("the cloo binary is built before its integration tests")
+}
+
+/// Sends the prefix detach chord to an attached client's terminal.
+fn detach(master: &OwnedFd) {
+    let mut master = unsafe {
+        // SAFETY: the caller's descriptor outlives this wrapper, which never
+        // closes it.
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(master.as_raw_fd()))
+    };
+    master
+        .write_all(b"\x02d")
+        .expect("the prefix detach reaches the attached client");
+}
+
+/// Attaches once more and ends the session's shell, so no daemon outlives the
+/// test that created it.
+fn shut_down_session(socket: &Path) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the test runtime builds");
+    runtime.block_on(async {
+        let mut attached = attach(socket, Size::new(80, 24), TermCaps::default(), None)
+            .await
+            .expect("the detached session accepts another client");
+        attached
+            .send_input(b"exit\r".to_vec())
+            .await
+            .expect("input reaches the workspace's first pane");
+        tokio::time::timeout(TIMEOUT, async {
+            while attached
+                .recv()
+                .await
+                .expect("the session stays connected")
+                .is_some()
+            {}
+        })
+        .await
+        .expect("the workspace's shell exits after its exit command");
+    });
+}
+
+/// The `(device, inode)` of whatever is at `path`, for proving a socket was
+/// reused rather than rebound by a second daemon.
+fn identity_of(path: &Path) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path).expect("the socket exists");
+    (metadata.dev(), metadata.ino())
+}
+
 /// Waits for a foreground server to bind its session socket.
 fn wait_for_path(path: &Path) {
     let deadline = Instant::now() + TIMEOUT;
@@ -433,6 +503,95 @@ fn foreground_server_owns_one_named_session_without_touching_its_terminal() {
     assert!(
         unrelated.exists(),
         "the foreground server never removes another session's path"
+    );
+}
+
+#[test]
+fn a_bare_cloo_creates_the_default_workspace_and_leaves_it_running_on_detach() {
+    // The M8-01 property in one run: with nothing listening, `cloo` alone
+    // produces a workspace, and the daemon behind it is a *separate* process —
+    // detaching the client leaves the session serving.
+    let dir = TempDir::new("workspace-create");
+    let runtime_dir = dir.runtime_dir();
+    let socket = runtime_dir.join("cloo").join("default.sock");
+    assert!(!socket.exists(), "the fixture starts with no workspace");
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_on(&tty, &runtime_dir);
+    read_until(&tty.master, "\x1b[?25l")
+        .unwrap_or_else(|seen| panic!("a bare cloo never drew a workspace frame; saw:\n{seen}"));
+    assert!(
+        is_raw(&tty.slave),
+        "the workspace entry becomes an attached client"
+    );
+    assert!(
+        socket.exists(),
+        "a daemon was created for the default session"
+    );
+
+    detach(&tty.master);
+    assert!(
+        wait_for_exit(&mut client, "workspace client").success(),
+        "the workspace client detaches cleanly"
+    );
+    assert!(!is_raw(&tty.slave), "detaching restores the outer terminal");
+    assert!(
+        socket.exists(),
+        "the daemon outlives its client, which is what makes it a workspace"
+    );
+
+    shut_down_session(&socket);
+    let deadline = Instant::now() + TIMEOUT;
+    while socket.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        !socket.exists(),
+        "the daemon removes its own socket on exit"
+    );
+}
+
+#[test]
+fn a_bare_cloo_joins_a_live_default_workspace_rather_than_starting_another() {
+    let dir = TempDir::new("workspace-join");
+    let runtime_dir = dir.runtime_dir();
+    let socket = runtime_dir.join("cloo").join("default.sock");
+
+    let server_tty = open_tty();
+    let mut server = spawn_server_on(&server_tty, &runtime_dir, "default");
+    wait_for_path(&socket);
+    let bound = identity_of(&socket);
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_on(&tty, &runtime_dir);
+    read_until(&tty.master, "\x1b[?25l")
+        .unwrap_or_else(|seen| panic!("a bare cloo never joined the live daemon; saw:\n{seen}"));
+    assert!(is_raw(&tty.slave), "joining enters raw mode");
+    // A second daemon could only have taken this path by unlinking and
+    // rebinding it, so an unchanged identity is the observable form of "the
+    // live one was reused". The foreground server still owning it is the other
+    // half: a competing daemon would have had to displace it first.
+    assert_eq!(
+        identity_of(&socket),
+        bound,
+        "the live workspace's socket must be the one that was joined"
+    );
+    assert_eq!(
+        server.try_wait().expect("the server remains waitable"),
+        None,
+        "the foreground daemon still owns the default session"
+    );
+
+    detach(&tty.master);
+    assert!(
+        wait_for_exit(&mut client, "workspace client").success(),
+        "the joined client detaches cleanly"
+    );
+
+    shut_down_session(&socket);
+    assert!(
+        wait_for_exit(&mut server, "foreground server").success(),
+        "the one daemon exits with its shell"
     );
 }
 

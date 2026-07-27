@@ -27,6 +27,8 @@ pub enum Invocation {
     Version,
     /// Print the usage and exit.
     Help,
+    /// Attach to the default workspace, creating its daemon if there is none.
+    Workspace(WorkspaceRequest),
     /// Run a pane.
     Run(Request),
     /// Attach a terminal client to an existing session.
@@ -34,6 +36,29 @@ pub enum Invocation {
     /// Run the daemon that owns a named session.
     Server(ServerRequest),
 }
+
+/// The persistent workspace a bare `cloo` attaches to or creates.
+///
+/// Deliberately its own variant rather than a flag on [`Request`]: the bare
+/// command is the *only* one that may start a daemon on the user's behalf, and
+/// every other spelling — a program, a profile, an explicit `server` or
+/// `attach` — keeps the meaning it already had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRequest {
+    /// The session the default workspace lives in.
+    pub session: String,
+}
+
+impl Default for WorkspaceRequest {
+    fn default() -> Self {
+        Self {
+            session: DEFAULT_SESSION.to_owned(),
+        }
+    }
+}
+
+/// The session name every command falls back to when none is given.
+pub const DEFAULT_SESSION: &str = "default";
 
 /// The session an attached client wants to render.
 ///
@@ -58,7 +83,7 @@ pub struct ServerRequest {
 impl Default for ServerRequest {
     fn default() -> Self {
         Self {
-            session: "default".to_owned(),
+            session: DEFAULT_SESSION.to_owned(),
         }
     }
 }
@@ -66,7 +91,7 @@ impl Default for ServerRequest {
 impl Default for AttachRequest {
     fn default() -> Self {
         Self {
-            session: "default".to_owned(),
+            session: DEFAULT_SESSION.to_owned(),
         }
     }
 }
@@ -157,15 +182,22 @@ pub fn profile_ids() -> String {
 
 /// Parses an argument vector.
 ///
-/// Everything up to the first non-flag argument is an option; that argument and
-/// everything after it is the program and its arguments, so `cloo sh -c 'x'`
-/// passes `-c` to `sh` rather than to cloo. An explicit `--` ends the options
-/// too, which is how a program whose name starts with a dash is run.
+/// An empty argument vector — and only an empty one — is the managed default
+/// workspace. Everything else keeps the meaning it already had: everything up
+/// to the first non-flag argument is an option; that argument and everything
+/// after it is the program and its arguments, so `cloo sh -c 'x'` passes `-c`
+/// to `sh` rather than to cloo. An explicit `--` ends the options too, which is
+/// how a program whose name starts with a dash is run.
 ///
 /// # Errors
 ///
 /// Returns the [`CliError`] describing the first thing that was wrong.
 pub fn parse(args: &[String]) -> Result<Invocation, CliError> {
+    // A bare `cloo` is the workspace. `cloo --` is not: the user asked for a
+    // pane with no program, which is the local login-shell path.
+    if args.is_empty() {
+        return Ok(Invocation::Workspace(WorkspaceRequest::default()));
+    }
     if args.first().is_some_and(|arg| arg == "attach") {
         return parse_attach(&args[1..]);
     }
@@ -351,8 +383,24 @@ mod tests {
     // -- parsing ------------------------------------------------------------
 
     #[test]
-    fn a_bare_invocation_asks_for_nothing_in_particular() {
-        assert_eq!(request(&[]), Request::default());
+    fn a_bare_invocation_is_the_default_workspace_and_nothing_else_is() {
+        assert_eq!(
+            parse(&args(&[])),
+            Ok(Invocation::Workspace(WorkspaceRequest::default()))
+        );
+        assert_eq!(
+            WorkspaceRequest::default().session,
+            AttachRequest::default().session,
+            "the workspace and an omitted attach must name one session"
+        );
+        // Only the empty vector. A pane option, a `--`, or a program is still
+        // the local one-pane path, which never starts a daemon.
+        for local in [vec!["--"], vec!["sh"], vec!["--name", "api"]] {
+            assert!(
+                matches!(parse(&args(&local)), Ok(Invocation::Run(_))),
+                "{local:?} must stay the local path"
+            );
+        }
     }
 
     #[test]
@@ -559,8 +607,10 @@ mod tests {
     }
 
     #[test]
-    fn a_bare_invocation_is_the_generic_profile_and_its_login_shell() {
-        let launch = request(&[])
+    fn a_workspaces_first_pane_is_the_generic_profile_and_its_login_shell() {
+        // `Request::default()` is what the daemon launches, whether it was
+        // started by `cloo server` or created behind a bare `cloo`.
+        let launch = Request::default()
             .resolve(&Config::defaults(), &here())
             .expect("resolves");
         assert_eq!(launch.profile().id.as_str(), "generic");

@@ -54,28 +54,50 @@ boundary, which is what makes the emulation backend replaceable.
 | `cloo-client` | Attach, raw mode, renderer, theming, input decoding and routing | Hold authoritative session state, or encode input for a pane |
 | `cloo` | The binary; client-vs-server dispatch, CLI surface | Contain logic that belongs in a library crate |
 
-All six crates exist in the workspace. `cloo` retains the M0 local one-pane path, `cloo server
-[session]` starts and owns a daemon session, and `cloo attach [session]` connects the live attached
-client to it. M1–M6-06, M6-08, and M7-01–M7-02 provide the daemon, session, workspace, composed
-chrome, attached render loop, and compatibility foundations behind those entry points.
+All six crates exist in the workspace. A bare `cloo` is the managed default workspace, `cloo
+<program>` retains the M0 local one-pane path, `cloo server [session]` starts and owns a daemon
+session, and `cloo attach [session]` connects the live attached client to it. M1–M6-06, M6-08,
+M7-01–M7-02, and M8-01 provide the daemon, session, workspace, composed chrome, attached render
+loop, compatibility foundations, and default entry behind those commands.
 
-### Default workspace entry (M8, planned)
+### Default workspace entry
 
-The normal interactive command will be `cloo`, not a foreground `server` plus a separate
-`attach`. It names the global `default` session and has exactly one of two outcomes: connect to an
-already-live daemon, or create a managed background daemon and connect once it owns the socket.
-The startup coordinator must treat the socket bind as the authority, so simultaneous first runs
-converge on one daemon; a stale socket follows the socket lifecycle's existing safe replacement
-rules, while a non-socket or symlink remains a refusal. A failed bootstrap must leave the caller in
-cooked mode and must not leave an orphaned daemon behind.
+**Implemented at M8-01**, in `crates/cloo/src/main.rs`. The normal interactive command is `cloo`,
+not a foreground `server` plus a separate `attach`. It names the global `default` session and has
+exactly one of two outcomes: connect to an already-live daemon, or create a managed background
+daemon and connect once it owns the socket. The startup coordinator treats the socket bind as the
+authority, so simultaneous first runs converge on one daemon; a stale socket follows the socket
+lifecycle's existing safe replacement rules, while a non-socket or symlink remains a refusal. A
+failed bootstrap leaves the caller in cooked mode and does not leave an orphaned daemon behind.
+
+Four properties carry that:
+
+- **Liveness is a connect, never a file.** `daemon_is_listening` opens and immediately drops a
+  `UnixStream`, because a socket file proves only that *some* daemon once bound the path. A killed
+  daemon leaves one behind, and treating it as live would turn an ordinary restart into a failure.
+  The daemon sees the probe as a connection that closed before its attach — the same thing an
+  interrupted client does, already handled by `serve_client`.
+- **Creation re-executes this binary as `cloo server <session>`,** rather than embedding a second
+  daemon lifecycle in the client path. Its stdio is `/dev/null` so it can never write over the
+  frame the attached client is about to draw, and `setsid` keeps it out of the caller's terminal
+  session; both are consequences of it being a background process, not a new mechanism.
+- **The bind is the arbiter of a race, not the spawn.** Two simultaneous first runs both start a
+  daemon and exactly one wins the `flock` in `Listener::bind`; the loser exits as the ordinary
+  "already running" refusal. `wait_until_ready` therefore probes the socket again after observing
+  its own child exit, so a caller whose daemon lost still attaches to the survivor.
+- **Nothing touches the terminal until a daemon answers.** Raw mode is entered inside
+  `cloo-client::attach::run`, which is reached only after a successful probe — that is what makes
+  "a failed bootstrap leaves the caller in cooked mode" structural rather than a cleanup path.
 
 Only the daemon process owns the default session. The invoking `cloo` process becomes its attached
 client and is the only process allowed to enter raw mode. The daemon inherits the working directory
 and generic launch only at first creation; an invocation that finds a live session changes neither.
 `CLOO_SOCKET` keeps its existing override meaning and is subject to the same attach-or-create rule,
 which preserves isolated development and test sessions. `cloo server [session]` remains a
-foreground, explicit lifecycle command, and `cloo attach [session]` remains the explicit
-named-session path. `cloo <program> [args…]` remains the separate local smoke path.
+foreground, explicit lifecycle command — and the way to see a background daemon's startup
+diagnostics — and `cloo attach [session]` remains the explicit named-session path. `cloo <program>
+[args…]` remains the separate local smoke path, and so does every pane option: only an empty
+argument vector is the workspace.
 
 Dependencies flow one way and are declared through `[workspace.dependencies]` in the root
 manifest, so every member inherits the same path and version. The crates sit in four layers:

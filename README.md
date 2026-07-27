@@ -20,11 +20,11 @@
   <img src="docs/assets/cloo-ui-single-pane.png" alt="cloo intended single-pane terminal interface" width="900">
 </p>
 
-> **Pre-alpha, but executable.** Today `cloo` runs `$SHELL`, an explicit program, or a configured
-> profile in one local pane with real PTY, raw-mode, resize, and terminal-emulation handling;
-> `cloo server [session]` owns a foreground daemon and `cloo attach [session]` joins it through the
-> multi-pane client. M8 is planned to make plain `cloo` create-or-attach the default workspace in
-> one step. This is not a released package or a replacement for tmux yet.
+> **Pre-alpha, but executable.** Today plain `cloo` opens the persistent `default` workspace,
+> starting its daemon in the background the first time and attaching through the multi-pane client;
+> `cloo <program>` still runs one local pane with real PTY, raw-mode, resize, and terminal-emulation
+> handling; and `cloo server [session]` / `cloo attach [session]` remain the explicit halves. This
+> is not a released package or a replacement for tmux yet.
 
 ## The idea
 
@@ -92,8 +92,8 @@ Code without inferring their state from terminal text.
 |---|---|
 | Product and identity | Settled—the Storm terminal language and the external [brand system](docs/BRANDING.md) share one deliberate visual direction. |
 | Core and workspace model | Implemented and tested—M0–M6-08 plus M7-01–M7-04: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, the attached client loop, live visual states, compatibility fixtures, and supported-target packaging are in place. |
-| What runs today | Plain `cloo` launches one local pane; `cloo server [session]` owns a foreground daemon; `cloo attach [session]` joins it with composed chrome, input routing, resize handling, and layout controls. |
-| Active runtime work | M8 is planned to make plain `cloo` create-or-attach the global default workspace and expose first-attach keyboard hints plus an in-app help/command surface. |
+| What runs today | Plain `cloo` create-or-attaches the global `default` workspace; `cloo <program>` launches one local pane; `cloo server [session]` owns a foreground daemon; `cloo attach [session]` joins one with composed chrome, input routing, resize handling, and layout controls. |
+| Active runtime work | M8 continues: hardening the default-workspace startup races and exposing first-attach keyboard hints plus an in-app help/command surface. |
 | Compatibility and release | Reconnect/capability hardening, deterministic fixtures, supported-target packaging, and the external brand system are in place. |
 
 ## Follow the build
@@ -109,12 +109,12 @@ Code without inferring their state from terminal text.
 
 ## <img src="docs/assets/brand/cloo-command.svg" alt="cloo command mark: a compact prompt and underscore" width="24"> Build locally
 
-cloo is not published yet, but the current local-pane runtime can be built and run from this
-repository:
+cloo is not published yet, but the current runtime can be built and run from this repository:
 
 ```sh
-cargo run -p cloo
-cargo run -p cloo -- --profile codex
+cargo run -p cloo                          # open the default workspace
+cargo run -p cloo -- --profile codex       # one local pane, no daemon
+cargo run -p cloo -- server default        # the same daemon in the foreground, for diagnostics
 ```
 
 The planned release channels are:

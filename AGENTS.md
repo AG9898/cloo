@@ -10,16 +10,17 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning and the M0–M7 implementation work are complete. The
+**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 are complete. The
 daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
 foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
-still launches one local pane in-process, `cloo server [session]` owns a daemon, and `cloo attach
-[session]` joins it with the composed multipane frame and input loop. M8 is planned to make bare
-`cloo` create-or-attach the default workspace and make its keyboard controls discoverable in that
-first frame. See [`docs/PRD.md`](docs/PRD.md) and [`docs/workboard.json`](docs/workboard.json).
+create-or-attaches the persistent `default` workspace, `cloo <program>` still launches one local
+pane in-process, `cloo server [session]` owns a foreground daemon, and `cloo attach [session]`
+joins it with the composed multipane frame and input loop. The rest of M8 hardens that startup and
+makes the keyboard controls discoverable in the first frame. See [`docs/PRD.md`](docs/PRD.md) and
+[`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), which contains completed
-M0–M7 work and the planned M8 default-workspace and attached-UX tasks.
+M0–M7 and M8-01 work plus the remaining M8 default-workspace and attached-UX tasks.
 
 ---
 
@@ -43,9 +44,9 @@ cargo fmt --check    # verify
 cargo run -p cloo -- --help
 ```
 
-`cloo server [session]` starts a foreground daemon; there is no database and no `.env` file. M8
-will make plain `cloo` the create-or-attach default-workspace command while preserving the
-foreground server path for diagnostics and automation.
+Plain `cloo` create-or-attaches the `default` workspace, starting a background daemon when none is
+listening; `cloo server [session]` starts that same daemon in the foreground, which is how you see
+its diagnostics. There is no database and no `.env` file.
 
 ---
 
@@ -90,8 +91,9 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-All six crates are wired together. M1–M6-06 and M7-01–M7-02 supply the daemon, workspace, client
-primitives, live attached-client integration, and compatibility foundations. Dependencies are
+All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01 supply the daemon, workspace,
+client primitives, live attached-client integration, compatibility foundations, and the managed
+default-workspace entry. Dependencies are
 declared in the root `[workspace.dependencies]` and are constrained by a
 **layering**, not a single chain: `cloo` over {`cloo-server`, `cloo-client`} over `cloo-core` over
 the leaves {`cloo-proto`, `cloo-term`}. Any crate may name any crate in a lower layer — in
@@ -418,6 +420,11 @@ M6-06 drives that frame from the command users run: `cloo attach [session]` ente
 connecting, watches `SIGWINCH`, routes decoded input through the configured prefix keymap and mouse
 ownership, and restores the outer terminal after detach. Its real-PTY binary fixture proves the
 composed frame, prefix detach, raw-mode restoration, and a second attachment reaching the same child.
+M8-01 makes a bare `cloo` that command's ordinary entry: `crates/cloo/src/main.rs` unit tests the
+liveness branch (a bound socket is a workspace; a missing path and a listener-less socket file are
+not), `crates/cloo/src/cli.rs` proves only an empty argument vector parses as the workspace, and
+`crates/cloo/tests/cli.rs` proves a bare `cloo` creates a daemon that outlives its detaching client
+and joins a live one without displacing it.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -1006,3 +1013,20 @@ artifact contains the image before any maintainer publishes it.
 Linux accepts immutable terminal-settings and window-size pointers, but Apple declares both
 `openpty` parameters mutable. Keep the local `winsize` mutable and pass `null_mut` for the omitted
 `termios`, so the portable call type-checks on both targets without changing inherited defaults.
+
+### 2026-07-27 — A socket file is not a workspace, and the bind is what settles a race
+The bare `cloo` entry decides between attach and create with a `UnixStream::connect`, never a
+`Path::exists`: a killed daemon leaves its socket behind, and `Listener::bind` can only clean that
+up once it holds the lock. The same asymmetry makes the concurrent case free — two first runs both
+spawn `cloo server default`, one wins the `flock` and the other exits 125, so `wait_until_ready`
+probes the socket again *after* seeing its own child exit and attaches to whichever daemon survived.
+Probing before `cloo-client::attach::run` is also what keeps a failed bootstrap in cooked mode,
+since raw mode is only entered inside that call.
+
+### 2026-07-27 — A backgrounded daemon must not share the client's stdio
+`cloo` starts its default workspace by re-executing itself as `cloo server default` with all three
+descriptors on `/dev/null`, because anything the daemon prints would land in the middle of the frame
+the attached client is about to draw. Piping its stderr to capture a startup diagnostic is worse,
+not better: `eprintln!` panics when the write fails, so a parent that drops the read end after
+attaching would kill the daemon later. The recovery path is documentation — the error message names
+`cloo server <session>` as the way to see why.

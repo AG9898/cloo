@@ -19,7 +19,7 @@ the user's shell and desktop session. cloo defines none of its own except `CLOO_
 |---|---|---|---|
 | `XDG_RUNTIME_DIR` | Yes | Falls back to `/tmp/cloo-$UID` when unset | Parent of the session socket directory. Sockets live at `$XDG_RUNTIME_DIR/cloo/<session>.sock`, and the directory is created and narrowed to `0700` on every bind. **Read as of M1-01.** An empty value counts as unset. The `/tmp` fallback is already per-uid, so no `cloo/` component is appended to it. |
 | `TERM` | Yes | — | Terminal type. Drives capability detection. An unset or `dumb` `TERM` behaves differently depending on whether a negotiation happens ([DECISIONS.md](DECISIONS.md) RESOLVED-12): a client **attaching over the socket** is refused with an actionable error rather than guessing, while a **local pane** — no socket, as shipped in M0-07 — runs with every capability claimed false. A resolvable `TERM` with limited capabilities always takes its documented fallback; refusal is only for the unresolvable case. **Read as of M0-07; attach-side enforcement as of M1-06,** in `cloo-client::capabilities`, which is where the two paths split. |
-| `SHELL` | No | `/bin/sh` | Program spawned in each new pane. **Read as of M0-07.** A bare `cloo` runs it; `cloo <program>` overrides it. The `/etc/passwd` lookup for an unset `SHELL` is not implemented — the POSIX-guaranteed `/bin/sh` is used instead. |
+| `SHELL` | No | `/bin/sh` | Program spawned in each new pane. **Read as of M0-07.** The default workspace's first pane runs it; `cloo <program>` overrides it for a local pane. The `/etc/passwd` lookup for an unset `SHELL` is not implemented — the POSIX-guaranteed `/bin/sh` is used instead. |
 | `XDG_CONFIG_HOME` | No | `~/.config` | Config lookup root. cloo reads `$XDG_CONFIG_HOME/cloo/config.toml`; when unset or empty, it uses `$HOME/.config/cloo/config.toml`. **Read as of M4-01** by `cloo-server::config`; `CLOO_CONFIG` takes precedence. |
 | `COLORTERM` | No | Unset | Set to `truecolor`/`24bit` (case-insensitively) by capable terminals. Used to enable 24-bit color output. **Read as of M0-07; detection consolidated in M7-01.** True-color detection is the pure `cloo-client::capabilities::truecolor_from_env` function: `COLORTERM` is one of those two values, **or** `TERM` names a direct-colour terminfo entry (`*-direct`); a `256color` entry establishes nothing, since 256 indexed colours are not 24-bit. Without a positive signal the renderer downsamples RGB to the 256-colour palette rather than emitting a sequence the terminal may not understand. |
 | `NO_COLOR` | No | Unset | Standard opt-out. When set to any value, cloo renders without color. Must still be legible — see the 16-color constraint in [`ARCHITECTURE.md`](ARCHITECTURE.md). |
@@ -27,16 +27,26 @@ the user's shell and desktop session. cloo defines none of its own except `CLOO_
 | `CLOO_CONFIG` | No | Derived from `XDG_CONFIG_HOME` | Override the config file path. Intended for tests. **Read as of M4-01.** A non-empty value is taken verbatim and wins over `XDG_CONFIG_HOME`; an empty value counts as unset. |
 | `RUST_LOG` | No | Unset (no logging) | Standard `tracing`/`env_logger` filter. Development only. |
 
-### Default-workspace startup (M8, planned)
+### Default-workspace startup
 
-Plain `cloo` will apply the existing socket resolution — including `CLOO_SOCKET` — before it either
-attaches or starts the default daemon. An override therefore remains the way a test or developer
-isolates a workspace; it does not create a second configuration mechanism. A path occupied by a
-regular file or symlink remains an actionable refusal, never a candidate for deletion.
+**Implemented at M8-01.** Plain `cloo` applies the existing socket resolution — including
+`CLOO_SOCKET` — before it either attaches or starts the default daemon. An override therefore
+remains the way a test or developer isolates a workspace; it does not create a second configuration
+mechanism. A path occupied by a regular file or symlink remains an actionable refusal, never a
+candidate for deletion.
+
+The daemon a bare `cloo` creates is this same binary re-executed as `cloo server default`, so it
+**inherits the caller's whole environment and working directory**. `CLOO_SOCKET`, `CLOO_CONFIG`,
+`XDG_RUNTIME_DIR`, `TERM`, and `SHELL` therefore mean the same thing to the daemon as to the client
+that started it, and the workspace's first pane starts in the directory the user ran `cloo` from.
+An invocation that finds a live daemon changes none of this: the existing session keeps the
+environment and directory it was created with. The background daemon's stdio is `/dev/null` so it
+can never write over the attached frame, which is why `cloo server [session]` remains the way to
+see a startup failure's diagnostics.
 
 **Status:** `TERM`, `COLORTERM`, and `SHELL` are wired up as of M0-07 — `TERM`'s attach-side
-refusal as of M1-06 — `XDG_RUNTIME_DIR` and `CLOO_SOCKET` as of M1-01, and `XDG_CONFIG_HOME` and
-`CLOO_CONFIG` as of M4-01. `NO_COLOR` and `RUST_LOG` are not. The server reads config text and
+refusal as of M1-06 — `XDG_RUNTIME_DIR` and `CLOO_SOCKET` as of M1-01 (and reused by the bare
+default-workspace entry as of M8-01), and `XDG_CONFIG_HOME` and `CLOO_CONFIG` as of M4-01. `NO_COLOR` and `RUST_LOG` are not. The server reads config text and
 hands it to the pure `cloo-core` parser; a missing file starts with defaults, an invalid startup file
 warns and does the same, and a failed `SIGHUP` reload retains the preceding valid configuration.
 
