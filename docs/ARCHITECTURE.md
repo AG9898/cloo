@@ -416,7 +416,11 @@ harness is a peer of what the user is already looking at.
 
 The identifier carries text a keypress does not, so `Action::LaunchProfile` has **no keymap
 spelling** in either direction, exactly like `RenameTab` and `CopySearch`; a client reaches it by
-confirming a row in its profile launcher.
+confirming a row in its profile launcher, which as of M8-06 is `<prefix> a` on the attached client.
+
+The refusal is deliberately silent on the wire — an unknown identifier changes nothing, so there is
+nothing to report a delta of — and the *client* is what makes it visible. It tracks the request it
+sent, not the session: see [Overlays](#overlays).
 
 ##### Directional focus and zoom
 
@@ -582,16 +586,26 @@ is testable against an exact string.
 The help surface is built from the live `cloo_core::keymap::Keymap` and from nothing else:
 `Overlay::help` reads the effective prefix into the title and looks each listed action's chord up in
 the table, so a rebound prefix and a rebound chord are shown verbatim and an unbound action has no
-row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`, and the
-`ADD_PANE_KEY` reserved for M8-06) shared with `attach`'s `open_overlay`, which is reached only for
+row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`, and
+`ADD_PANE_KEY`) shared with `attach`'s `open_overlay`, which is reached only for
 a chord the keymap left unbound — so a user who binds `?` keeps their binding, and the help surface
-drops the row it would otherwise have claimed.
+drops the row it would otherwise have claimed. It is also why ordinary shell text opens nothing: a
+chord reaches `open_overlay` only after the prefix has already been resolved.
 
 Two properties are types rather than rules. A `LaunchRequest` carries a `ProfileId` and has no
 constructor but confirming a launcher row, and a launcher row has no constructor but a validated
 `cloo_core::Profile` — so a launch cannot name anything the configuration did not define, and
 there is no free-text command to type into. And `OverlayAction::Dismiss` answers `Dismissed` from
-every state, including an empty list, so no overlay can hold the terminal. The keyboard vocabulary
+every state, including an empty list, so no overlay can hold the terminal.
+
+M8-06 makes the launcher live. `attach::run` takes the resolved `Profile` list beside the keymap,
+`open_overlay` builds the launcher from it, and confirming a row is the one overlay outcome that
+leaves the client — as `Action::LaunchProfile(id)` and never as an argv. Because the daemon refuses
+an identifier its own table does not name *silently*, `LaunchNotice` closes the loop without a new
+wire message: it records which panes the client had seen when it sent the request, treats an unseen
+pane carrying that profile as the launch arriving, and turns silence past `LAUNCH_DEADLINE` into a
+status-row refusal that lingers briefly and clears. The client tracks its own request; it never
+reads an outcome off a grid. The keyboard vocabulary
 lives beside the attention queue's in `cloo-client::input`, because an open overlay owns the
 keyboard exactly as chrome owns a mouse click over a border; none of it reaches a child. The
 visual contract — the shared width ladder, the text selection marker, the dimmed backdrop — is in

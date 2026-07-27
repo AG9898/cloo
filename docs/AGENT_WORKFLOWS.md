@@ -93,6 +93,14 @@ program that is not on `PATH` fails at `execvp` with the layout already rolled b
 deliberately no server function that turns a client-supplied *command* into a pane — "explicit
 profiles only" is a fact about which functions exist, not a check someone has to remember.
 
+M8-06 puts a live keyboard on the front of that: `<prefix> a` opens the launcher over the profiles
+the attached client resolved from its own configuration, and confirming a row sends the identifier.
+The client's list is the *menu*, never the authority — the daemon still looks every identifier up in
+the table it loaded — so the two can disagree, and a refusal that would otherwise be silent (no
+pane, no reply) is reported on the status row instead. The client does that from its own
+provenance: it remembers which panes existed when it sent the request, and a pane it had not seen
+carrying that profile is the launch arriving. Nothing about the outcome is read off a grid.
+
 Two kinds of wrongness get two different answers. Syntax is the document's: malformed TOML or an
 unknown key fails the whole parse and the caller keeps the defaults — an ignored typo would be a
 setting the user believes is applied. Semantics are each profile's: a well-formed entry that does

@@ -121,6 +121,12 @@ The server half of that launcher is in place as of **M8-05**: a client asks for 
 session actor is asked for anything. There is no wire form for a command line, so the workspace can
 only ever start something the user's own configuration defines.
 
+**M8-06** connects the two: `<prefix> a` opens the launcher over the profiles the attached client
+resolved, and confirming a row sends that identifier. The daemon remains the authority — a profile
+this client can see but that daemon cannot is refused there — so the client says so rather than
+leaving a confirmed row looking like a key that did nothing. Selection, that refusal, and raw-mode
+restoration are all the client's, and ordinary shell text is never reinterpreted as a command.
+
 ### Out of Scope
 
 Explicitly not in v1:

@@ -32,9 +32,10 @@
 //!   quantized into the render loop's own frame budget, settled rather than
 //!   reverted when input or a resize interrupts them, and drawn away entirely
 //!   by the reduce-motion setting.
-//! - [`overlay`] — the keyboard-first session switcher, profile launcher, and
-//!   pane-details view, as one model and one renderer over the shared chrome
-//!   rules.
+//! - [`overlay`] — the keyboard-first help surface, session switcher, profile
+//!   launcher, and pane-details view, as one model and one renderer over the
+//!   shared chrome rules, plus the notice a launch the workspace never made
+//!   leaves on the status row.
 //! - [`copy_mode`] — highlights and the status row for server-owned copy mode,
 //!   plus the explicit, policy-gated OSC 52 copy.
 //! - [`effects`] — client-local policy and safe rendering for allowlisted
@@ -89,9 +90,10 @@ pub use motion::{
 };
 pub use outer::{current_size, window_size};
 pub use overlay::{
-    ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, HelpEntry, HelpKeys, LaunchRequest, Overlay, OverlayKind,
-    OverlayOutcome, PaneDetails, ProfileEntry, SESSIONS_KEY, SessionEntry, backdrop_cells,
-    backdrop_span, hint_cells, overlay_cells, overlay_spans, title_cells,
+    ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, HelpEntry, HelpKeys, LAUNCH_DEADLINE, LaunchNotice,
+    LaunchRequest, NOTICE_LINGER, Overlay, OverlayKind, OverlayOutcome, PaneDetails, ProfileEntry,
+    SESSIONS_KEY, SessionEntry, backdrop_cells, backdrop_span, hint_cells, launch_notice_cells,
+    launch_notice_span, overlay_cells, overlay_spans, title_cells,
 };
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, FramePane, Grid, RenderError, Renderer, Span, compose_frame};

@@ -318,7 +318,14 @@ fn attach_to(socket: &Path) -> ExitCode {
         eprintln!("cloo: warning: {diagnostic}");
     }
 
-    match cloo_client::attach::run(socket, loaded.config.keys().clone()) {
+    // The keymap decides which chords this client resolves; the profiles are
+    // what its launcher offers. Neither is an authority over the daemon — a
+    // launch still crosses the wire as an identifier that daemon looks up.
+    match cloo_client::attach::run(
+        socket,
+        loaded.config.keys().clone(),
+        loaded.config.profiles().to_vec(),
+    ) {
         Ok(status) => ExitCode::from(u8::try_from(status).unwrap_or(EXIT_FAILURE)),
         Err(err) => {
             eprintln!("cloo: {err}");

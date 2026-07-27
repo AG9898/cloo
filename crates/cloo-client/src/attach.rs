@@ -18,12 +18,13 @@
 //! acknowledgement, and drops the connection. Nothing about it reaches the
 //! child — that is the point.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use cloo_core::Profile;
 use cloo_core::keymap::Keymap;
 use cloo_proto::{
     Action, AttentionState, ClientMessage, CopyModeState, CursorShape, FrameStream, LayoutSnapshot,
@@ -44,8 +45,8 @@ use crate::input::{
 use crate::motion::{Motion, MotionKind, Phase};
 use crate::outer::current_size;
 use crate::overlay::{
-    DETAILS_KEY, HELP_KEY, Overlay, OverlayOutcome, PaneDetails, SESSIONS_KEY, SessionEntry,
-    backdrop_span, overlay_spans,
+    ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, LaunchNotice, LaunchRequest, Overlay, OverlayOutcome,
+    PaneDetails, SESSIONS_KEY, SessionEntry, backdrop_span, launch_notice_span, overlay_spans,
 };
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
@@ -425,16 +426,21 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
 /// closes.
 ///
 /// The caller supplies the resolved keymap so the client applies the same
-/// configurable prefix table it advertises in its chrome. Entering raw mode,
-/// enabling outer-terminal reporting, restoring both on every exit path, and
-/// owning the render loop all live here because they are client concerns — the
-/// daemon never writes a byte to the user's terminal.
+/// configurable prefix table it advertises in its chrome, and the resolved
+/// profiles so its launcher offers what the configuration actually defines. The
+/// profiles are the *launcher's* list and never an authority: the daemon owns
+/// the table a launch identifier is resolved against, so a profile this client
+/// can see but that daemon cannot is refused there and reported here.
+///
+/// Entering raw mode, enabling outer-terminal reporting, restoring both on every
+/// exit path, and owning the render loop all live here because they are client
+/// concerns — the daemon never writes a byte to the user's terminal.
 ///
 /// # Errors
 ///
 /// Returns an actionable attach, terminal, rendering, or signal error. The raw
 /// mode guard restores the terminal before an error reaches the caller.
-pub fn run(path: &Path, keymap: Keymap) -> Result<i32, AttachRunError> {
+pub fn run(path: &Path, keymap: Keymap, profiles: Vec<Profile>) -> Result<i32, AttachRunError> {
     // This has to be first. A pipe should explain that this is not an attached
     // terminal, and no attach attempt or reporting mode should precede it.
     let raw = RawMode::stdin().map_err(AttachRunError::RawMode)?;
@@ -450,7 +456,7 @@ pub fn run(path: &Path, keymap: Keymap) -> Result<i32, AttachRunError> {
         .enable_time()
         .build()
         .map_err(AttachRunError::Runtime)?;
-    let result = runtime.block_on(live_loop(path, outer_size, caps, modes, keymap));
+    let result = runtime.block_on(live_loop(path, outer_size, caps, modes, keymap, profiles));
 
     // Restore before `main` prints an error: diagnostics written while raw are
     // unreadable, and `RawMode` also turns reporting modes back off here.
@@ -477,6 +483,7 @@ async fn live_loop(
     caps: TermCaps,
     modes: OuterModes,
     keymap: Keymap,
+    profiles: Vec<Profile>,
 ) -> Result<i32, AttachRunError> {
     // Install this before attaching, so the one `SIGWINCH` that happens while
     // the socket handshake is in flight cannot be lost.
@@ -491,7 +498,8 @@ async fn live_loop(
         attached.session(),
         attached.tabs().to_vec(),
         prefix,
-    );
+    )
+    .profiles(profiles);
     let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
     let policy = EffectPolicy::default();
@@ -593,6 +601,10 @@ async fn live_loop(
                     phase = Some(next);
                     dirty = true;
                 }
+                // A launch the workspace silently refused has no message to
+                // wait for, so the render clock is what turns its deadline into
+                // something the user can see.
+                dirty |= state.tick_launch(Instant::now());
                 if dirty {
                     draw(&mut out, &mut renderer, &state, phase)?;
                     dirty = false;
@@ -641,6 +653,11 @@ struct LiveState {
     prefix: String,
     /// Whether the router is holding a prefix and owns the next chord.
     prefix_pending: bool,
+    /// The profiles this client's launcher can offer. Client-visible only: the
+    /// daemon still resolves every identifier against its own table.
+    profiles: Vec<Profile>,
+    /// The launch this client is still waiting on, or the refusal it is showing.
+    launch: Option<LaunchNotice>,
 }
 
 impl LiveState {
@@ -664,7 +681,19 @@ impl LiveState {
                 .status_row(outer_size.rows.saturating_sub(1)),
             prefix,
             prefix_pending: false,
+            profiles: Vec::new(),
+            launch: None,
         }
+    }
+
+    /// Supplies the profiles the launcher offers.
+    ///
+    /// Separate from [`Self::new`] because a client with none is still a valid
+    /// client: an empty launcher lists nothing and confirms to nothing, which is
+    /// exactly what a workspace with no configured profile should show.
+    fn profiles(mut self, profiles: Vec<Profile>) -> Self {
+        self.profiles = profiles;
+        self
     }
 
     /// The status row's prefix field for the frame about to be drawn.
@@ -707,6 +736,15 @@ impl LiveState {
                 Ok(true)
             }
             ServerMessage::Panes(panes) => {
+                // The pane the client asked for arriving is the launch
+                // answering for itself, so the notice has nothing left to say.
+                if self
+                    .launch
+                    .as_ref()
+                    .is_some_and(|notice| !notice.refused() && notice.arrived(&panes))
+                {
+                    self.launch = None;
+                }
                 self.panes = panes.into_iter().map(|pane| (pane.pane, pane)).collect();
                 self.rebuild_queue();
                 Ok(true)
@@ -896,6 +934,17 @@ impl LiveState {
                 ));
             }
         }
+        // Last, so a launch this client is still waiting on — or one the
+        // workspace never made — takes the status row from whatever was
+        // otherwise on it. It is transient, and it is the more urgent thing.
+        if let Some(notice) = &self.launch {
+            spans.push(launch_notice_span(
+                Point::new(0, self.outer_size.rows.saturating_sub(1)),
+                notice,
+                self.outer_size.cols,
+                Theme::storm(),
+            ));
+        }
         spans
     }
 
@@ -929,14 +978,17 @@ impl LiveState {
     ///
     /// These shortcuts never cross the wire. The help surface is read from the
     /// very keymap the router resolved this chord with, the session switcher can
-    /// honestly list only the session this daemon exposed, and pane details are
+    /// honestly list only the session this daemon exposed, pane details are
     /// built solely from the server metadata and attention already cached
-    /// locally. A chord only reaches here when the keymap left it unbound, which
-    /// is why a user who binds `?` keeps their binding.
+    /// locally, and the launcher offers only the configured profiles this client
+    /// resolved. A chord only reaches here when the keymap left it unbound, which
+    /// is why a user who binds `?` keeps their binding — and why ordinary text
+    /// typed for a shell can never open any of them.
     fn open_overlay(&mut self, chord: &[u8], keymap: &Keymap) -> bool {
         let key = (chord.len() == 1).then(|| char::from(chord[0]));
         let next = match key {
             Some(HELP_KEY) => Some(Overlay::help(keymap)),
+            Some(ADD_PANE_KEY) => Some(Overlay::launcher(&self.profiles)),
             Some(SESSIONS_KEY) => Some(Overlay::sessions(vec![
                 SessionEntry::new(self.session, "current", self.areas.len()).attached(true),
             ])),
@@ -965,22 +1017,57 @@ impl LiveState {
     }
 
     /// Applies an open overlay's own keyboard vocabulary.
-    fn apply_overlay_keys(&mut self, keys: &[u8]) -> bool {
+    ///
+    /// Every key an open overlay understands is consumed here and never reaches
+    /// a pane, including the confirmation that closes it. A launch is the one
+    /// outcome the caller has to act on, so it is handed back rather than
+    /// swallowed — the overlay is already closed by the time it is.
+    fn apply_overlay_keys(&mut self, keys: &[u8]) -> OverlayKeys {
         let Some(action) = overlay_action(keys) else {
-            return false;
+            return OverlayKeys::Ignored;
         };
         let Some(overlay) = self.overlay.as_mut() else {
-            return false;
+            return OverlayKeys::Ignored;
         };
         match overlay.apply(action) {
-            OverlayOutcome::Open => true,
-            OverlayOutcome::Dismissed
-            | OverlayOutcome::SwitchSession(_)
-            | OverlayOutcome::Launch(_) => {
+            OverlayOutcome::Open => OverlayKeys::Consumed,
+            OverlayOutcome::Dismissed | OverlayOutcome::SwitchSession(_) => {
                 self.overlay = None;
-                true
+                OverlayKeys::Consumed
+            }
+            OverlayOutcome::Launch(request) => {
+                self.overlay = None;
+                OverlayKeys::Launch(request)
             }
         }
+    }
+
+    /// Records a launch this client has just put on the wire.
+    ///
+    /// The pane set is captured *here*, from the client's own cache, so the
+    /// notice can tell the pane this request produces from one that already
+    /// existed rather than from anything it reads off a grid.
+    fn sent_launch(&mut self, request: &LaunchRequest, now: Instant) {
+        self.launch = Some(LaunchNotice::sent(
+            request,
+            self.panes.keys().copied().collect::<BTreeSet<_>>(),
+            now,
+        ));
+    }
+
+    /// Advances the launch notice's clock, reporting whether the frame changed.
+    fn tick_launch(&mut self, now: Instant) -> bool {
+        let Some(notice) = self.launch.as_mut() else {
+            return false;
+        };
+        if notice.settle(now) {
+            return true;
+        }
+        if notice.finished(now) {
+            self.launch = None;
+            return true;
+        }
+        false
     }
 
     /// Whether a span is pane content or a client-owned visual layer.
@@ -1026,6 +1113,30 @@ impl LiveState {
             ),
             shape,
         ))
+    }
+}
+
+/// What an open overlay did with one chunk of keyboard bytes.
+///
+/// A three-way answer rather than a bool because "the overlay consumed it" and
+/// "the overlay consumed it *and* the user launched something" are different
+/// facts, and only the caller holds the connection to act on the second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum OverlayKeys {
+    /// Not an overlay action, or no overlay open. The keys are still the
+    /// router's to deal with.
+    Ignored,
+    /// The overlay handled it, and nothing crosses the wire.
+    Consumed,
+    /// The overlay closed on a confirmed profile.
+    Launch(LaunchRequest),
+}
+
+#[cfg(test)]
+impl OverlayKeys {
+    /// Whether these keys were the overlay's and must not reach a pane.
+    const fn consumed(&self) -> bool {
+        !matches!(self, Self::Ignored)
     }
 }
 
@@ -1128,7 +1239,16 @@ async fn route_keys(
 ) -> Result<bool, AttachRunError> {
     if state.overlay.is_some() {
         keys.reset();
-        let _ = state.apply_overlay_keys(&bytes);
+        // A confirmed launcher row is the one overlay outcome that leaves the
+        // client: an *identifier* the daemon resolves against its own table,
+        // never a command. Nothing else here reaches the wire at all.
+        if let OverlayKeys::Launch(request) = state.apply_overlay_keys(&bytes) {
+            attached
+                .send_command(Action::LaunchProfile(request.profile().as_str().to_owned()))
+                .await
+                .map_err(AttachError::from)?;
+            state.sent_launch(&request, Instant::now());
+        }
         return Ok(false);
     }
 
@@ -1760,7 +1880,10 @@ mod tests {
             })
             .expect("the grid damage applies");
         assert!(state.open_overlay(b"s", &Keymap::defaults()));
-        assert!(state.apply_overlay_keys(b"j"), "an overlay owns navigation");
+        assert!(
+            state.apply_overlay_keys(b"j").consumed(),
+            "an overlay owns navigation"
+        );
 
         let frame = state.frame();
         assert!(frame.spans.iter().any(|span| {
@@ -1836,7 +1959,10 @@ mod tests {
             ),
             "the help key must no longer land on pane details"
         );
-        assert!(state.apply_overlay_keys(b"\x1b"), "escape dismisses");
+        assert!(
+            state.apply_overlay_keys(b"\x1b").consumed(),
+            "escape dismisses"
+        );
         assert!(state.overlay.is_none());
 
         assert!(state.open_overlay(b"i", &keymap));
@@ -1878,12 +2004,159 @@ mod tests {
         assert!(state.open_overlay(b"?", &keymap));
         for key in [b"j".as_slice(), b"k", b"g", b"\r"] {
             let consumed = state.apply_overlay_keys(key);
-            assert!(consumed, "the overlay owns {key:?}");
+            assert!(consumed.consumed(), "the overlay owns {key:?}");
         }
         assert!(
             state.overlay.is_none(),
             "enter closes a reading surface rather than acting"
         );
+    }
+
+    /// The launcher is the client's own surface over the client's own profile
+    /// list, and confirming a row is the one overlay outcome that leaves it.
+    #[test]
+    fn the_add_pane_key_opens_a_launcher_over_the_configured_profiles() {
+        let keymap = Keymap::defaults();
+        let mut state = overlay_state(12, "C-b").profiles(Profile::built_ins());
+
+        assert!(state.open_overlay(b"a", &keymap));
+        let Some(OverlayKind::Launcher(entries)) = state.overlay.as_ref().map(Overlay::kind) else {
+            panic!("the add-pane key opens the profile launcher");
+        };
+        assert_eq!(
+            entries
+                .iter()
+                .map(|entry| entry.profile().as_str())
+                .collect::<Vec<_>>(),
+            ["generic", "codex", "claude"],
+            "the launcher lists exactly the profiles this client resolved"
+        );
+
+        let OverlayKeys::Launch(request) = state.apply_overlay_keys(b"\r") else {
+            panic!("confirming a launcher row is a launch the caller must send");
+        };
+        assert_eq!(request.profile().as_str(), "generic");
+        assert!(
+            state.overlay.is_none(),
+            "the launcher closes on the confirmation that produced the launch"
+        );
+    }
+
+    /// A client with nothing configured still opens a launcher, and it confirms
+    /// to nothing — the surface must never invent a profile to offer.
+    #[test]
+    fn a_launcher_with_no_configured_profile_launches_nothing() {
+        let mut state = overlay_state(12, "C-b");
+        assert!(state.open_overlay(b"a", &Keymap::defaults()));
+        assert_eq!(
+            state.apply_overlay_keys(b"\r"),
+            OverlayKeys::Consumed,
+            "an empty launcher consumes the confirmation without naming a profile"
+        );
+    }
+
+    /// Escape is the other half: the overlay closes, nothing is sent, and no
+    /// notice claims a launch that never happened.
+    #[test]
+    fn dismissing_the_launcher_leaves_the_workspace_untouched() {
+        let mut state = overlay_state(12, "C-b").profiles(Profile::built_ins());
+        assert!(state.open_overlay(b"a", &Keymap::defaults()));
+        assert_eq!(state.apply_overlay_keys(b"\x1b"), OverlayKeys::Consumed);
+        assert!(state.overlay.is_none());
+        assert!(
+            state.launch.is_none(),
+            "a dismissal must not leave a launch notice behind"
+        );
+    }
+
+    /// The client tracks its own request rather than reading a grid: the pane it
+    /// asked for arriving clears the notice, and silence past the deadline turns
+    /// it into a refusal the status row says out loud.
+    #[test]
+    fn a_launch_the_workspace_never_makes_becomes_a_visible_refusal() {
+        let mut state = overlay_state(12, "C-b").profiles(Profile::built_ins());
+        assert!(state.open_overlay(b"a", &Keymap::defaults()));
+        let OverlayKeys::Launch(request) = state.apply_overlay_keys(b"\r") else {
+            panic!("the first row confirms to a launch");
+        };
+        let sent = Instant::now();
+        state.sent_launch(&request, sent);
+
+        assert!(
+            !state.tick_launch(sent),
+            "a launch still inside its deadline is not a refusal"
+        );
+        assert!(
+            state.tick_launch(sent + crate::overlay::LAUNCH_DEADLINE),
+            "the deadline passing changes what the notice says"
+        );
+        let notice = state.launch.as_ref().expect("the refusal is still showing");
+        assert!(notice.refused());
+        assert_eq!(notice.text(), "generic did not start");
+        let drawn: Vec<String> = state
+            .frame()
+            .spans
+            .iter()
+            .map(|span| span.cells.iter().map(|cell| cell.ch).collect())
+            .collect();
+        assert!(
+            drawn
+                .iter()
+                .any(|row| row.contains("generic did not start")),
+            "the refusal must reach the frame: {drawn:?}"
+        );
+
+        // And it does not stay forever: the linger is what keeps a notice from
+        // covering a harness the user is typing into.
+        assert!(
+            state.tick_launch(
+                sent + crate::overlay::LAUNCH_DEADLINE + crate::overlay::NOTICE_LINGER
+            )
+        );
+        assert!(state.launch.is_none());
+    }
+
+    /// The other outcome: a *new* pane carrying the profile is the launch
+    /// answering for itself, while a pane that was already there is not.
+    #[test]
+    fn only_a_pane_the_client_had_not_seen_settles_its_own_launch() {
+        let mut state = overlay_state(12, "C-b").profiles(Profile::built_ins());
+        assert!(state.open_overlay(b"a", &Keymap::defaults()));
+        let OverlayKeys::Launch(request) = state.apply_overlay_keys(b"\r") else {
+            panic!("the first row confirms to a launch");
+        };
+        // `overlay_state` already cached pane 1 as a `generic` pane, so a
+        // resend of that same list must not be read as the launch arriving.
+        state.sent_launch(&request, Instant::now());
+        state
+            .apply(ServerMessage::Panes(vec![launched(PaneId::new(1))]))
+            .expect("the identity applies");
+        assert!(
+            state.launch.is_some(),
+            "a pane the client already knew about cannot answer for a new launch"
+        );
+
+        state
+            .apply(ServerMessage::Panes(vec![
+                launched(PaneId::new(1)),
+                launched(PaneId::new(2)),
+            ]))
+            .expect("the identity applies");
+        assert!(
+            state.launch.is_none(),
+            "the pane the launch asked for arriving retires the notice"
+        );
+    }
+
+    /// One `generic` pane as the server would report it.
+    fn launched(pane: PaneId) -> PaneInfo {
+        PaneInfo {
+            pane,
+            profile: "generic".to_owned(),
+            name: "shell".to_owned(),
+            task: None,
+            cwd: "/home/dev".to_owned(),
+        }
     }
 
     fn hello_tabs() -> Vec<TabSummary> {

@@ -7,7 +7,7 @@
 //! a list, a cursor into it, and a title; what differs between them is what a
 //! row says and what confirming one *means*.
 //!
-//! Four rules are load-bearing.
+//! Five rules are load-bearing.
 //!
 //! - **The keyboard owns an open overlay.** [`OverlayAction`] is cloo's own
 //!   vocabulary, decoded by [`crate::input::overlay_action`], and none of it
@@ -24,6 +24,10 @@
 //!   yields a [`LaunchRequest`] carrying that profile's ID. There is no
 //!   free-text command field to type into, which is what makes "explicit
 //!   profiles only" a fact about the types rather than a rule someone remembers.
+//! - **A launch the workspace never made is said out loud.** The daemon resolves
+//!   an identifier against its own table and refuses an unknown one in silence,
+//!   so [`LaunchNotice`] tracks the client's *own* request — never a grid — and
+//!   turns a request that produced no pane into a visible refusal.
 //!
 //! Like [`crate::chrome`], everything here is a pure function into [`Cell`]s:
 //! nothing writes to a descriptor, so a row is testable against an exact string
@@ -41,6 +45,9 @@
 //! };
 //! assert_eq!(request.profile().as_str(), "codex");
 //! ```
+
+use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use cloo_core::keymap::{Key, Keymap, action_name};
 use cloo_core::{Profile, ProfileCommand, ProfileId};
@@ -228,7 +235,7 @@ pub const HELP_KEY: char = '?';
 pub const DETAILS_KEY: char = 'i';
 /// The chord that opens the session surface.
 pub const SESSIONS_KEY: char = 's';
-/// The chord reserved for the profile launcher, wired up at M8-06.
+/// The chord that opens the profile launcher.
 pub const ADD_PANE_KEY: char = 'a';
 
 /// The bound actions the help surface lists, in the order it lists them.
@@ -261,7 +268,7 @@ const HELP_ACTIONS: [(Action, &str); 14] = [
 /// keymap — but a user who binds one of these keys to a real action takes it
 /// from the client, and the row disappears with it rather than lying.
 const HELP_CLIENT_KEYS: [(char, &str, &str); 4] = [
-    (ADD_PANE_KEY, "add pane", "reserved"),
+    (ADD_PANE_KEY, "add pane", "client"),
     (SESSIONS_KEY, "sessions", "client"),
     (DETAILS_KEY, "pane details", "client"),
     (HELP_KEY, "this help", "client"),
@@ -659,6 +666,145 @@ impl LaunchRequest {
     pub fn default_name(&self) -> &str {
         &self.default_name
     }
+}
+
+/// How long a sent launch has to produce its pane before the client says it
+/// did not.
+///
+/// Generous next to a `fork`/`exec` on a loaded machine, and short enough that
+/// a refusal does not read as a keystroke cloo simply ignored.
+pub const LAUNCH_DEADLINE: Duration = Duration::from_secs(2);
+
+/// How long a refusal stays on the status row once it is shown.
+///
+/// The style guide's rule for transient notices: long enough to read, and never
+/// covering a harness the user is typing into indefinitely.
+pub const NOTICE_LINGER: Duration = Duration::from_secs(4);
+
+/// What the client last asked the workspace to launch, and what came of it.
+///
+/// The daemon resolves a profile identifier against its own table and refuses an
+/// unknown one *silently* — no pane, no reply — so a client that showed nothing
+/// would leave a confirmed launcher row looking like a key that did nothing.
+/// This closes that gap without inventing a wire message and without reading a
+/// grid: the notice remembers which panes existed when *this client* sent the
+/// request, and a pane it has not seen before carrying that profile is the
+/// launch arriving. Silence past [`LAUNCH_DEADLINE`] is the other answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchNotice {
+    profile: String,
+    /// The panes that already existed when the request went out, so a pane the
+    /// user launched earlier from the same profile cannot answer for this one.
+    before: BTreeSet<PaneId>,
+    /// When the current state stops holding: the launch deadline while waiting,
+    /// the linger once refused.
+    until: Instant,
+    refused: bool,
+}
+
+impl LaunchNotice {
+    /// Records a launch this client has just sent.
+    ///
+    /// Takes the [`LaunchRequest`] itself rather than a string, so a notice can
+    /// only ever describe a profile a launcher row actually named.
+    #[must_use]
+    pub fn sent(request: &LaunchRequest, before: BTreeSet<PaneId>, now: Instant) -> Self {
+        Self {
+            profile: request.profile().as_str().to_owned(),
+            before,
+            until: now + LAUNCH_DEADLINE,
+            refused: false,
+        }
+    }
+
+    /// The profile the launch named.
+    #[must_use]
+    pub fn profile(&self) -> &str {
+        &self.profile
+    }
+
+    /// Whether the deadline has already turned this into a refusal.
+    #[must_use]
+    pub const fn refused(&self) -> bool {
+        self.refused
+    }
+
+    /// Whether `panes` holds the pane this launch asked for.
+    ///
+    /// A pane the client had not seen when it sent the request, carrying the
+    /// profile it named. Both halves matter: without the profile a *concurrent*
+    /// split would answer for the launch, and without the "not seen before" set
+    /// an existing pane of the same profile would.
+    #[must_use]
+    pub fn arrived(&self, panes: &[PaneInfo]) -> bool {
+        panes
+            .iter()
+            .any(|info| info.profile == self.profile && !self.before.contains(&info.pane))
+    }
+
+    /// Turns a waiting notice whose deadline has passed into a refusal.
+    ///
+    /// Reports whether the notice now says something different, which is what
+    /// decides whether the frame has to be redrawn.
+    pub fn settle(&mut self, now: Instant) -> bool {
+        if self.refused || now < self.until {
+            return false;
+        }
+        self.refused = true;
+        self.until = now + NOTICE_LINGER;
+        true
+    }
+
+    /// Whether the notice has finished saying what it had to say.
+    #[must_use]
+    pub fn finished(&self, now: Instant) -> bool {
+        self.refused && now >= self.until
+    }
+
+    /// The one line the status row draws, in the user's words.
+    ///
+    /// ASCII throughout, like every other chrome string: the message a user
+    /// needs when a launch did not happen is the last one that may depend on a
+    /// terminal rendering a glyph.
+    #[must_use]
+    pub fn text(&self) -> String {
+        if self.refused {
+            format!("{} did not start", self.profile)
+        } else {
+            format!("launching {}", self.profile)
+        }
+    }
+}
+
+/// Builds the launch notice row, exactly `width` cells wide.
+///
+/// Spends width in the same fixed order as an overlay row — the `launch` lead is
+/// what the row *is* and the message truncates — so the status row degrades like
+/// the rest of the chrome. A refusal is carried by the word as well as the
+/// colour, because a 16-colour terminal has to say the same thing.
+#[must_use]
+pub fn launch_notice_cells(notice: &LaunchNotice, width: u16, theme: Theme) -> Vec<Cell> {
+    let tone = if notice.refused() {
+        ThemeToken::Warning
+    } else {
+        ThemeToken::Info
+    };
+    row_cells(
+        &RowSpec {
+            selected: false,
+            lead: Field::new("launch", theme.color(ThemeToken::Muted), CellAttrs::NONE),
+            title: Field::new(notice.text(), theme.color(tone), CellAttrs::BOLD),
+            extras: Vec::new(),
+        },
+        width,
+        theme,
+    )
+}
+
+/// The launch notice as a positioned span.
+#[must_use]
+pub fn launch_notice_span(at: Point, notice: &LaunchNotice, width: u16, theme: Theme) -> Span {
+    Span::new(at, launch_notice_cells(notice, width, theme))
 }
 
 /// What one keyboard action did to an overlay.
@@ -1145,6 +1291,85 @@ mod tests {
         );
     }
 
+    /// A notice can only ever describe a profile a launcher row named, and it
+    /// says both states in words rather than only in colour.
+    #[test]
+    fn a_launch_notice_says_which_profile_and_which_outcome_in_words() {
+        let mut launcher = Overlay::launcher(&Profile::built_ins());
+        let OverlayOutcome::Launch(request) = launcher.apply(OverlayAction::Confirm) else {
+            panic!("the first row confirms to a launch");
+        };
+        let sent = Instant::now();
+        let mut notice = LaunchNotice::sent(&request, BTreeSet::new(), sent);
+        assert_eq!(notice.profile(), "generic");
+        assert_eq!(notice.text(), "launching generic");
+        assert!(!notice.refused());
+
+        assert!(!notice.settle(sent), "a launch inside its deadline waits");
+        assert!(notice.settle(sent + LAUNCH_DEADLINE));
+        assert!(notice.refused());
+        assert_eq!(notice.text(), "generic did not start");
+        assert!(
+            !notice.settle(sent + LAUNCH_DEADLINE),
+            "a refusal settles once"
+        );
+        assert!(!notice.finished(sent + LAUNCH_DEADLINE));
+        assert!(notice.finished(sent + LAUNCH_DEADLINE + NOTICE_LINGER));
+    }
+
+    /// The pane the request asked for is a pane the client had not seen, and
+    /// only for the profile it named — the two halves that keep an unrelated
+    /// split from answering for a launch.
+    #[test]
+    fn a_notice_is_only_answered_by_the_pane_its_own_request_produced() {
+        let mut launcher = Overlay::launcher(&Profile::built_ins());
+        let OverlayOutcome::Launch(request) = launcher.apply(OverlayAction::Confirm) else {
+            panic!("the first row confirms to a launch");
+        };
+        let existing = PaneId::new(1);
+        let notice = LaunchNotice::sent(&request, BTreeSet::from([existing]), Instant::now());
+
+        let pane = |pane, profile: &str| PaneInfo {
+            pane,
+            profile: profile.to_owned(),
+            name: "shell".to_owned(),
+            task: None,
+            cwd: "/".to_owned(),
+        };
+        assert!(
+            !notice.arrived(&[pane(existing, "generic")]),
+            "a pane that was already there cannot answer for a new launch"
+        );
+        assert!(
+            !notice.arrived(&[pane(existing, "generic"), pane(PaneId::new(2), "codex")]),
+            "a new pane of another profile is somebody else's launch"
+        );
+        assert!(notice.arrived(&[pane(existing, "generic"), pane(PaneId::new(2), "generic")]));
+    }
+
+    /// The notice is chrome like every other row: exactly the width asked for,
+    /// at every width, with the message truncating rather than overflowing.
+    #[test]
+    fn a_launch_notice_row_is_exactly_the_width_asked_for() {
+        let mut launcher = Overlay::launcher(&Profile::built_ins());
+        let OverlayOutcome::Launch(request) = launcher.apply(OverlayAction::Confirm) else {
+            panic!("the first row confirms to a launch");
+        };
+        let notice = LaunchNotice::sent(&request, BTreeSet::new(), Instant::now());
+        for width in 0..=60u16 {
+            assert_eq!(
+                launch_notice_cells(&notice, width, Theme::storm()).len(),
+                usize::from(width),
+                "the notice must be exactly {width} cells"
+            );
+        }
+        let drawn: String = launch_notice_cells(&notice, 40, Theme::storm())
+            .iter()
+            .map(|cell| cell.ch)
+            .collect();
+        assert_eq!(drawn, "  launch launching generic              ");
+    }
+
     #[test]
     fn confirming_the_details_view_closes_it_because_there_is_nothing_to_act_on() {
         assert_eq!(details().confirm(), OverlayOutcome::Dismissed);
@@ -1182,8 +1407,8 @@ mod tests {
     }
 
     /// A row says which `[keys]` name to write, so the surface doubles as the
-    /// answer to "how do I change this" — and the one key that is not yet a
-    /// command says so rather than pretending to be one.
+    /// answer to "how do I change this" — and cloo's own surfaces, which have no
+    /// `[keys]` name to give, say where they come from instead.
     #[test]
     fn a_help_row_says_where_its_binding_comes_from() {
         let rows = help_rows(&help());
@@ -1192,7 +1417,7 @@ mod tests {
             "split right".to_owned(),
             "split-vertical".to_owned()
         )));
-        assert!(rows.contains(&("a".to_owned(), "add pane".to_owned(), "reserved".to_owned())));
+        assert!(rows.contains(&("a".to_owned(), "add pane".to_owned(), "client".to_owned())));
         assert!(rows.contains(&("?".to_owned(), "this help".to_owned(), "client".to_owned())));
     }
 

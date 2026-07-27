@@ -182,12 +182,12 @@ say what it can be.
 `<prefix> ?` opens a client-owned help overlay rather than pane details, as of M8-04. Its title names
 the currently effective prefix — `keys - prefix C-b`, or whatever `[keys] prefix` says — and its rows
 are the short controls for split, focus, zoom, tabs, copy, and detach, plus the client's own
-surfaces and the `a` reserved for the launcher. Every row is read from the live keymap, so a rebound
+surfaces — the launcher among them. Every row is read from the live keymap, so a rebound
 chord appears verbatim and an action the user unbound has no row at all rather than a key that does
-nothing. Pane details stay on `<prefix> i`. `<prefix> a` opens the profile launcher at M8-06;
-selecting a valid profile asks the server to add its pane, and no shell text is parsed as a cloo
-command. All of these retain the existing dimmed backdrop, Escape dismissal, exact width ladder, and
-16-colour-safe text hints.
+nothing. Pane details stay on `<prefix> i`. `<prefix> a` opens the profile launcher, live as of
+M8-06: it lists the profiles the client resolved, confirming one asks the server to add its pane,
+and no shell text is parsed as a cloo command. All of these retain the existing dimmed backdrop,
+Escape dismissal, exact width ladder, and 16-colour-safe text hints.
 
 ### Mouse gestures on chrome
 
@@ -287,16 +287,23 @@ write when rebinding it, which is the field that yields first:
 ```
 
 The chord column is accented *and* bold, because the one thing a user opened this surface to find
-may not rest on colour; the whole surface is ASCII for the same reason. The two rows that name no
-`[keys]` action say where they come from instead — `client` for cloo's own surfaces, `reserved` for
-the launcher key that is not a command yet — so the surface never presents a key that does nothing
-as though it were bound.
+may not rest on colour; the whole surface is ASCII for the same reason. The rows that name no
+`[keys]` action say `client` instead — they are cloo's own surfaces, reached without the wire — so
+the surface never presents a key that does nothing as though it were bound.
+
+A confirmed launch leaves one transient line on the status row, because a daemon that refuses an
+identifier its own table does not name refuses it in silence, and a launcher row that appeared to do
+nothing is the worse failure. The line is `launch launching <profile>` while the client is waiting
+and `launch <profile> did not start` once the deadline has passed with no such pane; both spend
+their width in the same fixed order as an overlay row, and both say the outcome in words as well as
+in colour. It clears itself when the pane arrives and lingers only briefly when it does not, so it
+never sits over a harness the user is typing into.
 
 The attached client layers an open overlay over the already composed tab, header, pane-body, and
 status spans: it dims that existing frame without changing any character, then paints the raised
 overlay box above it. Its keys are consumed locally — they never become pane input. As of M8-04 the
 client-local entries are `<prefix> ?` for the help surface, `<prefix> s` for the session surface, and
-`<prefix> i` for the focused pane's details; `<prefix> a` joins them at M8-06. Each is claimed only
+`<prefix> i` for the focused pane's details; `<prefix> a` joined them at M8-06. Each is claimed only
 while the keymap leaves that chord unbound, and all use the same Escape dismissal and keyboard
 vocabulary as every overlay.
 

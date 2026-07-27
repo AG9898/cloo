@@ -274,6 +274,36 @@ fn spawn_workspace_on(tty: &Tty, runtime_dir: &Path) -> std::process::Child {
     spawn_workspace_with_term(tty, runtime_dir, "xterm-256color")
 }
 
+/// Runs a bare `cloo` against a chosen configuration file.
+///
+/// The whole workspace — this client *and* the daemon it starts, which inherits
+/// the environment — resolves the same document, which is what makes a profile
+/// the launcher offers one the daemon can also look up.
+fn spawn_workspace_with_config(
+    tty: &Tty,
+    runtime_dir: &Path,
+    config: &Path,
+) -> std::process::Child {
+    let stdio = || {
+        Stdio::from(
+            tty.slave
+                .try_clone()
+                .expect("the slave descriptor can be duplicated"),
+        )
+    };
+    cloo()
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .env("XDG_RUNTIME_DIR", runtime_dir)
+        .env("CLOO_CONFIG", config)
+        .env_remove("CLOO_SOCKET")
+        .env("TERM", "xterm-256color")
+        .env_remove("COLORTERM")
+        .spawn()
+        .expect("the cloo binary is built before its integration tests")
+}
+
 /// Runs a bare `cloo` with a chosen `TERM`, which is what decides whether the
 /// attach half of the workspace entry can proceed at all.
 fn spawn_workspace_with_term(tty: &Tty, runtime_dir: &Path, term: &str) -> std::process::Child {
@@ -391,6 +421,37 @@ fn pane_count(socket: &Path) -> usize {
         })
         .await
         .expect("the workspace reports its layout")
+    })
+}
+
+/// Which profile every pane in the session was launched from.
+///
+/// Asked over the wire for the same reason as [`pane_count`]: "what did the
+/// launcher actually start" is a question about session state, and a frame is
+/// only a picture of it.
+fn pane_profiles(socket: &Path) -> Vec<String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the test runtime builds");
+    runtime.block_on(async {
+        let mut attached = attach(socket, Size::new(80, 24), TermCaps::default(), None)
+            .await
+            .expect("the workspace accepts a probe client");
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                match attached.recv().await.expect("the session stays connected") {
+                    Some(ServerMessage::Panes(panes)) => {
+                        return panes.into_iter().map(|info| info.profile).collect();
+                    }
+                    Some(_) => {}
+                    None => panic!("the session closed before reporting its panes"),
+                }
+            }
+        })
+        .await
+        .expect("the workspace reports who its panes are")
     })
 }
 
@@ -620,6 +681,92 @@ fn a_bare_cloo_creates_the_default_workspace_and_leaves_it_running_on_detach() {
     assert!(
         socket.exists(),
         "the daemon outlives its client, which is what makes it a workspace"
+    );
+
+    shut_down_session(&socket);
+    wait_until("the daemon removing its own socket on exit", || {
+        !socket.exists()
+    });
+}
+
+#[test]
+fn the_launcher_adds_a_configured_profiles_pane_and_ordinary_text_never_does() {
+    // M8-06 end to end, through a real terminal: a user opens the launcher with
+    // the prefix, picks a profile their own configuration defines, and the
+    // workspace gains that pane. The other half is what makes the surface safe —
+    // the same characters typed for a shell stay text, so nothing anyone types
+    // into a harness can be reinterpreted as a cloo command.
+    let dir = TempDir::new("launcher");
+    let runtime_dir = dir.runtime_dir();
+    let socket = runtime_dir.join("cloo").join("default.sock");
+    let config = TempConfig::new();
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_with_config(&tty, &runtime_dir, &config.path());
+    // Everything the terminal was shown, so the leak assertion at the end can
+    // be made about the whole run rather than one frame of it.
+    let mut seen = read_until(&tty.master, "help")
+        .unwrap_or_else(|seen| panic!("a bare cloo never drew a workspace frame; saw:\n{seen}"));
+    wait_for_path(&socket);
+    wait_until("the workspace's first pane", || pane_count(&socket) == 1);
+
+    // Ordinary shell text first. `a` is the launcher's chord only after the
+    // prefix; typed for a child it is a character like any other, and this runs
+    // before the real launch so a pane it wrongly created would still be seen.
+    type_into(&tty.master, b"echo a-is-just-text\r");
+    seen += &read_until(&tty.master, "a-is-just-text")
+        .unwrap_or_else(|seen| panic!("typed text never reached the shell; saw:\n{seen}"));
+    assert_eq!(
+        pane_count(&socket),
+        1,
+        "text typed for a shell must never be read as a launcher command"
+    );
+
+    // The prefix is what opens it. `G` moves to the last row — the profile this
+    // test's own configuration added, after the three built-ins — and the title
+    // counter is how the frame reports where the selection is.
+    type_into(&tty.master, b"\x02a");
+    seen += &read_until(&tty.master, "launch profile")
+        .unwrap_or_else(|seen| panic!("the prefix chord never opened the launcher; saw:\n{seen}"));
+    type_into(&tty.master, b"G");
+    seen += &read_until(&tty.master, "4/4").unwrap_or_else(|seen| {
+        panic!("the launcher never listed the configured profile; saw:\n{seen}")
+    });
+    assert!(
+        seen.contains("notes"),
+        "the launcher must offer the configured profile; saw:\n{seen}"
+    );
+
+    type_into(&tty.master, b"\r");
+    wait_until("the confirmed profile creating a pane", || {
+        pane_count(&socket) == 2
+    });
+    let profiles = pane_profiles(&socket);
+    assert!(
+        profiles.contains(&"notes".to_owned()),
+        "the new pane must carry the profile that was confirmed; got {profiles:?}"
+    );
+
+    // The launcher's own keys were the client's. Had `a`, `G`, or the
+    // confirmation reached the first pane's shell instead, it would have tried
+    // to run them and said so.
+    assert!(
+        !seen.contains("not found"),
+        "an overlay key leaked into a pane; saw:\n{seen}"
+    );
+
+    // Close the launched pane so the surviving shell is the one the shutdown
+    // helper ends, and leave the terminal the way an ordinary detach does.
+    type_into(&tty.master, b"\x02x");
+    wait_until("the launched pane closing", || pane_count(&socket) == 1);
+    detach(&tty.master);
+    assert!(
+        wait_for_exit(&mut client, "launcher client").success(),
+        "the client detaches cleanly after a launch"
+    );
+    assert!(
+        !is_raw(&tty.slave),
+        "the launcher must not leave the outer terminal raw"
     );
 
     shut_down_session(&socket);

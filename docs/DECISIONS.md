@@ -99,6 +99,34 @@ the terminal must resolve this first.
 
 ## Resolved Decisions
 
+### RESOLVED-18 — A silently refused launch is reported by the client that asked
+
+**Resolved:** 2026-07-27
+
+**Decision:** The daemon keeps refusing an unknown profile identifier silently — no pane, no reply,
+no new wire message — and the attached client makes that refusal visible instead. On confirming a
+launcher row the client records the profile it named and the panes it had already seen; a pane it
+had not seen carrying that profile is the launch arriving, and silence past a bounded deadline
+becomes a status-row notice that lingers briefly and clears itself.
+
+**Why:** The refusal is the daemon declining to change anything, so there is no state delta to
+broadcast and nothing for the existing snapshot/diff machinery to carry. Adding a per-command reply
+would give the wire a second, request-scoped shape and a protocol bump for a case that costs the
+server nothing. The client already has the one fact the report needs — that *it* asked — so keeping
+the presentation there follows the existing rule that failure presentation and raw-mode restoration
+are the attached client's.
+
+**Alternatives rejected:** A `ServerMessage::CommandRefused` correlates a reply to a request the
+protocol otherwise has no request IDs for; showing nothing at all leaves a confirmed launcher row
+looking like a key that did nothing; and inferring the outcome from pane *output* would be exactly
+the screen-scraping the attention contract forbids.
+
+**Affects:** [`PRD.md`](PRD.md), [`ARCHITECTURE.md`](ARCHITECTURE.md),
+[`STYLEGUIDE.md`](STYLEGUIDE.md), [`AGENT_WORKFLOWS.md`](AGENT_WORKFLOWS.md), and
+`crates/cloo-client`.
+
+---
+
 ### RESOLVED-17 — One-command entry targets one global default workspace
 
 **Resolved:** 2026-07-24
