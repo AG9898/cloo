@@ -424,7 +424,11 @@ M8-01 makes a bare `cloo` that command's ordinary entry: `crates/cloo/src/main.r
 liveness branch (a bound socket is a workspace; a missing path and a listener-less socket file are
 not), `crates/cloo/src/cli.rs` proves only an empty argument vector parses as the workspace, and
 `crates/cloo/tests/cli.rs` proves a bare `cloo` creates a daemon that outlives its detaching client
-and joins a live one without displacing it.
+and joins a live one without displacing it. M8-02 hardens that entry in the same file: two
+concurrent bare `cloo`s converge on one session with one pane, a killed daemon's socket is
+recovered, a regular file and a symlink are each refused with the path intact and no socket left
+behind, and a `TERM` the client refuses hands back a cooked terminal while the workspace it created
+stays usable — every wait bounded, every fixture shutting down its own daemon.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -1030,3 +1034,26 @@ the attached client is about to draw. Piping its stderr to capture a startup dia
 not better: `eprintln!` panics when the write fails, so a parent that drops the read end after
 attaching would kill the daemon later. The recovery path is documentation — the error message names
 `cloo server <session>` as the way to see why.
+
+### 2026-07-27 — A losing daemon's exit is not proof that nothing will serve
+The winner of the startup race holds the socket `flock` from before it unlinks a stale socket until
+after it binds, so the loser is refused inside a window in which nothing is listening — and
+`wait_until_ready`'s single re-probe after its own child exited therefore failed whichever caller
+lost, reproducibly, the first time two bare `cloo`s were started together. It now keeps probing for
+a bounded `DAEMON_HANDOFF_GRACE` before reporting that exit. A caller cannot read the child's reason
+(its stderr is `/dev/null`), so a short grace is the whole distinction between "lost a race" and
+"failed for real".
+
+### 2026-07-27 — An inode number is not proof a socket was replaced
+`clear_stale` unlinks and rebinds, and the filesystem is free to hand the freed inode number
+straight back — a `(device, inode)` comparison then says "reused" about a socket that was in fact
+replaced. Prove replacement with liveness instead: `bind` refuses an existing path, so a daemon
+serving that path can only have unlinked the stale file first. The identity check is still the right
+tool for the opposite question (M8-01's "the live one was joined, not displaced").
+
+### 2026-07-27 — A stale-socket fixture must wait, because a test binary forks
+A thread that binds and immediately drops a listener can still answer a connect for a moment: any
+other test thread calling `Command::spawn` in that window forks a child which inherits the
+descriptor until it execs. `crates/cloo/tests/cli.rs` therefore waits for its stale socket to fall
+silent rather than asserting it once — the run under test would observe the same live socket, so
+this is fixture sequencing, not a cloo bug.

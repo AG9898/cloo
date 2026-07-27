@@ -340,8 +340,31 @@ proves the daemon is a separate process rather than the client itself. Against a
 foreground server is still the one waiting, so nothing displaced it. The branch those two share is
 unit tested in `src/main.rs`, where `daemon_is_listening` answers true for a bound socket and false
 for both a missing path and a socket file whose listener has been dropped — the property that keeps
-a killed daemon's leftovers from being mistaken for a workspace. M8-02 adds the concurrency, stale
-path, and bootstrap-failure coverage on top.
+a killed daemon's leftovers from being mistaken for a workspace.
+
+M8-02 puts the startup races and failures of that entry under the same fixture, still in
+`crates/cloo/tests/cli.rs`. Two bare `cloo`s started back to back against one empty socket converge
+on **one** workspace: text typed into one client's terminal reaches the other's screen, which can
+only happen if both are drawing the same session, and the surviving tab still holds exactly one
+pane — asked over the wire, because a daemon that lost the bind race is refused before it launches
+anything. A socket a `SIGKILL`ed daemon left behind is recovered rather than treated as live, and
+the recovery's own proof is that a client attaches at all: `bind` refuses an existing path, so
+serving it means the stale file was unlinked under the lock. An inode is *not* proof of that — a
+filesystem may hand the freed number straight back — and a fixture that compares one is unsound.
+A regular file and a symlink out of the socket directory are each refused with the terminal left
+cooked, the occupied path untouched byte for byte, and no socket left anywhere in the directory;
+the refusal names `cloo server default`, since a background daemon's own diagnostics go to
+`/dev/null`. The other half of "a failed bootstrap leaves the caller cooked" is an attach that
+fails *after* raw mode was entered: a `TERM` of `dumb` is refused by the client's capability
+negotiation, the outer terminal comes back, and the daemon that attempt created is an ordinary
+workspace the fixture then shuts down. Every wait in the file goes through the bounded `wait_until`,
+`wait_for_path`, `wait_for_exit`, or `read_until` helpers, and every test ends by exiting its
+session's shell and waiting for the socket to disappear.
+
+One fixture caution belongs with that: a stale-socket precondition is *waited for*, not asserted
+once. A test binary is multithreaded, so another thread forking a child between this thread's `bind`
+and its `drop` leaves that child holding a duplicate of the listener until it execs, and the socket
+answers a connect for exactly that long.
 
 Client tests will also prove that a first attached one-pane frame
 contains the configured prefix plus split and help hints; `<prefix> ?` must claim the keyboard for
@@ -854,9 +877,9 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-client/src/raw_mode.rs` | Raw mode | Pure `termios` transformation and the restore slot's arm/disarm state machine |
 | `crates/cloo-client/tests/raw_mode.rs` | Raw mode | Entry, drop, explicit restore, error unwind, panic, second-guard refusal, a pipe refused, and a registered mode reset written on the normal and panic paths, once, and refused rather than truncated |
 | `crates/cloo/src/cli.rs` | Binary | The command line as a pure function: every launch option read, options stopping at the program so `sh -c` keeps its own flags, `--` for a program that looks like a flag, an unknown or repeated flag refused, `--profile` and a program refused together, and resolution — a named or configured profile with its defaults, the user's name/task/directory winning, an unknown profile naming the ones that exist, a program running as a generic pane named for itself, a relative directory resolved and a tilde refused, and a control character in a name or task refused; plus `attach` and `server` each accepting their default session or one name and refusing flags or extra arguments, and an empty argument vector — and only an empty one — parsing as the default workspace on the session an omitted `attach` would have named |
-| `crates/cloo/src/main.rs` | Binary | The workspace startup branch: a bound socket is a live workspace while a missing path and a socket file whose listener was dropped are not, and the readiness probe's interval and deadline are bounded |
+| `crates/cloo/src/main.rs` | Binary | The workspace startup branch: a bound socket is a live workspace while a missing path and a socket file whose listener was dropped are not, and the readiness probe's interval, hand-off grace, and deadline are bounded and ordered |
 | `crates/cloo/src/local.rs` | Binary | The frame-rate cap |
-| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, a `SIGWINCH` resizing the pane all the way down to the child's own pty, and the launch surface end to end: the help naming the options and the built-in profiles, an unknown profile and a control-character task label refused as usage errors, a `CLOO_CONFIG` profile resolved before terminal setup, and a profile whose program is missing failing with a message that names it; plus the public foreground server lifecycle — a named socket, exclusive ownership, an attach and prefix detach, a cooked server terminal, and cleanup limited to the server's own socket; plus the managed default workspace — a bare `cloo` creating a daemon that outlives its detaching client, and a bare `cloo` joining a live one with the socket's identity and the foreground owner both unchanged |
+| `crates/cloo/tests/cli.rs` | Binary | The command line, refusal without a terminal, the one-pane smoke path driven over a pseudoterminal, signal-path terminal restore, a `SIGWINCH` resizing the pane all the way down to the child's own pty, and the launch surface end to end: the help naming the options and the built-in profiles, an unknown profile and a control-character task label refused as usage errors, a `CLOO_CONFIG` profile resolved before terminal setup, and a profile whose program is missing failing with a message that names it; plus the public foreground server lifecycle — a named socket, exclusive ownership, an attach and prefix detach, a cooked server terminal, and cleanup limited to the server's own socket; plus the managed default workspace — a bare `cloo` creating a daemon that outlives its detaching client, and a bare `cloo` joining a live one with the socket's identity and the foreground owner both unchanged; plus that entry's races and failures — two concurrent bare `cloo`s converging on one session with one pane, a `SIGKILL`ed daemon's socket recovered, a regular file and a symlink each refused with the path intact and no socket left behind, and a `TERM` the client refuses handing back a cooked terminal while the workspace it created stays usable |
 | `crates/cloo/tests/attach.rs` | Attach end to end | A real daemon and clients over real sockets: hello and snapshot, detach leaving the child alive and its state intact, then reattaching and reaping it after exit; a vanished client, a refused stale client, no daemon listening, a resize reaching both the grid and the child, a degenerate resize changing nothing, bounded burst damage with lagged-client recovery, concurrent-client fan-out, a typed OSC 52 effect reaching a capable, permitted client once, and a resync telling a client who every pane is — profile, name, task label, and working directory; plus input routing end to end: a paste bracketed exactly when the child asked, a focus report and an SGR mouse report reaching a child that enabled them, and neither reaching one that did not; plus copy mode end to end: copy-mode actions reaching the session over the wire, the projected copy state turning into highlight spans over the client's own damage-applied grid cache without changing it, and the explicit copy returning one typed clipboard store that the default policy refuses byte for byte and a permitting one writes; plus the wheel end to end: a chrome-routed report becoming copy-mode commands whose answer puts the copy cursor exactly `WHEEL_LINES` above where entering copy mode left it; plus the layout commands end to end: split, zoom, unzoom, and a focus-resolved close each moving the `Layout` frame the session reports; plus the `cloo attach` command over a real outer pty: composed chrome and child output render, the prefix detach restores terminal mode, and a second attachment reaches the same child |
 
 ---

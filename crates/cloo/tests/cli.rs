@@ -12,13 +12,15 @@
 
 use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::unix::fs::FileTypeExt;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use cloo_client::attach::attach;
-use cloo_proto::{Size, TermCaps};
+use cloo_proto::{ServerMessage, Size, TermCaps};
 
 /// How long a smoke test waits for expected output before failing.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -269,6 +271,12 @@ fn spawn_attached_on(tty: &Tty, runtime_dir: &Path, session: &str) -> std::proce
 
 /// Runs a bare `cloo` — the managed default workspace — on a pty.
 fn spawn_workspace_on(tty: &Tty, runtime_dir: &Path) -> std::process::Child {
+    spawn_workspace_with_term(tty, runtime_dir, "xterm-256color")
+}
+
+/// Runs a bare `cloo` with a chosen `TERM`, which is what decides whether the
+/// attach half of the workspace entry can proceed at all.
+fn spawn_workspace_with_term(tty: &Tty, runtime_dir: &Path, term: &str) -> std::process::Child {
     let stdio = || {
         Stdio::from(
             tty.slave
@@ -282,22 +290,27 @@ fn spawn_workspace_on(tty: &Tty, runtime_dir: &Path) -> std::process::Child {
         .stderr(stdio())
         .env("XDG_RUNTIME_DIR", runtime_dir)
         .env_remove("CLOO_SOCKET")
-        .env("TERM", "xterm-256color")
+        .env("TERM", term)
         .env_remove("COLORTERM")
         .spawn()
         .expect("the cloo binary is built before its integration tests")
 }
 
-/// Sends the prefix detach chord to an attached client's terminal.
-fn detach(master: &OwnedFd) {
+/// Writes bytes to a client's terminal, exactly as a user typing would.
+fn type_into(master: &OwnedFd, bytes: &[u8]) {
     let mut master = unsafe {
         // SAFETY: the caller's descriptor outlives this wrapper, which never
         // closes it.
         std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(master.as_raw_fd()))
     };
     master
-        .write_all(b"\x02d")
-        .expect("the prefix detach reaches the attached client");
+        .write_all(bytes)
+        .expect("the typed bytes reach the attached client");
+}
+
+/// Sends the prefix detach chord to an attached client's terminal.
+fn detach(master: &OwnedFd) {
+    type_into(master, b"\x02d");
 }
 
 /// Attaches once more and ends the session's shell, so no daemon outlives the
@@ -337,16 +350,69 @@ fn identity_of(path: &Path) -> (u64, u64) {
     (metadata.dev(), metadata.ino())
 }
 
-/// Waits for a foreground server to bind its session socket.
-fn wait_for_path(path: &Path) {
+/// Does `dir` contain any socket at all?
+///
+/// A refused bootstrap creates a lock file — that is how the refusal was
+/// reached — but it must leave no endpoint anyone could connect to.
+fn socket_dir_holds_a_socket(dir: &Path) -> bool {
+    std::fs::read_dir(dir)
+        .expect("the socket directory is readable")
+        .filter_map(Result::ok)
+        .any(|entry| {
+            std::fs::symlink_metadata(entry.path())
+                .is_ok_and(|metadata| metadata.file_type().is_socket())
+        })
+}
+
+/// How many panes the session's active tab has.
+///
+/// Asked over the wire rather than counted from a frame, because a frame is a
+/// picture and this is the question "did a losing daemon also start a child".
+/// The probe client detaches by dropping its socket, which the daemon already
+/// treats as an ordinary departure.
+fn pane_count(socket: &Path) -> usize {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the test runtime builds");
+    runtime.block_on(async {
+        let mut attached = attach(socket, Size::new(80, 24), TermCaps::default(), None)
+            .await
+            .expect("the workspace accepts a probe client");
+        tokio::time::timeout(TIMEOUT, async {
+            loop {
+                match attached.recv().await.expect("the session stays connected") {
+                    Some(ServerMessage::Layout(layout)) => return layout.panes.len(),
+                    Some(_) => {}
+                    None => panic!("the session closed before reporting a layout"),
+                }
+            }
+        })
+        .await
+        .expect("the workspace reports its layout")
+    })
+}
+
+/// Waits for `condition` to hold, failing at [`TIMEOUT`] rather than hanging.
+///
+/// Every wait in this file goes through one of these bounded helpers: a startup
+/// race that never converges must fail one test with a name, not wedge the
+/// suite.
+fn wait_until(what: &str, condition: impl Fn() -> bool) {
     let deadline = Instant::now() + TIMEOUT;
     while Instant::now() < deadline {
-        if path.exists() {
+        if condition() {
             return;
         }
         std::thread::sleep(Duration::from_millis(10));
     }
-    panic!("the server never bound {}", path.display());
+    panic!("{what} did not happen before the deadline");
+}
+
+/// Waits for a foreground server to bind its session socket.
+fn wait_for_path(path: &Path) {
+    wait_until(&format!("binding {}", path.display()), || path.exists());
 }
 
 /// Waits for a child without allowing a broken daemon to hang the whole suite.
@@ -541,14 +607,9 @@ fn a_bare_cloo_creates_the_default_workspace_and_leaves_it_running_on_detach() {
     );
 
     shut_down_session(&socket);
-    let deadline = Instant::now() + TIMEOUT;
-    while socket.exists() && Instant::now() < deadline {
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert!(
-        !socket.exists(),
-        "the daemon removes its own socket on exit"
-    );
+    wait_until("the daemon removing its own socket on exit", || {
+        !socket.exists()
+    });
 }
 
 #[test]
@@ -593,6 +654,231 @@ fn a_bare_cloo_joins_a_live_default_workspace_rather_than_starting_another() {
         wait_for_exit(&mut server, "foreground server").success(),
         "the one daemon exits with its shell"
     );
+}
+
+#[test]
+fn two_concurrent_bare_cloos_converge_on_one_workspace_with_one_pane() {
+    // Both are started with nothing listening, so both probe an empty path and
+    // both may go on to start a daemon. Convergence is a property of the bind
+    // and not of which one spawned first, so either interleaving has to end in
+    // the same place: one daemon, serving both clients, with one child.
+    let dir = TempDir::new("workspace-race");
+    let runtime_dir = dir.runtime_dir();
+    let socket = runtime_dir.join("cloo").join("default.sock");
+    assert!(!socket.exists(), "the fixture starts with no workspace");
+
+    let first_tty = open_tty();
+    let second_tty = open_tty();
+    let mut first = spawn_workspace_on(&first_tty, &runtime_dir);
+    let mut second = spawn_workspace_on(&second_tty, &runtime_dir);
+
+    read_until(&first_tty.master, "\x1b[?25l").unwrap_or_else(|seen| {
+        panic!("the first racing client never drew a workspace frame; saw:\n{seen}")
+    });
+    read_until(&second_tty.master, "\x1b[?25l").unwrap_or_else(|seen| {
+        panic!("the second racing client never drew a workspace frame; saw:\n{seen}")
+    });
+
+    // One daemon, not two that each bound a socket in turn: text typed into one
+    // client's terminal reaches the other's screen, which can only happen if
+    // they are drawing the same session's grid.
+    type_into(&first_tty.master, b"echo converged-on-one\r");
+    read_until(&second_tty.master, "converged-on-one").unwrap_or_else(|seen| {
+        panic!("the two clients did not converge on one session; saw:\n{seen}")
+    });
+
+    // And one child, not two: a daemon that loses the race is refused at the
+    // bind, which happens before it launches anything, so the survivor's tab
+    // still holds exactly the pane it was created with.
+    assert_eq!(
+        pane_count(&socket),
+        1,
+        "a losing daemon must not have launched a second initial pane"
+    );
+
+    detach(&first_tty.master);
+    detach(&second_tty.master);
+    assert!(
+        wait_for_exit(&mut first, "first workspace client").success(),
+        "the first client detaches cleanly"
+    );
+    assert!(
+        wait_for_exit(&mut second, "second workspace client").success(),
+        "the second client detaches cleanly"
+    );
+
+    shut_down_session(&socket);
+    wait_until("the one daemon removing its socket", || !socket.exists());
+}
+
+#[test]
+fn a_bare_cloo_replaces_the_socket_a_killed_daemon_left_behind() {
+    let dir = TempDir::new("workspace-stale");
+    let runtime_dir = dir.runtime_dir();
+    let socket_dir = runtime_dir.join("cloo");
+    std::fs::create_dir_all(&socket_dir).expect("the isolated socket directory is creatable");
+    let socket = socket_dir.join("default.sock");
+
+    // Exactly what a `SIGKILL`ed daemon leaves behind: a socket file with
+    // nothing listening on it and no lock held. Treating it as a live workspace
+    // would make the ordinary next run fail instead of recovering.
+    drop(UnixListener::bind(&socket).expect("the stale fixture socket binds"));
+    // Waited for rather than asserted once: another test thread forking a child
+    // between this bind and this drop leaves that child holding a duplicate of
+    // the listener until it execs, and the socket answers a connect for as long
+    // as it does. That is an artifact of a multithreaded test binary, not of
+    // cloo — but the run under test would see the same thing, so the fixture
+    // waits until its stale socket really is dead before starting one.
+    wait_until("the fixture's stale socket falling silent", || {
+        UnixStream::connect(&socket).is_err()
+    });
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_on(&tty, &runtime_dir);
+    read_until(&tty.master, "\x1b[?25l").unwrap_or_else(|seen| {
+        panic!("a stale socket was treated as a live workspace; saw:\n{seen}")
+    });
+    // A drawn frame *is* the replacement: `bind` refuses a path that already
+    // exists, so a daemon could only have started serving this one by unlinking
+    // the stale file first — which the socket layer does only while holding the
+    // lock. The inode cannot carry that proof, since a filesystem is free to
+    // hand the freed number straight back to the new socket.
+    assert!(
+        UnixStream::connect(&socket).is_ok(),
+        "the recovered workspace must be the one at the default path"
+    );
+
+    detach(&tty.master);
+    assert!(
+        wait_for_exit(&mut client, "workspace client").success(),
+        "the recovered workspace's client detaches cleanly"
+    );
+
+    shut_down_session(&socket);
+    wait_until("the recovered daemon removing its socket", || {
+        !socket.exists()
+    });
+}
+
+#[test]
+fn a_bare_cloo_refuses_a_non_socket_at_the_default_path_and_leaves_it_intact() {
+    let dir = TempDir::new("workspace-notasocket");
+    let runtime_dir = dir.runtime_dir();
+    let socket_dir = runtime_dir.join("cloo");
+    std::fs::create_dir_all(&socket_dir).expect("the isolated socket directory is creatable");
+    let socket = socket_dir.join("default.sock");
+    std::fs::write(&socket, b"precious").expect("the decoy is writable");
+    let before = identity_of(&socket);
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_on(&tty, &runtime_dir);
+    let status = wait_for_exit(&mut client, "workspace client");
+    assert_eq!(status.code(), Some(125), "a cloo failure, not a child's");
+    assert!(
+        !is_raw(&tty.slave),
+        "a bootstrap that never reached a daemon must leave the terminal cooked"
+    );
+
+    // The daemon it started is reaped by the caller before the refusal is
+    // reported, and the message names the command that shows the real reason —
+    // a background daemon's own diagnostics go to /dev/null.
+    let seen = read_until(&tty.master, "cloo server default")
+        .unwrap_or_else(|seen| panic!("the refusal never explained how to recover; saw:\n{seen}"));
+    assert!(seen.contains("exited"), "got:\n{seen}");
+
+    assert_eq!(
+        std::fs::read(&socket).expect("the decoy is still there"),
+        b"precious",
+        "cloo removed a file it did not create"
+    );
+    assert_eq!(
+        identity_of(&socket),
+        before,
+        "the occupied path must be left exactly as it was found"
+    );
+    assert!(
+        UnixStream::connect(&socket).is_err(),
+        "a refused bootstrap must leave no daemon listening"
+    );
+    assert!(
+        !socket_dir_holds_a_socket(&socket_dir),
+        "a refused bootstrap must not leave an orphan socket behind"
+    );
+}
+
+#[test]
+fn a_bare_cloo_refuses_a_symlink_at_the_default_path_without_following_it() {
+    let dir = TempDir::new("workspace-symlink");
+    let runtime_dir = dir.runtime_dir();
+    let socket_dir = runtime_dir.join("cloo");
+    std::fs::create_dir_all(&socket_dir).expect("the isolated socket directory is creatable");
+    let socket = socket_dir.join("default.sock");
+
+    // A symlink out of the socket directory. Following it would report the
+    // *target's* file type, and a "it is a socket, replace it" rule would then
+    // unlink something that lives somewhere else entirely.
+    let elsewhere = runtime_dir.join("precious.txt");
+    std::fs::write(&elsewhere, b"precious").expect("the symlink target is writable");
+    std::os::unix::fs::symlink(&elsewhere, &socket).expect("the symlink is creatable");
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_on(&tty, &runtime_dir);
+    let status = wait_for_exit(&mut client, "workspace client");
+    assert_eq!(status.code(), Some(125), "a cloo failure, not a child's");
+    assert!(
+        !is_raw(&tty.slave),
+        "a bootstrap that never reached a daemon must leave the terminal cooked"
+    );
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .expect("the symlink is still there")
+            .file_type()
+            .is_symlink(),
+        "the symlink was replaced rather than refused"
+    );
+    assert_eq!(
+        std::fs::read(&elsewhere).expect("the target is still there"),
+        b"precious",
+        "the refusal followed the symlink out of the socket directory"
+    );
+    assert!(
+        !socket_dir_holds_a_socket(&socket_dir),
+        "a refused bootstrap must not leave an orphan socket behind"
+    );
+}
+
+#[test]
+fn a_refused_terminal_hands_the_terminal_back_and_leaves_the_workspace_usable() {
+    // The other half of "a failed bootstrap leaves the caller cooked": here the
+    // daemon starts fine and the *attach* is what fails, after raw mode has
+    // already been entered. Restoring is the guard's job, not a happy path's.
+    let dir = TempDir::new("workspace-term");
+    let runtime_dir = dir.runtime_dir();
+    let socket = runtime_dir.join("cloo").join("default.sock");
+
+    let tty = open_tty();
+    let mut client = spawn_workspace_with_term(&tty, &runtime_dir, "dumb");
+    let status = wait_for_exit(&mut client, "workspace client");
+    assert_eq!(status.code(), Some(125), "a cloo failure, not a child's");
+    assert!(
+        !is_raw(&tty.slave),
+        "an attach that fails after entering raw mode must still restore it"
+    );
+    let seen = read_until(&tty.master, "dumb")
+        .unwrap_or_else(|seen| panic!("the refusal never named the terminal; saw:\n{seen}"));
+    assert!(seen.contains("TERM"), "got:\n{seen}");
+
+    // The daemon this attempt created is a real workspace, so this fixture owns
+    // it and shuts it down rather than leaving it for the next test.
+    assert_eq!(
+        pane_count(&socket),
+        1,
+        "the daemon a refused client created is still an ordinary workspace"
+    );
+    shut_down_session(&socket);
+    wait_until("the created daemon removing its socket", || {
+        !socket.exists()
+    });
 }
 
 #[test]

@@ -68,7 +68,9 @@ exactly one of two outcomes: connect to an already-live daemon, or create a mana
 daemon and connect once it owns the socket. The startup coordinator treats the socket bind as the
 authority, so simultaneous first runs converge on one daemon; a stale socket follows the socket
 lifecycle's existing safe replacement rules, while a non-socket or symlink remains a refusal. A
-failed bootstrap leaves the caller in cooked mode and does not leave an orphaned daemon behind.
+failed bootstrap leaves the caller in cooked mode and does not leave an orphaned daemon behind —
+whether it failed before a daemon answered or during the attach that follows one. **M8-02** proves
+each of those under real processes; see [TESTING.md](TESTING.md).
 
 Four properties carry that:
 
@@ -83,8 +85,12 @@ Four properties carry that:
   session; both are consequences of it being a background process, not a new mechanism.
 - **The bind is the arbiter of a race, not the spawn.** Two simultaneous first runs both start a
   daemon and exactly one wins the `flock` in `Listener::bind`; the loser exits as the ordinary
-  "already running" refusal. `wait_until_ready` therefore probes the socket again after observing
-  its own child exit, so a caller whose daemon lost still attaches to the survivor.
+  "already running" refusal. The winner holds that lock from before it unlinks a stale socket until
+  after it binds, so a loser is refused inside a window in which nothing is listening yet — its exit
+  is therefore not proof that nothing will serve, only that *this* child will not. `wait_until_ready`
+  keeps probing for a bounded `DAEMON_HANDOFF_GRACE` after observing its own child exit and reports
+  the exit only once that has elapsed, which is what makes a caller whose daemon lost attach to the
+  survivor instead of failing (**hardened and covered at M8-02**).
 - **Nothing touches the terminal until a daemon answers.** Raw mode is entered inside
   `cloo-client::attach::run`, which is reached only after a successful probe — that is what makes
   "a failed bootstrap leaves the caller in cooked mode" structural rather than a cleanup path.

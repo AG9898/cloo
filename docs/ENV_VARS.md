@@ -33,7 +33,8 @@ the user's shell and desktop session. cloo defines none of its own except `CLOO_
 `CLOO_SOCKET` — before it either attaches or starts the default daemon. An override therefore
 remains the way a test or developer isolates a workspace; it does not create a second configuration
 mechanism. A path occupied by a regular file or symlink remains an actionable refusal, never a
-candidate for deletion.
+candidate for deletion — proved against the resolved default path at M8-02, which also covers a
+socket a killed daemon left behind being recovered rather than mistaken for a live workspace.
 
 The daemon a bare `cloo` creates is this same binary re-executed as `cloo server default`, so it
 **inherits the caller's whole environment and working directory**. `CLOO_SOCKET`, `CLOO_CONFIG`,

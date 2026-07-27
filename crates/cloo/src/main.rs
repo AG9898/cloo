@@ -40,6 +40,19 @@ const DAEMON_READY_TIMEOUT: Duration = Duration::from_secs(10);
 /// How often the readiness probe retries while waiting.
 const DAEMON_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
+/// How long a caller keeps probing after the daemon *it* started has exited.
+///
+/// Losing the start race is an ordinary outcome, and the loser's exit is not
+/// proof that nothing will serve — only that this child will not. The winner
+/// holds the lock from before it unlinks a stale socket until after it binds,
+/// so a loser is refused inside a window in which nothing is listening yet.
+/// Giving up on the first failed probe after that exit therefore turns a race
+/// two callers are supposed to survive into a failure for whichever lost.
+///
+/// Bounded and short: a daemon that exited for a real reason never binds at
+/// all, and that message must not be slow.
+const DAEMON_HANDOFF_GRACE: Duration = Duration::from_secs(2);
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
 
@@ -163,27 +176,34 @@ fn start_daemon(session: &str) -> io::Result<std::process::Child> {
 ///
 /// The child is polled alongside the socket rather than instead of it. A daemon
 /// that exited because a *concurrent* first run won the lock is a success from
-/// here — the socket is live, just not this child's — so the exit is only
-/// reported once a final probe has also failed.
+/// here — the socket is live, just not this child's — so its exit only starts a
+/// bounded [`DAEMON_HANDOFF_GRACE`] in which the winner may still begin
+/// serving, and is reported as a failure only once that has also elapsed.
 fn wait_until_ready(
     socket: &Path,
     mut started: std::process::Child,
     session: &str,
 ) -> Result<(), String> {
     let deadline = Instant::now() + DAEMON_READY_TIMEOUT;
+    // How this child ended, and how long a survivor still has to take over.
+    let mut handed_off: Option<(std::process::ExitStatus, Instant)> = None;
     loop {
         if daemon_is_listening(socket) {
             return Ok(());
         }
-        if let Ok(Some(status)) = started.try_wait() {
-            if daemon_is_listening(socket) {
-                return Ok(());
+        if handed_off.is_none() {
+            if let Ok(Some(status)) = started.try_wait() {
+                handed_off = Some((status, deadline.min(Instant::now() + DAEMON_HANDOFF_GRACE)));
             }
-            return Err(format!(
-                "the cloo daemon exited ({status}) before it could serve {}; \
-                 run `cloo server {session}` to see why",
-                socket.display()
-            ));
+        }
+        if let Some((status, until)) = handed_off {
+            if Instant::now() >= until {
+                return Err(format!(
+                    "the cloo daemon exited ({status}) before it could serve {}; \
+                     run `cloo server {session}` to see why",
+                    socket.display()
+                ));
+            }
         }
         if Instant::now() >= deadline {
             // This process started it and it never became usable, so this
@@ -400,5 +420,10 @@ mod tests {
             DAEMON_READY_TIMEOUT <= Duration::from_secs(30),
             "a daemon that will never come up must not look like a hang"
         );
+        // The grace after a losing daemon exits is a window inside the same
+        // budget, not an extension of it: a start that genuinely failed still
+        // reports inside the overall timeout, and it reports promptly.
+        assert!(DAEMON_POLL_INTERVAL < DAEMON_HANDOFF_GRACE);
+        assert!(DAEMON_HANDOFF_GRACE < DAEMON_READY_TIMEOUT);
     }
 }
