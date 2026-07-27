@@ -10,7 +10,7 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 through M8-03 are
+**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 through M8-04 are
 complete. The
 daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
 foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
@@ -21,7 +21,7 @@ makes the keyboard controls discoverable in the first frame. See [`docs/PRD.md`]
 [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), which contains completed
-M0–M7 and M8-01 through M8-03 work plus the remaining M8 default-workspace and attached-UX tasks.
+M0–M7 and M8-01 through M8-04 work plus the remaining M8 default-workspace and attached-UX tasks.
 
 ---
 
@@ -92,7 +92,7 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01–M8-03 supply the daemon, workspace,
+All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01–M8-04 supply the daemon, workspace,
 client primitives, live attached-client integration, compatibility foundations, and the managed
 default-workspace entry. Dependencies are
 declared in the root `[workspace.dependencies]` and are constrained by a
@@ -438,6 +438,14 @@ from 0 to 60; `src/renderer.rs` reads the visible text back with escape sequence
 the hint survives a 16-colour terminal; `src/attach.rs` drives the live client state through the
 one-pane, two-pane, and pending cases; and `crates/cloo/tests/cli.rs` proves the clue words reach
 the first frame a bare `cloo` draws.
+M8-04 makes that `help ?` clue lead somewhere: `cloo-client/src/overlay.rs` adds the help surface as
+a fourth kind of the one overlay model — joining the dismissal and width-ladder loops rather than
+getting its own — with four fixtures for the property that it is read from the live keymap (a
+rebound prefix and chord verbatim, an unbound action with no row at all, a keymap that claims `?`
+taking that row with it, and each row naming the `[keys]` action to write), an ASCII-only loop, and
+an exact width ladder; `src/attach.rs` proves `?` opens help while `i` keeps pane details, that an
+open surface consumes navigation and Enter locally, and that a client configured with `M-a` draws
+that prefix and its controls in the composed frame.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -1075,3 +1083,13 @@ the visible text instead; a pty fixture in `crates/cloo/tests/cli.rs` matches th
 for the same reason. Relatedly, `read_until` consumes what it read, so two successive calls for two
 tokens that arrived in one write will hang on the second — read to the last token once and assert
 the rest from the returned buffer.
+
+### 2026-07-27 — A help surface must be read from the keymap, not written down beside it
+`Overlay::help` takes the `Keymap` the router is actually resolving against and looks each listed
+action's chord up in it, so a rebound prefix, a rebound chord, and an unbound action are all shown as
+they are — a hand-written table of the defaults passes every "it lists split and detach" test and
+lies the moment anyone edits `[keys]`. The client-local chords (`?`, `i`, `s`, and the reserved `a`)
+live as constants shared between `overlay` and `attach::open_overlay`, and each row appears only
+while the keymap leaves that key unbound, because `open_overlay` is reached only from
+`KeyRoute::Unbound` — a user who binds `?` keeps their binding and loses the row, rather than
+reading about a surface they can no longer open.

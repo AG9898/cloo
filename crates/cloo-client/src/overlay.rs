@@ -1,13 +1,13 @@
-//! Keyboard-first overlays: the session switcher, the profile launcher, and
-//! pane details.
+//! Keyboard-first overlays: the help surface, the session switcher, the profile
+//! launcher, and pane details.
 //!
 //! `docs/STYLEGUIDE.md` gives every overlay one language — dim the background,
 //! keep a clear selected row, show keyboard hints, dismiss with Escape — so this
-//! module is one model and one renderer rather than three of each. An overlay is
-//! a list, a cursor into it, and a title; what differs between the three is what
-//! a row says and what confirming one *means*.
+//! module is one model and one renderer rather than four of each. An overlay is
+//! a list, a cursor into it, and a title; what differs between them is what a
+//! row says and what confirming one *means*.
 //!
-//! Three rules are load-bearing.
+//! Four rules are load-bearing.
 //!
 //! - **The keyboard owns an open overlay.** [`OverlayAction`] is cloo's own
 //!   vocabulary, decoded by [`crate::input::overlay_action`], and none of it
@@ -15,6 +15,10 @@
 //! - **Every overlay is dismissible from every state.** [`OverlayAction::Dismiss`]
 //!   answers [`OverlayOutcome::Dismissed`] whatever the list holds, including an
 //!   empty one, so an overlay can never trap the terminal.
+//! - **The help surface is read from the keymap, never from a list of what the
+//!   defaults used to be.** [`Overlay::help`] takes the [`Keymap`] the router is
+//!   actually resolving against, so a rebound chord and a rebound prefix are
+//!   shown verbatim and an unbound action has no row at all.
 //! - **A launch names a profile, and only a profile.** A launcher row is built
 //!   from a validated [`Profile`] and from nothing else, and confirming one
 //!   yields a [`LaunchRequest`] carrying that profile's ID. There is no
@@ -38,8 +42,9 @@
 //! assert_eq!(request.profile().as_str(), "codex");
 //! ```
 
+use cloo_core::keymap::{Key, Keymap, action_name};
 use cloo_core::{Profile, ProfileCommand, ProfileId};
-use cloo_proto::{Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionId, Size};
+use cloo_proto::{Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionId, Size};
 
 use crate::chrome::{Attention, dim_cell_with_theme};
 use crate::input::OverlayAction;
@@ -214,12 +219,165 @@ impl PaneDetails {
 }
 
 // ---------------------------------------------------------------------------
+// Help
+// ---------------------------------------------------------------------------
+
+/// The chord that opens the help surface, when the keymap leaves it free.
+pub const HELP_KEY: char = '?';
+/// The chord that opens the focused pane's details.
+pub const DETAILS_KEY: char = 'i';
+/// The chord that opens the session surface.
+pub const SESSIONS_KEY: char = 's';
+/// The chord reserved for the profile launcher, wired up at M8-06.
+pub const ADD_PANE_KEY: char = 'a';
+
+/// The bound actions the help surface lists, in the order it lists them.
+///
+/// Deliberately a *curated* list rather than every binding in the table: the
+/// surface exists so a first-time user can act, and twenty-odd copy motions
+/// between `split` and `detach` would bury the controls it is there to teach.
+/// Each row's chord is still looked up in the live keymap, so nothing here
+/// claims a key the user did not configure.
+const HELP_ACTIONS: [(Action, &str); 14] = [
+    (Action::SplitVertical, "split right"),
+    (Action::SplitHorizontal, "split down"),
+    (Action::ClosePane, "close pane"),
+    (Action::FocusLeft, "focus left"),
+    (Action::FocusDown, "focus down"),
+    (Action::FocusUp, "focus up"),
+    (Action::FocusRight, "focus right"),
+    (Action::ToggleZoom, "zoom pane"),
+    (Action::NewTab, "new tab"),
+    (Action::NextTab, "next tab"),
+    (Action::PrevTab, "previous tab"),
+    (Action::CloseTab, "close tab"),
+    (Action::EnterCopyMode, "copy mode"),
+    (Action::DetachClient, "detach"),
+];
+
+/// The client-local surfaces, in the order the help surface lists them.
+///
+/// `(key, label, note)`. These never cross the wire, so they are not in the
+/// keymap — but a user who binds one of these keys to a real action takes it
+/// from the client, and the row disappears with it rather than lying.
+const HELP_CLIENT_KEYS: [(char, &str, &str); 4] = [
+    (ADD_PANE_KEY, "add pane", "reserved"),
+    (SESSIONS_KEY, "sessions", "client"),
+    (DETAILS_KEY, "pane details", "client"),
+    (HELP_KEY, "this help", "client"),
+];
+
+/// One line of the help surface: a chord, what it does, and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpEntry {
+    key: String,
+    label: String,
+    note: String,
+}
+
+impl HelpEntry {
+    /// The chord to press *after* the prefix, spelled as the keymap spells it.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// What pressing it does, in the user's words rather than the wire's.
+    #[must_use]
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    /// Where the binding comes from: its `[keys]` name, or that it is the
+    /// client's own surface.
+    #[must_use]
+    pub fn note(&self) -> &str {
+        &self.note
+    }
+}
+
+/// The effective key bindings, as one readable surface.
+///
+/// Built from a [`Keymap`] and from nothing else — there is no constructor
+/// taking a hand-written table — which is what makes "the help surface cannot
+/// disagree with the router" a fact about the type rather than a rule someone
+/// has to remember when they rebind a key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelpKeys {
+    prefix: String,
+    title: String,
+    entries: Vec<HelpEntry>,
+}
+
+impl HelpKeys {
+    /// Reads the effective bindings out of `keymap`.
+    #[must_use]
+    pub fn new(keymap: &Keymap) -> Self {
+        let prefix = keymap.prefix().to_string();
+        let mut entries = Vec::with_capacity(HELP_ACTIONS.len() + HELP_CLIENT_KEYS.len());
+        for (action, label) in HELP_ACTIONS {
+            // An action the user unbound has no chord to show, and inventing
+            // one would send them pressing a key that does nothing.
+            let Some(key) = bound_key(keymap, &action) else {
+                continue;
+            };
+            entries.push(HelpEntry {
+                key,
+                label: label.to_owned(),
+                note: action_name(&action).unwrap_or_default().to_owned(),
+            });
+        }
+        for (key, label, note) in HELP_CLIENT_KEYS {
+            if keymap.action(Key::char(key)).is_none() {
+                entries.push(HelpEntry {
+                    key: key.to_string(),
+                    label: label.to_owned(),
+                    note: note.to_owned(),
+                });
+            }
+        }
+        Self {
+            title: format!("keys - prefix {prefix}"),
+            prefix,
+            entries,
+        }
+    }
+
+    /// The prefix chord these bindings are reached through, drawn verbatim.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Every listed binding, in display order.
+    #[must_use]
+    pub fn entries(&self) -> &[HelpEntry] {
+        &self.entries
+    }
+}
+
+/// The first chord bound to `action`, if any.
+///
+/// First rather than every chord: the defaults bind both `h` and `Left` to
+/// `focus-left`, and a help surface that listed each alias would spend four rows
+/// saying one thing.
+fn bound_key(keymap: &Keymap, action: &Action) -> Option<String> {
+    keymap
+        .bindings()
+        .iter()
+        .find(|(_, bound)| bound == action)
+        .map(|(key, _)| key.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // The overlay
 // ---------------------------------------------------------------------------
 
 /// Which overlay is open, and what it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayKind {
+    /// The effective key bindings.
+    Help(HelpKeys),
     /// The session switcher.
     Sessions(Vec<SessionEntry>),
     /// The profile launcher.
@@ -236,6 +394,20 @@ pub struct Overlay {
 }
 
 impl Overlay {
+    /// Opens the help surface over the keymap the client is resolving against.
+    ///
+    /// The one surface a user reaches before they know any other key, so it is
+    /// read from the live keymap rather than from a written-down copy of the
+    /// defaults: a rebound prefix, a rebound chord, and an unbound action are
+    /// all shown as they actually are.
+    #[must_use]
+    pub fn help(keymap: &Keymap) -> Self {
+        Self {
+            kind: OverlayKind::Help(HelpKeys::new(keymap)),
+            selected: 0,
+        }
+    }
+
     /// Opens the session switcher over a list of sessions.
     #[must_use]
     pub fn sessions(entries: Vec<SessionEntry>) -> Self {
@@ -273,9 +445,13 @@ impl Overlay {
     }
 
     /// The overlay's title.
+    ///
+    /// Borrowed rather than `'static` because the help surface's title carries
+    /// the effective prefix, which is configuration and not a constant.
     #[must_use]
-    pub const fn title(&self) -> &'static str {
-        match self.kind {
+    pub fn title(&self) -> &str {
+        match &self.kind {
+            OverlayKind::Help(help) => &help.title,
             OverlayKind::Sessions(_) => "sessions",
             OverlayKind::Launcher(_) => "launch profile",
             OverlayKind::Details(_) => "pane details",
@@ -286,6 +462,7 @@ impl Overlay {
     #[must_use]
     pub fn len(&self) -> usize {
         match &self.kind {
+            OverlayKind::Help(help) => help.entries.len(),
             OverlayKind::Sessions(entries) => entries.len(),
             OverlayKind::Launcher(entries) => entries.len(),
             OverlayKind::Details(details) => details.fields().len(),
@@ -366,9 +543,9 @@ impl Overlay {
                         })
                     })
             }
-            // Details is a reading surface: there is nothing to act on, so
-            // Enter does the only other thing a user could mean by it.
-            OverlayKind::Details(_) => OverlayOutcome::Dismissed,
+            // Details and help are reading surfaces: there is nothing to act
+            // on, so Enter does the only other thing a user could mean by it.
+            OverlayKind::Help(_) | OverlayKind::Details(_) => OverlayOutcome::Dismissed,
         }
     }
 
@@ -389,6 +566,19 @@ impl Overlay {
         };
         let muted = theme.color(ThemeToken::Muted);
         match &self.kind {
+            OverlayKind::Help(help) => {
+                let entry = &help.entries[index];
+                RowSpec {
+                    selected,
+                    lead: Field::new(
+                        entry.key.clone(),
+                        theme.color(ThemeToken::Accent),
+                        CellAttrs::BOLD,
+                    ),
+                    title: Field::new(entry.label.clone(), primary, CellAttrs::NONE),
+                    extras: vec![Field::new(entry.note.clone(), muted, CellAttrs::NONE)],
+                }
+            }
             OverlayKind::Sessions(entries) => {
                 let entry = &entries[index];
                 let mut extras = vec![Field::new(
@@ -437,6 +627,7 @@ impl Overlay {
     /// row that has run out of width still tells the user how to get out.
     fn hints(&self) -> [&'static str; 3] {
         match self.kind {
+            OverlayKind::Help(_) => ["esc close", "enter close", "j/k move"],
             OverlayKind::Sessions(_) => ["esc close", "enter switch", "j/k move"],
             OverlayKind::Launcher(_) => ["esc close", "enter launch", "j/k move"],
             OverlayKind::Details(_) => ["esc close", "enter close", "j/k move"],
@@ -774,6 +965,35 @@ mod tests {
 
     use cloo_core::ProfileCommand;
 
+    fn help() -> Overlay {
+        Overlay::help(&Keymap::defaults())
+    }
+
+    /// The labels of every row the help surface lists, in order.
+    fn help_rows(overlay: &Overlay) -> Vec<(String, String, String)> {
+        let OverlayKind::Help(keys) = overlay.kind() else {
+            panic!("expected the help overlay");
+        };
+        keys.entries()
+            .iter()
+            .map(|entry| {
+                (
+                    entry.key().to_owned(),
+                    entry.label().to_owned(),
+                    entry.note().to_owned(),
+                )
+            })
+            .collect()
+    }
+
+    /// The chord the help surface shows for `label`, if it shows one at all.
+    fn help_key(overlay: &Overlay, label: &str) -> Option<String> {
+        help_rows(overlay)
+            .into_iter()
+            .find(|(_, shown, _)| shown == label)
+            .map(|(key, _, _)| key)
+    }
+
     fn sessions() -> Overlay {
         Overlay::sessions(vec![
             SessionEntry::new(SessionId::new(7), "main", 3).attached(true),
@@ -809,7 +1029,8 @@ mod tests {
     /// an overlay that could not be closed would hold the terminal hostage.
     #[test]
     fn every_overlay_is_dismissible_including_an_empty_one() {
-        let cases: [(&str, Overlay); 5] = [
+        let cases: [(&str, Overlay); 6] = [
+            ("help", help()),
             ("sessions", sessions()),
             ("launcher", launcher()),
             ("details", details()),
@@ -929,6 +1150,140 @@ mod tests {
         assert_eq!(details().confirm(), OverlayOutcome::Dismissed);
     }
 
+    // -- help ---------------------------------------------------------------
+
+    /// The surface's whole job: a user who knows nothing but `?` can read the
+    /// effective prefix and every control the milestone promises off one box.
+    #[test]
+    fn the_help_surface_names_the_prefix_and_every_promised_control() {
+        let overlay = help();
+        assert_eq!(overlay.title(), "keys - prefix C-b");
+        for (label, key) in [
+            ("split right", "%"),
+            ("split down", "\""),
+            ("focus left", "h"),
+            ("focus down", "j"),
+            ("focus up", "k"),
+            ("focus right", "l"),
+            ("zoom pane", "z"),
+            ("new tab", "c"),
+            ("next tab", "n"),
+            ("previous tab", "p"),
+            ("copy mode", "["),
+            ("detach", "d"),
+            ("add pane", "a"),
+        ] {
+            assert_eq!(
+                help_key(&overlay, label).as_deref(),
+                Some(key),
+                "{label} must be reachable from the help surface"
+            );
+        }
+    }
+
+    /// A row says which `[keys]` name to write, so the surface doubles as the
+    /// answer to "how do I change this" — and the one key that is not yet a
+    /// command says so rather than pretending to be one.
+    #[test]
+    fn a_help_row_says_where_its_binding_comes_from() {
+        let rows = help_rows(&help());
+        assert!(rows.contains(&(
+            "%".to_owned(),
+            "split right".to_owned(),
+            "split-vertical".to_owned()
+        )));
+        assert!(rows.contains(&("a".to_owned(), "add pane".to_owned(), "reserved".to_owned())));
+        assert!(rows.contains(&("?".to_owned(), "this help".to_owned(), "client".to_owned())));
+    }
+
+    /// The property that makes the surface worth reading from the keymap: a
+    /// hand-written table would keep showing `C-b %` here.
+    #[test]
+    fn a_rebound_prefix_and_chord_are_shown_verbatim() {
+        let mut keys = Keymap::defaults();
+        keys.set_prefix(Key::parse("M-Space").expect("a spelling"));
+        keys.unbind(Key::char('%'));
+        keys.bind(Key::char('v'), Action::SplitVertical);
+        let overlay = Overlay::help(&keys);
+        assert_eq!(
+            overlay.title(),
+            "keys - prefix M-space",
+            "the keymap's own canonical spelling, not the test's"
+        );
+        assert_eq!(help_key(&overlay, "split right").as_deref(), Some("v"));
+    }
+
+    #[test]
+    fn an_unbound_action_has_no_help_row_at_all() {
+        let mut keys = Keymap::defaults();
+        keys.unbind(Key::char('d'));
+        assert_eq!(
+            help_key(&Overlay::help(&keys), "detach"),
+            None,
+            "a row for a chord that does nothing sends the user pressing it"
+        );
+    }
+
+    /// The client's own surfaces are not in the keymap, so the honest rule is
+    /// that a user who binds one of those keys takes it — and the row goes with
+    /// it, because the chord will never reach `open_overlay` again.
+    #[test]
+    fn a_keymap_that_claims_a_client_key_takes_its_help_row_too() {
+        let mut keys = Keymap::defaults();
+        keys.bind(Key::char('?'), Action::ToggleZoom);
+        let overlay = Overlay::help(&keys);
+        assert_eq!(help_key(&overlay, "this help"), None);
+        assert_eq!(
+            help_key(&overlay, "sessions").as_deref(),
+            Some("s"),
+            "the neighbouring surfaces are untouched"
+        );
+    }
+
+    #[test]
+    fn the_help_surface_is_a_reading_surface_and_confirms_to_a_close() {
+        assert_eq!(help().confirm(), OverlayOutcome::Dismissed);
+    }
+
+    /// The 16-colour contract: the surface has to be legible where colour and
+    /// non-ASCII glyphs are both unavailable, so every character is ASCII and
+    /// the key column carries the accent as bold as well.
+    #[test]
+    fn the_help_surface_is_ascii_and_marks_its_keys_without_colour() {
+        let theme = Theme::storm();
+        let overlay = help();
+        for row in overlay_cells(&overlay, Size::new(48, 20), theme) {
+            assert!(
+                row.iter().all(|cell| cell.ch.is_ascii()),
+                "{:?} must survive a terminal with no glyph support",
+                text(&row)
+            );
+        }
+        let row = row_cells(&overlay.row(0, false, theme), 48, theme);
+        assert!(
+            row[2].attrs.contains(CellAttrs::BOLD),
+            "the chord is the one thing on the row a user has to find"
+        );
+    }
+
+    #[test]
+    fn a_help_row_spends_width_in_the_documented_order() {
+        let theme = Theme::storm();
+        let overlay = help();
+        for (width, expected) in [
+            (32_u16, "  % split right split-vertical  "),
+            (20, "  % split right     "),
+            (10, "  % split "),
+            (4, "  % "),
+        ] {
+            assert_eq!(
+                text(&row_cells(&overlay.row(0, false, theme), width, theme)),
+                expected,
+                "at width {width}"
+            );
+        }
+    }
+
     // -- details ------------------------------------------------------------
 
     #[test]
@@ -970,6 +1325,7 @@ mod tests {
     fn every_overlay_row_is_exactly_the_width_asked_for() {
         let theme = Theme::storm();
         for (name, overlay) in [
+            ("help", help()),
             ("sessions", sessions()),
             ("launcher", launcher()),
             ("details", details()),

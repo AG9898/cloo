@@ -44,7 +44,8 @@ use crate::input::{
 use crate::motion::{Motion, MotionKind, Phase};
 use crate::outer::current_size;
 use crate::overlay::{
-    Overlay, OverlayOutcome, PaneDetails, SessionEntry, backdrop_span, overlay_spans,
+    DETAILS_KEY, HELP_KEY, Overlay, OverlayOutcome, PaneDetails, SESSIONS_KEY, SessionEntry,
+    backdrop_span, overlay_spans,
 };
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
@@ -926,15 +927,20 @@ impl LiveState {
 
     /// Starts a client-local overlay after an otherwise unbound prefix chord.
     ///
-    /// These shortcuts never cross the wire. The session switcher can honestly
-    /// list only the session this daemon exposed, while pane details are built
-    /// solely from the server metadata and attention already cached locally.
-    fn open_overlay(&mut self, chord: &[u8]) -> bool {
-        let next = match chord {
-            b"s" => Some(Overlay::sessions(vec![
+    /// These shortcuts never cross the wire. The help surface is read from the
+    /// very keymap the router resolved this chord with, the session switcher can
+    /// honestly list only the session this daemon exposed, and pane details are
+    /// built solely from the server metadata and attention already cached
+    /// locally. A chord only reaches here when the keymap left it unbound, which
+    /// is why a user who binds `?` keeps their binding.
+    fn open_overlay(&mut self, chord: &[u8], keymap: &Keymap) -> bool {
+        let key = (chord.len() == 1).then(|| char::from(chord[0]));
+        let next = match key {
+            Some(HELP_KEY) => Some(Overlay::help(keymap)),
+            Some(SESSIONS_KEY) => Some(Overlay::sessions(vec![
                 SessionEntry::new(self.session, "current", self.areas.len()).attached(true),
             ])),
-            b"i" | b"?" => self
+            Some(DETAILS_KEY) => self
                 .layout
                 .as_ref()
                 .and_then(|layout| layout.focused)
@@ -991,10 +997,16 @@ impl LiveState {
         })
     }
 
+    /// The box an overlay is drawn in: as tall as its list, within bounds.
+    ///
+    /// The cap is generous enough for the whole help surface on an ordinary
+    /// terminal — a user who pressed `?` because they do not know the keys is
+    /// the last person who should have to scroll to find `detach` — and the
+    /// window still follows the cursor on a short one.
     fn overlay_size(&self, overlay: &Overlay) -> Size {
         let rows = u16::try_from(overlay.len().saturating_add(2))
             .unwrap_or(u16::MAX)
-            .clamp(2, 12)
+            .clamp(2, 20)
             .min(self.outer_size.rows);
         Size::new(self.outer_size.cols.min(60), rows)
     }
@@ -1139,7 +1151,7 @@ async fn route_keys(
                 .await
                 .map_err(AttachError::from)?,
             KeyRoute::Unbound(chord) => {
-                let _ = state.open_overlay(&chord);
+                let _ = state.open_overlay(&chord, keys.keymap());
             }
             KeyRoute::Pending => {}
         }
@@ -1196,6 +1208,7 @@ fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::overlay::OverlayKind;
     use cloo_proto::{Cell, CellAttrs, CopySelection, PaneRect, RowUpdate, ScrollPoint, TabId};
     use tokio::io::duplex;
 
@@ -1746,7 +1759,7 @@ mod tests {
                 }],
             })
             .expect("the grid damage applies");
-        assert!(state.open_overlay(b"s"));
+        assert!(state.open_overlay(b"s", &Keymap::defaults()));
         assert!(state.apply_overlay_keys(b"j"), "an overlay owns navigation");
 
         let frame = state.frame();
@@ -1770,6 +1783,106 @@ mod tests {
                         .is_some_and(|cell| cell.attrs.contains(CellAttrs::DIM))
             }),
             "the pane body remains visible beneath a dimmed backdrop"
+        );
+    }
+
+    /// A one-pane live state with server-supplied identity for that pane, which
+    /// is what the details surface is allowed to draw from.
+    fn overlay_state(rows: u16, prefix: &str) -> LiveState {
+        let pane = PaneId::new(1);
+        let mut state = LiveState::new(
+            Size::new(40, rows),
+            SessionId::new(1),
+            hello_tabs(),
+            prefix.to_owned(),
+        );
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: vec![PaneRect {
+                    pane,
+                    x: 0,
+                    y: 0,
+                    size: Size::new(40, rows.saturating_sub(CHROME_ROWS)),
+                }],
+                focused: Some(pane),
+                zoomed: None,
+            }))
+            .expect("the layout applies");
+        state
+            .apply(ServerMessage::Panes(vec![PaneInfo {
+                pane,
+                profile: "generic".to_owned(),
+                name: "shell".to_owned(),
+                task: None,
+                cwd: "/home/dev".to_owned(),
+            }]))
+            .expect("the identity applies");
+        state
+    }
+
+    /// The milestone's routing change: `?` is the help surface and `i` is still
+    /// pane details, rather than both landing on details.
+    #[test]
+    fn the_help_key_opens_help_and_details_keeps_its_own_key() {
+        let keymap = Keymap::defaults();
+        let mut state = overlay_state(8, "C-b");
+
+        assert!(state.open_overlay(b"?", &keymap));
+        assert!(
+            matches!(
+                state.overlay.as_ref().map(Overlay::kind),
+                Some(OverlayKind::Help(_))
+            ),
+            "the help key must no longer land on pane details"
+        );
+        assert!(state.apply_overlay_keys(b"\x1b"), "escape dismisses");
+        assert!(state.overlay.is_none());
+
+        assert!(state.open_overlay(b"i", &keymap));
+        assert!(matches!(
+            state.overlay.as_ref().map(Overlay::kind),
+            Some(OverlayKind::Details(_))
+        ));
+    }
+
+    /// The help surface is read from the client's live keymap, so the frame a
+    /// user actually sees names the chord they actually configured.
+    #[test]
+    fn the_open_help_surface_draws_the_configured_prefix_and_its_controls() {
+        let mut keymap = Keymap::defaults();
+        keymap.set_prefix(cloo_core::keymap::Key::parse("M-a").expect("a spelling"));
+        let mut state = overlay_state(24, "M-a");
+        assert!(state.open_overlay(b"?", &keymap));
+
+        let drawn: Vec<String> = state
+            .frame()
+            .spans
+            .iter()
+            .map(|span| span.cells.iter().map(|cell| cell.ch).collect())
+            .collect();
+        for expected in ["keys - prefix M-a", "split right", "detach", "add pane"] {
+            assert!(
+                drawn.iter().any(|row| row.contains(expected)),
+                "the help frame must show {expected:?}: {drawn:?}"
+            );
+        }
+    }
+
+    /// An open overlay owns the keyboard: nothing it consumes may reach a pane,
+    /// which is why the router is reset and the bytes never become input.
+    #[test]
+    fn an_open_help_surface_consumes_its_keys_locally() {
+        let keymap = Keymap::defaults();
+        let mut state = overlay_state(8, "C-b");
+        assert!(state.open_overlay(b"?", &keymap));
+        for key in [b"j".as_slice(), b"k", b"g", b"\r"] {
+            let consumed = state.apply_overlay_keys(key);
+            assert!(consumed, "the overlay owns {key:?}");
+        }
+        assert!(
+            state.overlay.is_none(),
+            "enter closes a reading surface rather than acting"
         );
     }
 

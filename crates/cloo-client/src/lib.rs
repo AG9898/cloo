@@ -89,8 +89,9 @@ pub use motion::{
 };
 pub use outer::{current_size, window_size};
 pub use overlay::{
-    LaunchRequest, Overlay, OverlayKind, OverlayOutcome, PaneDetails, ProfileEntry, SessionEntry,
-    backdrop_cells, backdrop_span, hint_cells, overlay_cells, overlay_spans, title_cells,
+    ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, HelpEntry, HelpKeys, LaunchRequest, Overlay, OverlayKind,
+    OverlayOutcome, PaneDetails, ProfileEntry, SESSIONS_KEY, SessionEntry, backdrop_cells,
+    backdrop_span, hint_cells, overlay_cells, overlay_spans, title_cells,
 };
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, FramePane, Grid, RenderError, Renderer, Span, compose_frame};

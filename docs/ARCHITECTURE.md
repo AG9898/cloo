@@ -553,8 +553,17 @@ a client-local change.
 
 `cloo-client::overlay`, as of M3-04, is the session switcher, the profile launcher, and the
 pane-details view as *one* model and one renderer: an `Overlay` is a list, a keyboard cursor, and
-a title, and the three differ only in what a row says and what confirming one means. Like `chrome`
-it is a pure function into cells, so a row is testable against an exact string.
+a title, and they differ only in what a row says and what confirming one means. M8-04 adds the help
+surface as a fourth kind of the same model. Like `chrome` it is a pure function into cells, so a row
+is testable against an exact string.
+
+The help surface is built from the live `cloo_core::keymap::Keymap` and from nothing else:
+`Overlay::help` reads the effective prefix into the title and looks each listed action's chord up in
+the table, so a rebound prefix and a rebound chord are shown verbatim and an unbound action has no
+row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`, and the
+`ADD_PANE_KEY` reserved for M8-06) shared with `attach`'s `open_overlay`, which is reached only for
+a chord the keymap left unbound — so a user who binds `?` keeps their binding, and the help surface
+drops the row it would otherwise have claimed.
 
 Two properties are types rather than rules. A `LaunchRequest` carries a `ProfileId` and has no
 constructor but confirming a launcher row, and a launcher row has no constructor but a validated

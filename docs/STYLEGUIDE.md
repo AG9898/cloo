@@ -179,12 +179,15 @@ decides where the next key goes is legible on a terminal with no colour at all; 
 the clues on whatever the pane count is, because the moment the next chord matters is the moment to
 say what it can be.
 
-`<prefix> ?` opens a client-owned help/command overlay rather than pane details (M8-04). It lists the
-currently effective prefix and the short controls for split, focus, zoom, tabs, launcher, copy,
-and detach, with every key also available from the overlay's keyboard navigation. Pane details stay
-on `<prefix> i`; `<prefix> a` opens the profile launcher. Selecting a valid profile asks the server
-to add its pane, and no shell text is parsed as a cloo command. Both overlays retain the existing
-dimmed backdrop, Escape dismissal, exact width ladder, and 16-colour-safe text hints.
+`<prefix> ?` opens a client-owned help overlay rather than pane details, as of M8-04. Its title names
+the currently effective prefix — `keys - prefix C-b`, or whatever `[keys] prefix` says — and its rows
+are the short controls for split, focus, zoom, tabs, copy, and detach, plus the client's own
+surfaces and the `a` reserved for the launcher. Every row is read from the live keymap, so a rebound
+chord appears verbatim and an action the user unbound has no row at all rather than a key that does
+nothing. Pane details stay on `<prefix> i`. `<prefix> a` opens the profile launcher at M8-06;
+selecting a valid profile asks the server to add its pane, and no shell text is parsed as a cloo
+command. All of these retain the existing dimmed backdrop, Escape dismissal, exact width ladder, and
+16-colour-safe text hints.
 
 ### Mouse gestures on chrome
 
@@ -248,7 +251,8 @@ share one overlay language: dim the background, retain a clear selected row, pro
 hints, and dismiss with Escape. Toasts are concise, stack in a bounded queue, and never cover a
 focused harness input indefinitely. Coalesce repeated events from the same pane.
 
-The session switcher, the profile launcher, and the pane-details view are that language written
+The session switcher, the profile launcher, the pane-details view, and — as of M8-04 — the help
+surface are that language written
 once, in `cloo-client`'s `overlay` module as of M3-04. An overlay is a title row, a list, and a
 hint row, each exactly the overlay's width, drawn over the raised surface with the screen beneath
 dimmed by the same contrast reduction an unfocused pane takes:
@@ -271,14 +275,30 @@ that says how to close. Escape is bound in every overlay without exception.
 A launcher row is built from a configured profile and from nothing else: there is no free-text
 command field, and a profile that fails validation is not offered rather than offered and refused
 at launch. The pane-details view shows only what the server reported — profile, name, task, working
-directory, and state — and a task the user never set is absent rather than blank.
+directory, and state — and a task the user never set is absent rather than blank. A help row is the
+same three parts spent in the same order — the chord, then what it does, then the `[keys]` name to
+write when rebinding it, which is the field that yields first:
+
+```
+  keys - prefix C-b 1/18
+> % split right split-vertical
+  " split down split-horizontal
+  esc close enter close j/k move
+```
+
+The chord column is accented *and* bold, because the one thing a user opened this surface to find
+may not rest on colour; the whole surface is ASCII for the same reason. The two rows that name no
+`[keys]` action say where they come from instead — `client` for cloo's own surfaces, `reserved` for
+the launcher key that is not a command yet — so the surface never presents a key that does nothing
+as though it were bound.
 
 The attached client layers an open overlay over the already composed tab, header, pane-body, and
 status spans: it dims that existing frame without changing any character, then paints the raised
-overlay box above it. Its keys are consumed locally — they never become pane input. Before M8,
-the available client-local entries are `C-b s` for the session surface and `C-b i` (or `C-b ?`) for
-the focused pane's details. M8 moves details to `C-b i` alone and makes `C-b ?` the help surface
-defined above; all use the same Escape dismissal and keyboard vocabulary as every overlay.
+overlay box above it. Its keys are consumed locally — they never become pane input. As of M8-04 the
+client-local entries are `<prefix> ?` for the help surface, `<prefix> s` for the session surface, and
+`<prefix> i` for the focused pane's details; `<prefix> a` joins them at M8-06. Each is claimed only
+while the keymap leaves that chord unbound, and all use the same Escape dismissal and keyboard
+vocabulary as every overlay.
 
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:
