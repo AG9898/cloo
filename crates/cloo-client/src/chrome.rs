@@ -826,29 +826,171 @@ pub fn summary_span(at: Point, queue: &AttentionQueue) -> Span {
 // Status bar
 // ---------------------------------------------------------------------------
 
-/// The hint for cloo's default prefix, [`cloo_core::keymap::DEFAULT_PREFIX`].
+/// The settled hint for cloo's default prefix,
+/// [`cloo_core::keymap::DEFAULT_PREFIX`].
+///
+/// The default spelling, kept as a constant because it is what an unconfigured
+/// client shows and what the style guide documents. The row itself renders
+/// whatever [`PrefixHint`] it is handed, so a rebound prefix appears verbatim.
+pub const DEFAULT_PREFIX_HINT: &str = "C-b ?";
+
+/// The clue keys the first-attach guide offers, in the order they are spent.
+///
+/// Each is `(word, key)`, and the row yields them *from the end* — help first,
+/// then stack, then split — which is the same "trailing detail goes first"
+/// ladder the rest of the status row follows.
+const PREFIX_CLUES: [(&str, char); 3] = [("split", '%'), ("stack", '"'), ("help", '?')];
+
+/// The status row's prefix field: what the prefix is called, whether one is
+/// pending, and whether the first-attach clues are being offered.
 ///
 /// The prefix is a chrome concern, not session state: the keymap is the
 /// client's, so two clients attached to one session may legitimately show
-/// different hints. M4-02 makes the chord configurable; rendering a *rebound*
-/// prefix in this row is chrome work still to land, so the row states the
-/// default rather than a chord it has not been told about.
-pub const DEFAULT_PREFIX_HINT: &str = "C-b ?";
+/// different hints. The spelling arrives already rendered — `Key::to_string`
+/// on [`cloo_core::keymap::Keymap::prefix`] — because `cloo-client` must show
+/// the chord a user actually configured, never a hard-coded `C-b`.
+///
+/// Two flags widen the field beyond that spelling:
+///
+/// - **Guided.** While the workspace still has one pane, the row spends its
+///   trailing width explaining how to get a second one. More panes means the
+///   user has already done it, so the ordinary session, tab, and attention
+///   fields win that space back.
+/// - **Pending.** A prefix that has been pressed and is waiting for the next
+///   chord is bracketed as well as accented, so the state is legible without
+///   colour, and it turns the clues on regardless of pane count — the moment
+///   the next key matters is exactly the moment to say what it can be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixHint {
+    prefix: String,
+    guide: bool,
+    pending: bool,
+}
+
+impl PrefixHint {
+    /// A settled, unguided hint over a prefix spelling.
+    #[must_use]
+    pub fn new(prefix: impl Into<String>) -> Self {
+        Self {
+            prefix: prefix.into(),
+            guide: false,
+            pending: false,
+        }
+    }
+
+    /// The hint a workspace with `panes` visible panes shows.
+    ///
+    /// One pane — the shape a freshly created default workspace has — is what
+    /// turns the first-attach clues on.
+    #[must_use]
+    pub fn for_panes(prefix: impl Into<String>, panes: usize) -> Self {
+        Self::new(prefix).guided(panes <= 1)
+    }
+
+    /// Offers, or withdraws, the first-attach clues.
+    #[must_use]
+    pub fn guided(mut self, guide: bool) -> Self {
+        self.guide = guide;
+        self
+    }
+
+    /// Marks the prefix as pressed and awaiting its next chord.
+    #[must_use]
+    pub fn pending(mut self, pending: bool) -> Self {
+        self.pending = pending;
+        self
+    }
+
+    /// The configured chord's spelling, exactly as it will be drawn.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// Whether a prefix has been pressed and cloo owns the next chord.
+    #[must_use]
+    pub const fn is_pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Whether the first-attach clues are being offered.
+    #[must_use]
+    pub const fn is_guided(&self) -> bool {
+        self.guide || self.pending
+    }
+
+    /// The prefix chord alone, bracketed and accented while pending.
+    fn prefix_cells(&self) -> Vec<Cell> {
+        if self.pending {
+            text_cells(&format!("[{}]", self.prefix), ACCENT, CellAttrs::BOLD)
+        } else {
+            text_cells(&self.prefix, PRIMARY, CellAttrs::NONE)
+        }
+    }
+
+    /// The ordinary settled field: the prefix plus its help key.
+    fn help_cells(&self) -> Vec<Cell> {
+        let mut cells = self.prefix_cells();
+        push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+        push_str(&mut cells, "?", ACCENT, CellAttrs::BOLD);
+        cells
+    }
+
+    /// The guide forms, widest first, or nothing when the clues are withheld.
+    fn guide_forms(&self) -> Vec<Vec<Cell>> {
+        if !self.is_guided() {
+            return Vec::new();
+        }
+        (0..PREFIX_CLUES.len())
+            .rev()
+            .map(|last| {
+                let mut cells = self.prefix_cells();
+                for (word, key) in &PREFIX_CLUES[..=last] {
+                    push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+                    push_str(&mut cells, word, MUTED, CellAttrs::NONE);
+                    push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+                    push_str(&mut cells, &key.to_string(), ACCENT, CellAttrs::BOLD);
+                }
+                cells
+            })
+            .collect()
+    }
+
+    /// The one character that survives on a four-cell row.
+    ///
+    /// Derived from the configured spelling rather than fixed at `b`, so a
+    /// rebound prefix stays honest even where nothing else fits.
+    fn mark(&self) -> char {
+        self.prefix.chars().next_back().unwrap_or('b')
+    }
+}
+
+impl Default for PrefixHint {
+    /// cloo's default prefix, settled and unguided — exactly
+    /// [`DEFAULT_PREFIX_HINT`].
+    fn default() -> Self {
+        Self::new(cloo_core::keymap::DEFAULT_PREFIX.to_string())
+    }
+}
 
 /// Builds the always-on minimal status row, exactly `width` cells wide.
 ///
 /// The flat row carries the session, active tab, attention summary, and prefix
 /// hint without depending on colour or non-ASCII glyphs. Its fixed degradation
-/// ladder first drops the active tab title, then shortens the session and
-/// attention summary, then drops the help suffix from the prefix. At very
-/// narrow widths it condenses to `s>!b`: session, tab, attention, and the
-/// `C-b` prefix, in that order. A terminal narrower than four cells is the
+/// ladder spends the *hint* first: the first-attach clues yield from the end —
+/// `help ?`, then `stack "`, then `split %` — before the session, tab, or
+/// attention fields give up anything at all. Only then does the row drop the
+/// active tab title, shorten the session and attention summary, and finally
+/// drop the help suffix from the prefix. At very narrow widths it condenses to
+/// `s>!b`: session, tab, attention, and the configured prefix's own last
+/// character, in that order. A terminal narrower than four cells is the
 /// unavoidable physical limit and receives the leading part of that form.
 #[must_use]
 pub fn status_bar_cells(
     session: SessionId,
     tabs: &[TabSummary],
     queue: &AttentionQueue,
+    hint: &PrefixHint,
     width: u16,
 ) -> Vec<Cell> {
     let width = usize::from(width);
@@ -892,8 +1034,23 @@ pub fn status_bar_cells(
     );
     let attention_mark = text_cells("!", WARNING, CellAttrs::BOLD);
 
-    let prefix_full = text_cells(DEFAULT_PREFIX_HINT, PRIMARY, CellAttrs::NONE);
-    let prefix_short = text_cells("C-b", PRIMARY, CellAttrs::NONE);
+    let prefix_full = hint.help_cells();
+    let prefix_short = hint.prefix_cells();
+
+    // The guide clues are the first thing width buys and the first thing it
+    // loses: every core field is still at its widest form here, so the hint
+    // yields ahead of the session, tab, and attention information.
+    for guide in hint.guide_forms() {
+        let parts = [
+            session_full.as_slice(),
+            tab_full.as_slice(),
+            attention_full.as_slice(),
+            guide.as_slice(),
+        ];
+        if status_row_len(&parts) <= width {
+            return status_row(&parts, width);
+        }
+    }
 
     // The order here is the documented yield order. Keeping the complete
     // candidate rows explicit makes a narrow status bar deterministic and
@@ -948,12 +1105,17 @@ pub fn status_bar_cells(
     }
 
     // Four ASCII markers retain every required field down to four cells. The
-    // final `b` is the compact spelling of the configured `C-b` prefix.
+    // final marker is the last character of the configured prefix's spelling.
     let mut cells = Vec::with_capacity(width);
     cells.extend_from_slice(&session_mark);
     cells.extend_from_slice(&tab_mark);
     cells.extend_from_slice(&attention_mark);
-    push_str(&mut cells, "b", PRIMARY, CellAttrs::NONE);
+    push_str(
+        &mut cells,
+        &hint.mark().to_string(),
+        PRIMARY,
+        CellAttrs::NONE,
+    );
     cells.truncate(width);
     pad_status_row(&mut cells, width);
     cells
@@ -966,9 +1128,10 @@ pub fn status_bar_span(
     session: SessionId,
     tabs: &[TabSummary],
     queue: &AttentionQueue,
+    hint: &PrefixHint,
     width: u16,
 ) -> Span {
-    Span::new(at, status_bar_cells(session, tabs, queue, width))
+    Span::new(at, status_bar_cells(session, tabs, queue, hint, width))
 }
 
 /// Turns text into cells for one flat status-bar field.
@@ -1740,7 +1903,13 @@ mod tests {
     #[test]
     fn a_wide_status_bar_has_every_required_field() {
         let queue = status_queue();
-        let row = status_bar_cells(SessionId::new(7), &status_tabs(), &queue, 30);
+        let row = status_bar_cells(
+            SessionId::new(7),
+            &status_tabs(),
+            &queue,
+            &PrefixHint::default(),
+            30,
+        );
         assert_eq!(text_of(&row), "session:7 >2 build 2! 1x C-b ?");
         assert_eq!(fg_of(&row, '>'), ACCENT, "the active tab stays visible");
         assert_eq!(fg_of(&row, '!'), Attention::NeedsInput.color());
@@ -1754,6 +1923,7 @@ mod tests {
                 SessionId::new(7),
                 &status_tabs(),
                 &queue,
+                &PrefixHint::default(),
                 12
             )),
             "s7 >2 3! C-b",
@@ -1764,6 +1934,7 @@ mod tests {
                 SessionId::new(7),
                 &status_tabs(),
                 &queue,
+                &PrefixHint::default(),
                 6
             )),
             "s>!b  ",
@@ -1774,7 +1945,13 @@ mod tests {
     #[test]
     fn a_status_bar_uses_ascii_tokens_and_a_zero_attention_count() {
         let queue = AttentionQueue::new();
-        let row = status_bar_cells(SessionId::new(1), &status_tabs(), &queue, 40);
+        let row = status_bar_cells(
+            SessionId::new(1),
+            &status_tabs(),
+            &queue,
+            &PrefixHint::default(),
+            40,
+        );
         let text = text_of(&row);
         assert!(row.iter().all(|cell| cell.ch.is_ascii()));
         assert!(text.contains("0!"), "zero is an explicit attention count");
@@ -1789,10 +1966,143 @@ mod tests {
             SessionId::new(1),
             &status_tabs(),
             &queue,
+            &PrefixHint::default(),
             20,
         );
         assert_eq!(span.at, Point::new(4, 23));
         assert_eq!(span.cells.len(), 20);
+    }
+
+    // -- First-attach shortcut hints ---------------------------------------
+
+    /// The row a workspace with `panes` panes draws at `width`.
+    fn hinted_row(hint: &PrefixHint, width: u16) -> String {
+        text_of(&status_bar_cells(
+            SessionId::new(7),
+            &status_tabs(),
+            &AttentionQueue::new(),
+            hint,
+            width,
+        ))
+    }
+
+    #[test]
+    fn one_pane_spends_trailing_width_on_the_split_stack_and_help_clues() {
+        let hint = PrefixHint::for_panes("C-b", 1);
+        assert!(hint.is_guided(), "one pane is the first-attach shape");
+        assert_eq!(
+            hinted_row(&hint, 48),
+            "session:7 >2 build 0! C-b split % stack \" help ?",
+            "the widest form names the prefix and all three clues"
+        );
+    }
+
+    #[test]
+    fn a_second_pane_wins_the_clue_width_back() {
+        let hint = PrefixHint::for_panes("C-b", 2);
+        assert!(!hint.is_guided());
+        assert_eq!(
+            hinted_row(&hint, 48).trim_end(),
+            "session:7 >2 build 0! C-b ?",
+            "past the first pane the ordinary summary is the whole hint"
+        );
+    }
+
+    #[test]
+    fn the_clues_yield_from_the_end_before_any_core_field_does() {
+        let hint = PrefixHint::for_panes("C-b", 1);
+        // Every rung below still carries `session:7 >2 build 0!` — the session,
+        // tab, and attention fields are untouched while the clues are spent.
+        for (width, expected) in [
+            (48, "C-b split % stack \" help ?"),
+            (47, "C-b split % stack \""),
+            (40, "C-b split %"),
+            (32, "C-b ?"),
+        ] {
+            let row = hinted_row(&hint, width);
+            assert!(
+                row.starts_with("session:7 >2 build 0! "),
+                "a core field yielded before the clues at width {width}: {row:?}"
+            );
+            assert!(
+                row.trim_end().ends_with(expected),
+                "width {width} expected the hint {expected:?}, got {row:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_configured_prefix_is_drawn_verbatim_down_to_its_last_marker() {
+        let hint = PrefixHint::for_panes("M-Space", 1);
+        assert_eq!(hint.prefix(), "M-Space");
+        assert!(
+            hinted_row(&hint, 50).contains("M-Space split %"),
+            "the configured chord, not a hard-coded C-b"
+        );
+        assert_eq!(
+            hinted_row(&hint, 4),
+            "s>!e",
+            "the marker is the configured spelling's own last character"
+        );
+    }
+
+    #[test]
+    fn a_pending_prefix_is_textually_distinct_and_offers_the_clues() {
+        let settled = PrefixHint::for_panes("C-b", 4);
+        let pending = settled.clone().pending(true);
+        assert!(!settled.is_pending() && pending.is_pending());
+
+        let settled_row = hinted_row(&settled, 50);
+        let pending_row = hinted_row(&pending, 50);
+        assert!(
+            !settled_row.contains("[C-b]"),
+            "a settled prefix is never bracketed: {settled_row:?}"
+        );
+        assert!(
+            pending_row.contains("[C-b] split % stack \" help ?"),
+            "a pending prefix is bracketed and explains itself: {pending_row:?}"
+        );
+        assert_eq!(
+            fg_of(
+                &status_bar_cells(
+                    SessionId::new(7),
+                    &status_tabs(),
+                    &AttentionQueue::new(),
+                    &pending,
+                    50,
+                ),
+                '['
+            ),
+            ACCENT,
+            "colour supplements the bracket rather than carrying it"
+        );
+    }
+
+    #[test]
+    fn every_hinted_row_is_exactly_its_width_and_ascii_at_every_width() {
+        let hint = PrefixHint::for_panes("C-b", 1).pending(true);
+        for width in 0..=60_u16 {
+            let row = status_bar_cells(
+                SessionId::new(7),
+                &status_tabs(),
+                &status_queue(),
+                &hint,
+                width,
+            );
+            assert_eq!(row.len(), usize::from(width), "width {width}");
+            assert!(
+                row.iter().all(|cell| cell.ch.is_ascii()),
+                "width {width} rendered a non-ASCII signal"
+            );
+        }
+    }
+
+    #[test]
+    fn the_default_hint_is_the_documented_default_spelling() {
+        let hint = PrefixHint::default();
+        assert_eq!(hint.prefix(), "C-b");
+        assert!(!hint.is_guided());
+        assert!(hinted_row(&hint, 40).contains(DEFAULT_PREFIX_HINT));
     }
 
     // -- Queue row rendering ----------------------------------------------

@@ -139,15 +139,17 @@ queue is rendered as `0!` in this row, so the count remains explicit.
 Width yields in one fixed order: drop the active tab title, shorten `session:7` to `s7`, collapse a
 per-state tally to its total (`3!`), then drop `?` from the `C-b ?` hint. At the narrowest useful
 width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and the
-`C-b` prefix. The prefix that hint names is configurable as of M4-02 — `[keys] prefix` in
+prefix — that last marker being the configured spelling's own final character, so a rebound `C-a`
+leaves `a`. The prefix that hint names is configurable as of M4-02 — `[keys] prefix` in
 `config.toml`, defaulting to `C-b` — and the keymap is the client's, not session state, so two
-clients attached to one session may legitimately show different hints. This row still renders
-cloo's default spelling; drawing a rebound prefix in it is chrome work yet to land. Below four cells no renderer can preserve all four fields, so the row is truncated
+clients attached to one session may legitimately show different hints. As of M8-03 the row draws
+that configured chord verbatim rather than cloo's default spelling. Below four cells no renderer can
+preserve all four fields, so the row is truncated
 from that compact form rather than making up a different layout. `status_bar_cells` and
 `status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
 non-truecolor fallback down-samples colours while leaving these ASCII signals intact.
 
-### First attachment and command discovery (M8, planned)
+### First attachment and command discovery
 
 The first attached frame must explain enough to act without turning chrome into a dashboard. While
 the default workspace has one pane, the status row spends available trailing width on the configured
@@ -156,7 +158,28 @@ same width ladder as every other status segment. Once there is more than one pan
 session, tab, attention, and prefix/help summary wins that space back. A pending prefix is visibly
 distinct from its settled hint and never lets the next key reach the child.
 
-`<prefix> ?` opens a client-owned help/command overlay rather than pane details. It lists the
+`cloo-client`'s `PrefixHint` is that field as of M8-03, and it is what the status row is handed
+rather than something the row derives:
+
+```
+session:7 >2 build 0! C-b split % stack " help ?
+                      ^   ^        ^        ^
+                      |   |        |        the clues yield from the end:
+                      |   |        |        help, then stack, then split
+                      |   the configured chord's own bindings, keyed
+                      the prefix, drawn verbatim — `M-a` if that is what
+                      `[keys] prefix` says, never a hard-coded `C-b`
+```
+
+Two rules keep this honest. The clues are spent **before any core field yields**, so a narrowing
+terminal loses `help ?` while `session:7 >2 build 0!` is still at its widest — the discovery
+affordance is the cheapest thing on the row, not a competitor to the session's identity. And a
+pending prefix is bracketed as well as accented — `[C-b] split % stack " help ?` — so the state that
+decides where the next key goes is legible on a terminal with no colour at all; pending also turns
+the clues on whatever the pane count is, because the moment the next chord matters is the moment to
+say what it can be.
+
+`<prefix> ?` opens a client-owned help/command overlay rather than pane details (M8-04). It lists the
 currently effective prefix and the short controls for split, focus, zoom, tabs, launcher, copy,
 and detach, with every key also available from the overlay's keyboard navigation. Pane details stay
 on `<prefix> i`; `<prefix> a` opens the profile launcher. Selecting a valid profile asks the server

@@ -34,7 +34,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
 use crate::capabilities::{CapsError, detect_attach_caps};
-use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome};
+use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint};
 use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
@@ -480,8 +480,17 @@ async fn live_loop(
     // Install this before attaching, so the one `SIGWINCH` that happens while
     // the socket handshake is in flight cannot be lost.
     let mut resizes = ResizeWatch::new(outer_size).map_err(AttachRunError::Signal)?;
+    // The chrome shows the chord this client actually resolved, so a rebound
+    // prefix is discoverable from the first frame rather than only from the
+    // configuration file.
+    let prefix = keymap.prefix().to_string();
     let mut attached = attach(path, session_size(outer_size), caps, None).await?;
-    let mut state = LiveState::new(outer_size, attached.session(), attached.tabs().to_vec());
+    let mut state = LiveState::new(
+        outer_size,
+        attached.session(),
+        attached.tabs().to_vec(),
+        prefix,
+    );
     let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
     let policy = EffectPolicy::default();
@@ -546,6 +555,7 @@ async fn live_loop(
                 {
                     detaching = true;
                 }
+                state.prefix_pending = keys.is_pending();
                 if overlay_was_open != state.overlay.is_some() {
                     phase = Some(motion.start(MotionKind::Overlay, Instant::now()));
                 }
@@ -572,6 +582,7 @@ async fn live_loop(
                     if route_keys(&mut attached, &mut keys, &mut state, bytes).await? {
                         detaching = true;
                     }
+                    state.prefix_pending = keys.is_pending();
                     if overlay_was_open != state.overlay.is_some() {
                         phase = Some(motion.start(MotionKind::Overlay, Instant::now()));
                     }
@@ -625,10 +636,14 @@ struct LiveState {
     overlay: Option<Overlay>,
     queue: AttentionQueue,
     screen: ScreenLayout,
+    /// The configured prefix's spelling, as the status row must draw it.
+    prefix: String,
+    /// Whether the router is holding a prefix and owns the next chord.
+    prefix_pending: bool,
 }
 
 impl LiveState {
-    fn new(outer_size: Size, session: SessionId, tabs: Vec<TabSummary>) -> Self {
+    fn new(outer_size: Size, session: SessionId, tabs: Vec<TabSummary>, prefix: String) -> Self {
         Self {
             outer_size,
             session,
@@ -646,7 +661,19 @@ impl LiveState {
             screen: ScreenLayout::new(outer_size)
                 .tab_row(0)
                 .status_row(outer_size.rows.saturating_sub(1)),
+            prefix,
+            prefix_pending: false,
         }
+    }
+
+    /// The status row's prefix field for the frame about to be drawn.
+    ///
+    /// The clues are offered while the workspace still has one pane, which is
+    /// the shape a freshly created default workspace has, and whenever a prefix
+    /// is pending — the moment the next chord matters is the moment to say what
+    /// it can be.
+    fn prefix_hint(&self) -> PrefixHint {
+        PrefixHint::for_panes(self.prefix.as_str(), self.areas.len()).pending(self.prefix_pending)
     }
 
     /// Applies one server clock tick and reports whether it changes the frame.
@@ -846,6 +873,7 @@ impl LiveState {
             self.session,
             &panes,
             &self.queue,
+            &self.prefix_hint(),
             ChromeOptions::default(),
         );
         if let Some(copy_mode) = &self.copy_mode {
@@ -1445,7 +1473,12 @@ mod tests {
     #[test]
     fn a_live_state_places_the_server_grid_below_attached_chrome() {
         let pane = PaneId::new(1);
-        let mut state = LiveState::new(Size::new(8, 5), SessionId::new(1), hello_tabs());
+        let mut state = LiveState::new(
+            Size::new(8, 5),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
         state
             .apply(ServerMessage::Layout(LayoutSnapshot {
                 tab: TabId::new(1),
@@ -1527,10 +1560,95 @@ mod tests {
         assert_eq!(state.screen.hit(0, 2).pane(), Some(pane));
     }
 
+    /// A live state showing `panes` panes on a `width`-wide terminal.
+    fn hinted_state(width: u16, panes: usize, prefix: &str) -> LiveState {
+        let mut state = LiveState::new(
+            Size::new(width, 6),
+            SessionId::new(1),
+            hello_tabs(),
+            prefix.to_owned(),
+        );
+        let cols = width / u16::try_from(panes).expect("a small pane count");
+        let rects = (0..panes)
+            .map(|index| {
+                let index = u16::try_from(index).expect("a small pane count");
+                PaneRect {
+                    pane: PaneId::new(u64::from(index) + 1),
+                    x: index * cols,
+                    y: 0,
+                    size: Size::new(cols, 2),
+                }
+            })
+            .collect::<Vec<_>>();
+        let focused = rects.first().map(|rect| rect.pane);
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: rects,
+                focused,
+                zoomed: None,
+            }))
+            .expect("the layout applies");
+        state
+    }
+
+    /// The text of the frame's status row.
+    fn status_text(state: &LiveState) -> String {
+        state
+            .spans()
+            .last()
+            .expect("a status row")
+            .cells
+            .iter()
+            .map(|cell| cell.ch)
+            .collect()
+    }
+
+    #[test]
+    fn a_one_pane_attached_frame_offers_the_configured_prefix_and_its_clues() {
+        let state = hinted_state(60, 1, "M-a");
+        let row = status_text(&state);
+        assert!(
+            row.contains("M-a split % stack \" help ?"),
+            "the first frame must explain how to act: {row:?}"
+        );
+        assert!(
+            !row.contains("C-b"),
+            "the row must name the configured chord, not the default: {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_second_pane_returns_the_status_row_to_its_ordinary_summary() {
+        let row = status_text(&hinted_state(60, 2, "C-b"));
+        assert!(
+            row.contains("C-b ?") && !row.contains("split %"),
+            "past the first pane the clues yield their width back: {row:?}"
+        );
+    }
+
+    #[test]
+    fn a_pending_prefix_is_drawn_distinctly_in_the_status_row() {
+        let mut state = hinted_state(60, 2, "C-b");
+        let settled = status_text(&state);
+        state.prefix_pending = true;
+        let pending = status_text(&state);
+        assert!(!settled.contains("[C-b]"), "settled row: {settled:?}");
+        assert!(
+            pending.contains("[C-b] split % stack \" help ?"),
+            "a held prefix says what the next key can be: {pending:?}"
+        );
+    }
+
     #[test]
     fn a_live_copy_state_layers_highlights_and_its_status_over_the_composed_frame() {
         let pane = PaneId::new(1);
-        let mut state = LiveState::new(Size::new(9, 5), SessionId::new(1), hello_tabs());
+        let mut state = LiveState::new(
+            Size::new(9, 5),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
         state
             .apply(ServerMessage::Layout(LayoutSnapshot {
                 tab: TabId::new(1),
@@ -1594,7 +1712,12 @@ mod tests {
     #[test]
     fn an_open_overlay_dims_the_composed_frame_and_keeps_its_keys_client_side() {
         let pane = PaneId::new(1);
-        let mut state = LiveState::new(Size::new(20, 6), SessionId::new(1), hello_tabs());
+        let mut state = LiveState::new(
+            Size::new(20, 6),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
         state
             .apply(ServerMessage::Layout(LayoutSnapshot {
                 tab: TabId::new(1),

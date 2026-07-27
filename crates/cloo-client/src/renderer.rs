@@ -30,7 +30,7 @@ use cloo_proto::{
 };
 
 use crate::chrome::{
-    AttentionQueue, ChromeOptions, PaneChrome, body_span, header_span, status_bar_span,
+    AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, body_span, header_span, status_bar_span,
     tab_row_span,
 };
 use crate::input::PaneArea;
@@ -249,6 +249,11 @@ impl<'a> FramePane<'a> {
 /// and body, then the status row — but they never overlap, so the order is for a
 /// reader's sake rather than for correctness. A zero-width or zero-height frame,
 /// which a violent resize can produce, composes nothing rather than panicking.
+///
+/// `hint` is passed through to the status row verbatim rather than derived here:
+/// the configured prefix and whether one is pending are the attached client's to
+/// know, and a frame that recomputed either would be a second answer to a
+/// question the keyboard router already answered.
 #[must_use]
 pub fn compose_frame(
     size: Size,
@@ -256,6 +261,7 @@ pub fn compose_frame(
     session: SessionId,
     panes: &[FramePane<'_>],
     queue: &AttentionQueue,
+    hint: &PrefixHint,
     options: ChromeOptions,
 ) -> Vec<Span> {
     let mut spans = Vec::new();
@@ -295,6 +301,7 @@ pub fn compose_frame(
         session,
         tabs,
         queue,
+        hint,
         size.cols,
     ));
 
@@ -1096,6 +1103,7 @@ mod tests {
             cloo_proto::SessionId::new(1),
             &tabs,
             &queue,
+            &crate::chrome::PrefixHint::default(),
             40,
         );
 
@@ -1105,13 +1113,73 @@ mod tests {
             !frame.windows(3).any(|bytes| bytes == b";2;"),
             "a terminal without truecolor must not receive 24-bit SGR"
         );
-        for token in [b"session:1".as_slice(), b">1 build", b"!", b"C-b ?"] {
+        let text = visible(&frame);
+        for token in ["session:1", ">1 build", "!", "C-b ?"] {
             assert!(
-                frame.windows(token.len()).any(|bytes| bytes == token),
-                "missing ASCII status token {:?}",
-                std::str::from_utf8(token).expect("test tokens are UTF-8")
+                text.contains(token),
+                "missing ASCII status token {token:?} in {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_first_attach_clues_survive_a_sixteen_colour_terminal() {
+        let tabs = [cloo_proto::TabSummary {
+            tab: cloo_proto::TabId::new(4),
+            title: "build".into(),
+            active: true,
+        }];
+        let span = crate::chrome::status_bar_span(
+            Point::new(0, 23),
+            cloo_proto::SessionId::new(1),
+            &tabs,
+            &crate::chrome::AttentionQueue::new(),
+            &crate::chrome::PrefixHint::for_panes("M-a", 1).pending(true),
+            60,
+        );
+
+        let mut renderer = Renderer::new(TermCaps::default());
+        let frame = renderer.render_spans(&[span], None).to_vec();
+        assert!(
+            !frame.windows(3).any(|bytes| bytes == b";2;"),
+            "a terminal without truecolor must not receive 24-bit SGR"
+        );
+        // The configured chord, its pending brackets, and every clue key are
+        // characters, so a terminal with no colour at all loses none of them.
+        let text = visible(&frame);
+        assert!(
+            text.contains("[M-a] split % stack \" help ?"),
+            "the hint lost a text signal without truecolor: {text:?}"
+        );
+        assert!(
+            frame.is_ascii(),
+            "the first-attach hint must not need a non-ASCII glyph"
+        );
+    }
+
+    /// The characters a terminal would show, with every escape sequence gone.
+    ///
+    /// A styled field is split across SGR sequences, so a byte-window search
+    /// cannot tell "the text is missing" from "the text changed colour halfway".
+    fn visible(frame: &[u8]) -> String {
+        let rendered = String::from_utf8_lossy(frame);
+        let mut text = String::new();
+        let mut chars = rendered.chars();
+        while let Some(ch) = chars.next() {
+            if ch != '\x1b' {
+                text.push(ch);
+                continue;
+            }
+            if chars.next() != Some('[') {
+                continue;
+            }
+            for byte in chars.by_ref() {
+                if ('@'..='~').contains(&byte) {
+                    break;
+                }
+            }
+        }
+        text
     }
 
     // -- Transitions ------------------------------------------------------
@@ -1293,6 +1361,7 @@ mod tests {
             SessionId::new(1),
             &panes,
             &queue,
+            &crate::chrome::PrefixHint::default(),
             ChromeOptions::default(),
         );
 
@@ -1350,6 +1419,7 @@ mod tests {
                 SessionId::new(1),
                 &panes,
                 &crate::chrome::AttentionQueue::new(),
+                &crate::chrome::PrefixHint::default(),
                 ChromeOptions::default(),
             )
         };
@@ -1387,6 +1457,7 @@ mod tests {
             SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
+            &crate::chrome::PrefixHint::default(),
             ChromeOptions::default(),
         );
         // Two body rows and the status row; no header was drawn.
@@ -1410,6 +1481,7 @@ mod tests {
             SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
+            &crate::chrome::PrefixHint::default(),
             ChromeOptions::default(),
         );
         let mut renderer = Renderer::new(TermCaps::default());
@@ -1438,6 +1510,7 @@ mod tests {
                 SessionId::new(1),
                 &panes,
                 &crate::chrome::AttentionQueue::new(),
+                &crate::chrome::PrefixHint::default(),
                 ChromeOptions::default(),
             )
             .is_empty()

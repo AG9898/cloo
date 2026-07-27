@@ -584,8 +584,24 @@ fn a_bare_cloo_creates_the_default_workspace_and_leaves_it_running_on_detach() {
 
     let tty = open_tty();
     let mut client = spawn_workspace_on(&tty, &runtime_dir);
-    read_until(&tty.master, "\x1b[?25l")
+    // M8-03: the first frame of a one-pane workspace also explains how to act,
+    // and `help` is the last clue the status row spends its width on. Read to
+    // it once and assert the rest of the frame from the same buffer — a second
+    // `read_until` would block on bytes the first one already consumed.
+    let frame = read_until(&tty.master, "help")
         .unwrap_or_else(|seen| panic!("a bare cloo never drew a workspace frame; saw:\n{seen}"));
+    assert!(
+        frame.contains("\x1b[?25l"),
+        "the workspace was not drawn as a rendered frame; saw:\n{frame}"
+    );
+    // The clue word and its key wear different colours, so an SGR sequence sits
+    // between them — the word alone is what a byte scan can match.
+    for clue in ["C-b", "split", "stack"] {
+        assert!(
+            frame.contains(clue),
+            "the first workspace frame never offered the {clue} hint; saw:\n{frame}"
+        );
+    }
     assert!(
         is_raw(&tty.slave),
         "the workspace entry becomes an attached client"

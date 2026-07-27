@@ -366,8 +366,23 @@ once. A test binary is multithreaded, so another thread forking a child between 
 and its `drop` leaves that child holding a duplicate of the listener until it execs, and the socket
 answers a connect for exactly that long.
 
-Client tests will also prove that a first attached one-pane frame
-contains the configured prefix plus split and help hints; `<prefix> ?` must claim the keyboard for
+M8-03 covers the first-attach shortcut hints at three layers. `cloo-client/src/chrome.rs` asserts
+the widest row byte for byte, that the clues yield from the end — `help ?`, then `stack "`, then
+`split %` — while `session:7 >2 build 0!` is still at its widest at every rung, that a second pane
+withdraws them, that a configured `M-Space` is drawn verbatim and leaves `e` as the four-cell
+marker, and that a pending prefix is bracketed as well as accented; a loop over every width from 0
+to 60 keeps the row exactly its width and pure ASCII with the clues and the pending brackets both
+on. `cloo-client/src/renderer.rs` renders that same row through a terminal with no truecolor and
+asserts the visible text — escape sequences stripped, because a styled field is split across SGR
+sequences and a byte-window search cannot tell missing text from a mid-field colour change — still
+carries `[M-a] split % stack " help ?`. `cloo-client/src/attach.rs` drives the live client state: a
+one-pane frame offers the configured chord and never the default, a second pane returns the row to
+its ordinary summary, and setting the router's pending flag changes what the composed frame draws.
+`crates/cloo/tests/cli.rs` closes the loop over a real pseudoterminal — the first frame a bare
+`cloo` draws carries the clue words — and that assertion was confirmed non-vacuous by making
+`PrefixHint::is_guided` answer `false` and watching it fail.
+
+Client tests will also prove that `<prefix> ?` claims the keyboard for
 the help surface, while pane details remain on `<prefix> i`. The live launcher fixture will prove a
 selected valid profile reaches the actor and creates the named pane without treating ordinary shell
 input as a command.

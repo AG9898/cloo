@@ -10,7 +10,8 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 are complete. The
+**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 through M8-03 are
+complete. The
 daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
 foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
 create-or-attaches the persistent `default` workspace, `cloo <program>` still launches one local
@@ -20,7 +21,7 @@ makes the keyboard controls discoverable in the first frame. See [`docs/PRD.md`]
 [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), which contains completed
-M0–M7 and M8-01 work plus the remaining M8 default-workspace and attached-UX tasks.
+M0–M7 and M8-01 through M8-03 work plus the remaining M8 default-workspace and attached-UX tasks.
 
 ---
 
@@ -91,7 +92,7 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01 supply the daemon, workspace,
+All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01–M8-03 supply the daemon, workspace,
 client primitives, live attached-client integration, compatibility foundations, and the managed
 default-workspace entry. Dependencies are
 declared in the root `[workspace.dependencies]` and are constrained by a
@@ -429,6 +430,14 @@ concurrent bare `cloo`s converge on one session with one pane, a killed daemon's
 recovered, a regular file and a symlink are each refused with the path intact and no socket left
 behind, and a `TERM` the client refuses hands back a cooked terminal while the workspace it created
 stays usable — every wait bounded, every fixture shutting down its own daemon.
+M8-03 puts the first-attach shortcut hints under `cloo-client`'s own fixtures: `src/chrome.rs`
+asserts the widest row byte for byte, the clues yielding from the end while every core field is
+still at its widest, a second pane withdrawing them, a configured `M-Space` drawn verbatim down to
+its four-cell marker, a bracketed pending prefix, and an exactly-its-width ASCII row at every width
+from 0 to 60; `src/renderer.rs` reads the visible text back with escape sequences stripped to prove
+the hint survives a 16-colour terminal; `src/attach.rs` drives the live client state through the
+one-pane, two-pane, and pending cases; and `crates/cloo/tests/cli.rs` proves the clue words reach
+the first frame a bare `cloo` draws.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -1057,3 +1066,12 @@ other test thread calling `Command::spawn` in that window forks a child which in
 descriptor until it execs. `crates/cloo/tests/cli.rs` therefore waits for its stale socket to fall
 silent rather than asserting it once — the run under test would observe the same live socket, so
 this is fixture sequencing, not a cloo bug.
+
+### 2026-07-27 — A styled chrome field cannot be found by a byte window
+The status row's first-attach clues colour the word (`split`) and the key (`%`) differently, so the
+renderer emits an SGR sequence between them and a `frame.windows(n) == b"split %"` search fails on a
+row that drew perfectly. `cloo-client/src/renderer.rs` now strips escape sequences and asserts on
+the visible text instead; a pty fixture in `crates/cloo/tests/cli.rs` matches the clue *word* alone
+for the same reason. Relatedly, `read_until` consumes what it read, so two successive calls for two
+tokens that arrived in one write will hang on the second — read to the last token once and assert
+the rest from the returned buffer.
