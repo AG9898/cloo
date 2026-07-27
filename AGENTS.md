@@ -6,61 +6,34 @@
 
 ## Overview
 
-cloo is a client-server terminal multiplexer in Rust — tmux's functionality with an interface
-worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
-A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
+cloo is a client-server terminal multiplexer in Rust, designed as a workspace for concurrent
+coding-agent harnesses. A daemon owns PTYs and session state; thin clients attach over a Unix
+socket and render.
 
-**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 through M8-05 are
-complete. The
-daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
-foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
-create-or-attaches the persistent `default` workspace, `cloo <program>` still launches one local
-pane in-process, `cloo server [session]` owns a foreground daemon, and `cloo attach [session]`
-joins it with the composed multipane frame and input loop. The rest of M8 hardens that startup and
-makes the keyboard controls discoverable in the first frame. See [`docs/PRD.md`](docs/PRD.md) and
+**Pre-alpha.** M0–M7 and M8-01 through M8-05 are complete; the remaining M8 work is attached UX.
+Plain `cloo` create-or-attaches `default`; `cloo <program>` remains an in-process one-pane launch;
+`cloo server [session]` is foreground and `cloo attach [session]` joins its multipane frame. Product
+scope is in [`docs/PRD.md`](docs/PRD.md); the canonical task queue is
 [`docs/workboard.json`](docs/workboard.json).
 
-The canonical task queue is [`docs/workboard.json`](docs/workboard.json), which contains completed
-M0–M7 and M8-01 through M8-05 work plus the remaining M8 attached-UX task.
-
 ---
 
-## Quick Start
+## Quick Start & Verification
 
 ```bash
-# Build
+# Build and inspect the CLI
 cargo build --workspace
-
-# Run tests
-cargo test --workspace
-
-# Lint (must be clean)
-cargo clippy --workspace --all-targets -- -D warnings
-
-# Format
-cargo fmt            # apply
-cargo fmt --check    # verify
-
-# Run the binary
 cargo run -p cloo -- --help
+
+# Before marking work done
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-Plain `cloo` create-or-attaches the `default` workspace, starting a background daemon when none is
-listening; `cloo server [session]` starts that same daemon in the foreground, which is how you see
-its diagnostics. There is no database and no `.env` file.
-
----
-
-## Build & Verification Commands
-
-Run the fast suite before marking any task done. Never skip a fast check.
-
-| Command | What it checks | Speed |
-|---------|---------------|-------|
-| `cargo fmt --check` | Formatting | fast |
-| `cargo clippy --workspace --all-targets -- -D warnings` | Lints, common bugs | fast |
-| `cargo test --workspace` | Unit + integration tests | fast (today — grows with PTY integration tests) |
-| `cargo build --release` | Release build with LTO | slow |
+Run `cargo build --release` when validating release artifacts. `cargo fmt` applies formatting.
+Plain `cloo` starts or joins `default`; `cloo server [session]` exposes daemon diagnostics. cloo has
+no database or runtime `.env` file.
 
 ---
 
@@ -91,17 +64,6 @@ npm/
   package.json   The `clooterminal` npm launcher and optional native package metadata
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
-
-All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01–M8-05 supply the daemon, workspace,
-client primitives, live attached-client integration, compatibility foundations, and the managed
-default-workspace entry. Dependencies are
-declared in the root `[workspace.dependencies]` and are constrained by a
-**layering**, not a single chain: `cloo` over {`cloo-server`, `cloo-client`} over `cloo-core` over
-the leaves {`cloo-proto`, `cloo-term`}. Any crate may name any crate in a lower layer — in
-particular every crate that speaks the wire names `cloo-proto` directly. Forbidden: a back-edge, a
-cycle, and any edge between `cloo-server` and `cloo-client` — **including a dev-dependency**, so a
-test needing both halves belongs in `crates/cloo`. See
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the current edge table.
 
 Docs navigation: [`docs/INDEX.md`](docs/INDEX.md)
 
@@ -191,70 +153,43 @@ the code change — never defer a doc update to a follow-up task.
 | Harness profile, attention, or compatibility contract changed | [`docs/AGENT_WORKFLOWS.md`](docs/AGENT_WORKFLOWS.md) |
 | Product scope, milestones, or success criteria changed | [`docs/PRD.md`](docs/PRD.md) |
 | Any doc added, removed, renamed, or moved | [`docs/INDEX.md`](docs/INDEX.md) — always |
-| Constraint or gotcha discovered during a task | This file (`AGENTS.md`) — append to Discoveries |
+| Durable cross-cutting constraint discovered | This file (`AGENTS.md`) — only when it qualifies for Durable Discoveries |
 
 **Rule:** If a section in `AGENTS.md` summarizes something, and the full doc changes, update
 both the summary here and the full doc in the same commit.
 
 ---
 
-## Workboard
+## Workboard and Task Workflow
 
-The canonical task queue is `docs/workboard.json`.
-Schema and usage contract: [`docs/workboard.md`](docs/workboard.md).
-Machine validation schema: [`docs/workboard.schema.json`](docs/workboard.schema.json).
+[`docs/workboard.json`](docs/workboard.json) is the canonical task queue; its schema and usage
+contract are [`docs/workboard.schema.json`](docs/workboard.schema.json) and
+[`docs/workboard.md`](docs/workboard.md). Query it with **query-workboard** rather than loading the
+whole board.
 
-Inspect it with the **query-workboard** skill; execute a task end-to-end with **start-task**.
-Never dump the full board into context — use targeted `jq` queries.
+A task is startable when it is `todo`, has no `blocked_by`, and every `depends_on` task is `done`.
+For one task: read this guide, use **query-workboard** to select it, then use **start-task** to
+implement, document, verify, and update it. Commit with a summary of what changed, what was
+skipped, and what is next. Use **ralphloop** wrapping start-task for bounded multi-task runs.
 
-A task is startable when:
-- `status == "todo"`
-- `blocked_by` is empty or missing
-- all `depends_on` tasks have `status == "done"`
+### Board edits
 
-Targeted edit rules:
-- Never rewrite the full `workboard.json`.
-- Only update the status fields of the task currently being worked.
-- Roll back `in_progress → todo` if blocked mid-task and unresolved.
+Never bulk-rewrite `workboard.json`. Update only the current task's status, and restore
+`in_progress` to `todo` when unresolved work blocks completion. Use **edit-workboard** for targeted
+field edits, including dependency-safe deletion or task splitting.
 
-**The board records completed M0–M7 work plus planned M8 tasks.** Milestone structure lives in
-[`docs/PRD.md`](docs/PRD.md) — M0 through M8, each independently runnable.
+### Skills
 
----
-
-## Agent Workflow
-
-Standard task cycle for this project:
-
-1. Read this file (`AGENTS.md` / `CLAUDE.md`) at the start of every session.
-2. Invoke **query-workboard** to find the next startable task.
-3. Invoke **start-task** to execute it (reads docs, implements, verifies, updates board).
-4. Update this file if you discovered a constraint, pattern, or pitfall worth encoding.
-5. Commit changes. Summarize: what was done, what was skipped, what is next.
-
-For multi-task runs, invoke **ralphloop** wrapping start-task with an iteration count.
-
-### Invoking Skills
-
-Skills live in a per-harness directory and are invoked by name with your harness's own
-command prefix — `/` in Claude Code, `$` in Codex. This file deliberately names skills
-without a prefix, because `AGENTS.md` and `CLAUDE.md` are the same file and cannot carry
-both. Use whichever your harness expects.
-
-Available here: **query-workboard**, **start-task**, **edit-workboard**, **project-plan**,
-**ralphloop**. Sources live in the `ag.dev` repo and are rendered in by its sync script —
-never edit the copies under `.claude/`, `.agents/`, or `.codex/` directly.
+Skills use the harness prefix — `$` in Codex and `/` in Claude Code — because `AGENTS.md` and
+`CLAUDE.md` are the same file. Available project skills are **query-workboard**, **start-task**,
+**edit-workboard**, **project-plan**, and **ralphloop**. They are rendered from `ag.dev`; never edit
+the copies under `.claude/`, `.agents/`, or `.codex/` directly.
 
 ### Stopping Conditions
 
-Stop and report (do not continue) when:
-- No startable task exists (all are blocked or done).
-- A verification command fails and the fix is not obvious.
-- An irreversible action (publishing to npm or crates.io, a `git push --force`) is required and
-  the task does not explicitly authorize it.
-- A task would require importing `alacritty_terminal` outside `cloo-term`, or otherwise
-  violating a constraint in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Report the conflict
-  rather than working around it.
+Stop and report when no task is startable; when a verification failure has no obvious fix; before an
+unauthorized irreversible publish or force-push; or when a task would violate the documented crate
+boundaries or terminal-emulator constraint. Do not work around those conditions.
 
 ---
 
@@ -291,172 +226,22 @@ See [`docs/ENV_VARS.md`](docs/ENV_VARS.md) for the canonical matrix.
 
 ## Testing
 
-Before marking any task done:
+Before marking any task done, run:
 
 ```bash
 cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace
 ```
 
-`cloo-proto` has wire round-trip, framing, and handshake coverage as of M0-02. `cloo-core` has
-table-driven layout tree coverage as of M0-03, plus the emulator-to-wire cell conversion as of
-M0-07. `cloo-term` has grid coverage — SGR, alternate screen, cursor, resize, scrollback — as of
-M0-04. `cloo-server` has PTY integration coverage in `tests/pty.rs` against a scripted `sh -c`
-child as of M0-05, plus socket lifecycle coverage in `tests/socket.rs` as of M1-01, handshake
-coverage in `src/conn.rs` as of M1-02, and split/close coverage in `tests/session.rs` as of M2-01,
-extended at M2-02 with directional focus and a zoom cycle proved not to restart a child. `cloo-client` has byte-exact renderer coverage and raw-mode
-restore coverage — normal, error, and panic paths, against a real pty in `tests/raw_mode.rs` — as
-of M0-06, plus attach-handshake coverage in `src/attach.rs` as of M1-02 and `SIGWINCH` watch
-coverage in `src/resize.rs` as of M1-03, and capability negotiation and fallback coverage in
-`src/capabilities.rs` as of M1-06. `cloo-proto` gained framed-transport coverage in
-`src/stream.rs` over a duplex pipe in M1-02. The binary has CLI and one-pane smoke coverage in
-`crates/cloo/tests/cli.rs`, run over a pseudoterminal, as of M0-07 — including the `SIGWINCH`
-chain end to end as of M1-03 — and end-to-end attach/detach coverage in
-`crates/cloo/tests/attach.rs` as of M1-02, extended at M1-03 with a resize asserted on *both*
-halves: the grid reflow and the child's own `stty size`, and at M1-07 with input routing end to
-end — a paste bracketed exactly when the child asked, focus and SGR mouse reports reaching a child
-that enabled them and neither reaching one that did not. `cloo-client` gained input decoding and
-mouse-ownership coverage in `src/input.rs` at M1-07, `cloo-server` the matching encoders in
-`src/session.rs`, and `cloo-term` one fixture per negotiated pane mode in `src/emulator.rs`. M1-09 adds default-deny outer-terminal effect policy coverage in `cloo-client/src/effects.rs` and an end-to-end typed OSC 52 effect fixture in `crates/cloo/tests/attach.rs`. That file lives in the binary crate
-because it needs both halves of the wire and `cloo-server` may never name `cloo-client`. Keymap
-resolution and config parsing are the next things that must get coverage as they land. M1-04 adds
-row-damage tracker coverage in `cloo-server/src/damage.rs`, byte-exact incremental renderer
-coverage in `cloo-client/src/renderer.rs`, and attach integration coverage that proves bounded
-burst frames, lagged-client recovery, and concurrent-client fan-out. M2-03 adds pane-chrome
-coverage in `cloo-client/src/chrome.rs` — focus and attention as independent signals, the fixed
-width-degradation ladder at every width, and dimming with its no-dim fallback — plus positioned
-chrome spans in `cloo-client/src/renderer.rs`. M2-04 adds the profile and pane-metadata models in
-`cloo-core/src/profile.rs` and `cloo-core/src/pane.rs` — the built-ins proved to be data, pure
-validation of names, labels, and an absolute-only cwd, and attention as state plus provenance with
-its coalescing rule. M2-05 adds profile-configuration parsing coverage in `cloo-core/src/config.rs`
-— a document error keeping the defaults against one bad profile dropped alone, the merge and
-override rules, and the command and `min_size` surface. M2-06 adds launch coverage in
-`cloo-server/src/launch.rs` and command-line coverage in `crates/cloo/src/cli.rs`, plus profile
-launches through the session actor in `cloo-server/tests/session.rs` — metadata in every snapshot,
-the child's own `pwd` proving the working directory, and a missing program failing with a message
-that names it while the layout rolls back — and pane identity reaching a client in
-`crates/cloo/tests/attach.rs`. M2-07 persists attention in the session actor (handshake v5): the
-wire projection and its `ServerMessage::Attention` round-trip in `cloo-proto`, the state/source/
-acknowledgment projection in `cloo-core/src/pane.rs`, attention resent only on change in
-`cloo-server/src/damage.rs`, and attention through the actor in `cloo-server/tests/session.rs` —
-a report reaching the next snapshot with its provenance, acknowledgment moving only the seen flag,
-the coalescing rule proved through the channel, and a report for a closed pane dropped. M2-08 wires
-the generic sources into that path: a coalesced bell flag in `cloo-term/src/emulator.rs`, a
-non-blocking reap in `cloo-server/src/pty.rs`, and their mapping in `cloo-server/src/session.rs`
-(bell → `needs_input`/`Bell`, exit → `ready`/`failed`/`Lifecycle`), proved against real children in
-`cloo-server/tests/session.rs` including bait text that leaves attention `unknown`. M2-10 renders
-the attention surfaces client-side in `cloo-client/src/chrome.rs`: the `AttentionQueue`'s
-deterministic order and coalescing (an acknowledged state not refilling it, a lull resetting the
-slate), keyboard navigation with focus and acknowledge, the per-state status-bar summary, every
-state rendered text-glyph-and-colour in a queue row over the header's width ladder, and a bounded,
-per-pane-coalescing `ToastDeck` — with the queue's key bindings in `cloo-client/src/input.rs`.
-M4-01 adds server configuration-reload coverage in `cloo-server/src/config.rs` and
-`tests/config.rs`: pure `CLOO_CONFIG`/XDG/home path precedence, valid replacement without a
-restart, invalid replacement retaining the previous value, missing-file reset to built-ins, and
-per-profile warnings that do not suppress valid neighbours — including a real `SIGHUP` routed
-through the same reload path. The binary's `cli.rs` test also uses an isolated child environment
-to prove a configured profile resolves before the local terminal is touched.
-M4-03 adds pure theme coverage in `cloo-core/src/theme.rs` and `cloo-client/src/theme.rs`: every
-named palette supplies every style-guide token, Storm is pinned to the handoff values, and a
-terminal-palette theme emits basic ANSI semantic colours rather than RGB or 256-colour guesses.
-The chrome fixture proves focus's `>` and attention's `!` remain textually and colour-wise distinct
-without truecolor.
-M5-02 adds the client half of copy mode in `cloo-client/src/copy_mode.rs` — selection, match, and
-cursor spans painted from the grid cache with that cache asserted unchanged, role precedence with
-each role distinct by attribute as well as colour, off-viewport positions dropped rather than
-clamped, the status row exactly its width at every width, and a denied clipboard policy that
-writes nothing and does not even send the request — plus the explicit copy through the actor in
-`cloo-server/tests/session.rs` and the whole loop end to end in `crates/cloo/tests/attach.rs`.
-M2-09 covers the opt-in adapter control interface (handshake v8): the permitted-state mapping and
-message round trips in `cloo-proto/src/adapter.rs`, the pane's opt-in in `cloo-core/src/pane.rs`,
-the derived control-socket path in `cloo-server/src/socket.rs`, the control handshake in
-`cloo-server/src/conn.rs`, and the gate in `cloo-server/tests/session.rs` — an attributed report,
-an adapter the profile never named refused with an observed `failed` left intact, a pane that opted
-into nothing reachable by none, and a closed pane refused rather than dropped — with the whole loop
-end to end in `crates/cloo/tests/attach.rs`.
-M6-01 covers mouse ownership at both ends: `cloo-client/src/input.rs` hit-tests a drawn screen at
-every region, proves a mis-described pane cannot swallow a chrome row and a header cannot swallow a
-pane's cell, and asserts that *no* chrome region produces a wire event even under full motion
-tracking; `cloo-server/tests/session.rs` proves against real children that an event reaches the pane
-it names and not the focused one, that a pane which never enabled the mouse is written nothing, and
-that an event naming a closed pane is dropped.
-M6-03 adds the stall coverage those fixtures needed in `cloo-server/tests/session.rs`: a snapshot
-answered after every pane's child has exited with nobody draining the event channel, and sixty-four
-undeliverable notifications followed by a resize that still applies. Every snapshot in that file now
-goes through a `snapshot_now` helper that wraps the call in a deadline — a test must never await an
-actor reply without a timeout, or a wedged actor hangs the whole suite instead of failing one test.
-M4-02 adds keymap resolution: chord spellings and the tmux-shaped `C-b` table in
-`cloo-core/src/keymap.rs` (spellings round-tripping, each invalid one refused by its own error, the
-action vocabulary with no name for an action that needs typed text, and an override replacing a
-binding in place while an alias is not a conflict), the `[keys]` document surface in
-`cloo-core/src/config.rs` (a chord written twice as a document error, an unspellable prefix keeping
-`C-b`, and a bad line dropped alone), and the prefix state machine in `cloo-client/src/input.rs` —
-one fixture per encoding a terminal sends decoded to its spelling, and every default-bound chord
-still reaching the pane byte for byte when no prefix is pending.
-M4-04 adds the motion model in `cloo-client/src/motion.rs` — a 120ms transition stepped frame by
-frame from an injected `Instant`: an interruption settling at the end state rather than rewinding,
-a bounded frame count however often the transition is sampled, reduce-motion drawing exactly one
-settled frame, and a contrast ramp that keeps every character readable — plus the transition frame
-in `cloo-client/src/renderer.rs`, whose settled phase is byte-identical to an ordinary span frame.
-M6-02 covers the chrome's own mouse actions (handshake v9) at three layers: `cloo-core/src/layout.rs`
-proves a drag changes ratios only by comparing the tree's *shape* with every ratio erased as well as
-the rectangles, with the clamp tested from both ends and an undividable extent leaving the ratio
-alone; `cloo-client/src/input.rs` finds a divider from the pane rectangles for both a gutter column
-and a header row, emits relative deltas with nothing on the press or after the release, and maps the
-wheel onto the copy-mode commands the keyboard already sends; `cloo-core/src/keymap.rs` asserts
-`FocusPane` and `ResizePane` have no spelling while the four directional focus actions stay bindable;
-and `cloo-server/tests/session.rs` proves against real children that a drag moves one divider without
-restarting anything and that a stale or zoom-hidden click is dropped — with the wheel end to end in
-`crates/cloo/tests/attach.rs`.
-M3-04 adds the keyboard-first overlays in `cloo-client/src/overlay.rs` — every overlay dismissible
-from every state including an empty one, navigation clamping at both ends, a confirmed launcher row
-naming a profile the caller supplied with an unvalidatable profile never becoming a row, pane
-details listing only what the server reported, and the shared width ladder asserted exactly at
-every width and height — with the matching key bindings in `cloo-client/src/input.rs`.
-M6-05 adds frame composition in `cloo-client/src/renderer.rs`: `compose_frame` lays a two-pane
-snapshot's grids into their `PaneArea`s with the tab row on row zero, a header directly above each
-grid, and the status row on the last row — a focused body dropping in undimmed and byte-equal to the
-cache at its rect origin, an unfocused body receding through the shared `chrome::body_span` dimming,
-a headerless area drawing no header, and a zero-sized frame composing nothing.
-M6-06 drives that frame from the command users run: `cloo attach [session]` enters raw mode before
-connecting, watches `SIGWINCH`, routes decoded input through the configured prefix keymap and mouse
-ownership, and restores the outer terminal after detach. Its real-PTY binary fixture proves the
-composed frame, prefix detach, raw-mode restoration, and a second attachment reaching the same child.
-M8-01 makes a bare `cloo` that command's ordinary entry: `crates/cloo/src/main.rs` unit tests the
-liveness branch (a bound socket is a workspace; a missing path and a listener-less socket file are
-not), `crates/cloo/src/cli.rs` proves only an empty argument vector parses as the workspace, and
-`crates/cloo/tests/cli.rs` proves a bare `cloo` creates a daemon that outlives its detaching client
-and joins a live one without displacing it. M8-02 hardens that entry in the same file: two
-concurrent bare `cloo`s converge on one session with one pane, a killed daemon's socket is
-recovered, a regular file and a symlink are each refused with the path intact and no socket left
-behind, and a `TERM` the client refuses hands back a cooked terminal while the workspace it created
-stays usable — every wait bounded, every fixture shutting down its own daemon.
-M8-03 puts the first-attach shortcut hints under `cloo-client`'s own fixtures: `src/chrome.rs`
-asserts the widest row byte for byte, the clues yielding from the end while every core field is
-still at its widest, a second pane withdrawing them, a configured `M-Space` drawn verbatim down to
-its four-cell marker, a bracketed pending prefix, and an exactly-its-width ASCII row at every width
-from 0 to 60; `src/renderer.rs` reads the visible text back with escape sequences stripped to prove
-the hint survives a 16-colour terminal; `src/attach.rs` drives the live client state through the
-one-pane, two-pane, and pending cases; and `crates/cloo/tests/cli.rs` proves the clue words reach
-the first frame a bare `cloo` draws.
-M8-04 makes that `help ?` clue lead somewhere: `cloo-client/src/overlay.rs` adds the help surface as
-a fourth kind of the one overlay model — joining the dismissal and width-ladder loops rather than
-getting its own — with four fixtures for the property that it is read from the live keymap (a
-rebound prefix and chord verbatim, an unbound action with no row at all, a keymap that claims `?`
-taking that row with it, and each row naming the `[keys]` action to write), an ASCII-only loop, and
-an exact width ladder; `src/attach.rs` proves `?` opens help while `i` keeps pane details, that an
-open surface consumes navigation and Enter locally, and that a client configured with `M-a` draws
-that prefix and its controls in the composed frame.
-M8-05 puts the server half of the launcher on the wire (handshake v10): `cloo-proto/src/frame.rs`
-round-trips `Action::LaunchProfile` in the same every-message list every other variant is in,
-`cloo-server/src/launch.rs` covers resolution purely — a configured identifier becoming that
-profile's launch, and an unknown ID, an empty one, and a command line each refused as
-`LaunchError::Unknown` — and `cloo-server/tests/session.rs` proves the same three answers against
-real children from a *parsed* `config.toml`: metadata and the child's own `pwd`, an unknown
-identifier leaving one pane, and a missing program rolling the layout back. `crates/cloo/tests/
-attach.rs` closes the loop over a socket, sending the refused identifiers first so a pane any of
-them wrongly created is still counted.
+Keep focused unit tests with the crate that owns the behaviour. Put integration tests spanning
+`cloo-server` and `cloo-client` in `crates/cloo`, never in either library crate, because the
+sideways dependency remains forbidden even in test-only dependencies.
 
-Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
+Use a real PTY whenever terminal, raw-mode, signal, resize, or child-input behaviour matters.
+Bound every actor reply and external wait with the fixture deadline, and prove an assertion is
+non-vacuous by making its relevant implementation change fail the test. Fixtures that create a
+daemon must clean it up; `cargo test` does not clean up real runtime sockets.
+
+The complete test inventory, ownership, and patterns live in [`docs/TESTING.md`](docs/TESTING.md).
 
 ---
 
@@ -476,643 +261,126 @@ be deleted at all. Publishing is the project owner's action.
 
 ## Living Document
 
-This file is a running notebook of agent discoveries. After each task cycle, update
-this file if you found:
+`AGENTS.md` is an operational briefing, not an implementation diary. The canonical docs and
+well-named tests hold the detailed design; Git history preserves the reasoning that led there.
 
-- A constraint that would have saved time if it were written here.
-- A debugging tip that resolves a non-obvious failure.
-- A pattern that should be followed for consistency.
-- A "never do X" rule that emerged from a near-miss.
+Keep `## Durable Discoveries` deliberately small. An entry belongs there only when it is a
+cross-cutting, non-obvious constraint that would change how a future agent approaches work and is
+not already stated adequately in the architecture, conventions, testing guide, or a nearby API.
+Do not add task-specific debugging history, completed-milestone narration, or facts recoverable
+from a targeted code search. Rewrite the canonical documentation instead when that is the better
+home.
 
-Append under `## Discoveries` below. Keep each entry to 2–3 sentences with a date.
-Do not reorganize or rewrite existing entries — append only.
-
-```
-### YYYY-MM-DD — <short title>
-<What you found and why future agents working here should know it.>
-```
+The section has a hard limit of 18 entries. Adding one requires deleting or merging another; each
+entry should be a compact explanation of both the constraint and the failure it prevents.
 
 ---
 
-## Discoveries
-
-### 2026-07-22 — A session is never empty and its active tab always exists
-`cloo-core::session::Session` mirrors the layout's "at least one pane" rule one level up: it is born
-with one tab, refuses to close the last (`SessionError::LastTab`), and keeps `active` on a tab that
-still exists so `active_tab()` returns a reference, not an `Option`. Closing the active tab activates
-the tab that slid into its index (right neighbour, or the new rightmost when it was last); `close_tab`
-checks unknown-tab *before* last-tab so a bad ID is never reported as the last-tab rule. `TabName`
-reuses `pane::validate_text` (now `pub(crate)`) — one validator, so a tab title cannot smuggle a
-control char a pane name could not.
-
-### 2026-07-22 — Attention is a third wire clock, projected from the same layout pass
-Attention crosses as its own `ServerMessage::Attention(Vec<PaneAttention>)` rather than being
-flattened into `PaneInfo`, because a state without its source is exactly the claim the chrome must
-not make, and it is resent only when it changes — a rename is not a state change and vice versa, so
-`DamageTracker` diffs `metas` and `attention` independently. Project both from the *same*
-`Layout::resolve` pass in `Session::snapshot`, or a client can be told a pane's state without being
-told who the pane is. The session actor is the one writer, so `set_attention` leans on
-`Attention::set`'s coalescing instead of re-implementing it, and a report for a closed pane is a
-silent no-op like a stale mouse event.
-
-### 2026-07-20 — npm rejects `cloo` at publish time, not lookup time
-`npm view cloo` returned 404 and `npm publish --dry-run` passed, but the real publish failed
-with a 403 from npm's package-name similarity filter (too close to `clone`, `cli`, `clsx`,
-`clui`, and others). The name is now `clooterminal`, with `cloo` preserved as the command via
-the `bin` field. Registry availability is not proof a name is publishable.
-
-### 2026-07-20 — Intra-workspace deps carry both a path and a version
-The five library crates are declared once in the root `[workspace.dependencies]` with
-`{ path = "…", version = "0.0.2" }` and pulled in as `cloo-core.workspace = true`. A path-only
-dependency builds locally but makes the crate unpublishable to crates.io, so the version is not
-optional even though nothing is published yet.
-
-### 2026-07-20 — Postcard needs an explicit length prefix on a stream
-Postcard is not self-delimiting, so a socket reader cannot know where one message ends. Framing
-is a big-endian `u32` prefix, and `decode` returns bytes-consumed so a caller can drain and
-re-read. A partial buffer must surface as `ProtoError::Incomplete` (read more, retry), which is
-distinct from a malformed payload — conflating the two turns a normal short read into an error.
-
-### 2026-07-20 — One ratio-to-cells function, shared by resolve and the min-size check
-`cloo-core::layout::split_extent` is the only place a ratio becomes cell counts. The
-minimum-size check calls it rather than reimplementing the arithmetic, because if rounding
-disagrees between the check and the layout pass you can accept a split and then resolve it below
-the minimum. Rejection happens at split time only — a layout pass over an area that shrank
-squeezes panes to a one-cell floor instead, since a resize must always produce a drawable answer.
-
-### 2026-07-20 — `cloo-term` duplicates the proto cell types on purpose
-`Cell`, `Color`, and `CellAttrs` exist in both `cloo-term` and `cloo-proto` with identical
-`CellAttrs` bit positions, because `cloo-term` has no intra-workspace dependencies and reusing
-the wire types would put `cloo-proto` under the emulation wrapper. `cloo-core` owns the
-conversion, and it is only a field copy as long as the bit layouts stay in sync — change one and
-you must change the other in the same commit.
-
-### 2026-07-20 — Grid line indices are absolute, not viewport-relative
-`alacritty_terminal`'s `Grid[Line(n)]` indexes the buffer, not the visible rows: viewport row `r`
-is `Line(r - display_offset)`, and the cursor's viewport row is `point.line.0 + display_offset`.
-Getting this backwards renders the wrong rows only once scrollback is non-empty, so it survives
-every test that does not scroll. Also, `\x1b[?1049h` saves the cursor rather than homing it — a
-fixture that writes immediately after entering the alternate screen lands at the old column.
-
-### 2026-07-20 — A PTY master reports EOF as `EIO`, not as a zero-length read
-On Linux, reading a PTY master after the last slave descriptor closes fails with `EIO` rather
-than returning `0`. `cloo-server::pty` translates that into an ordinary EOF at the boundary, so
-nothing above the PTY layer has to know. If you ever see a pane "erroring" the instant its shell
-exits, this is the translation being missed. The parent must also drop its own copy of the slave
-right after spawning, or that EOF never arrives at all.
-
-### 2026-07-20 — PTY restoration is by ownership, not by a shutdown call
-The master is an `OwnedFd` and `Pty::drop` kills and reaps the child, because `std::process::Child`
-leaves a zombie on drop by default. The master is also set close-on-exec: a child inheriting a
-writable master keeps the descriptor alive after the parent closes its copy, and reads on the
-parent side then never see EOF. `tests/pty.rs` asserts the reap with `kill(pid, 0)`, which still
-succeeds for a zombie and so actually catches the bug.
-
-### 2026-07-20 — A signal handler cannot borrow the raw-mode guard
-Restoring the terminal on `SIGINT`/`SIGTERM`/`SIGHUP`/`SIGQUIT` means the saved `termios` has to
-live in a process-global slot, not only in the RAII guard, and the handler may call only
-async-signal-safe functions — `tcsetattr` qualifies, allocating or locking does not. The slot is a
-three-state atomic so a handler firing mid-arm reads nothing, and only one guard may be armed per
-process, which is why `cloo-client`'s pty-backed tests take a module `Mutex` before entering.
-
-### 2026-07-20 — Render frames are asserted byte for byte, so keep them deterministic
-`Renderer::render_full` returns an owned buffer instead of writing to a descriptor, which is the
-only reason a fake grid is testable against an exact expected string. Two rules keep it that way:
-every SGR sequence leads with a `0` reset (absolute, never a delta from the previous frame), and
-no sequence is emitted for a capability the client did not report — RGB downsamples to the
-256-palette rather than being sent and hoped for.
-
-### 2026-07-20 — Enter raw mode before spawning the child, and never before checking stdin
-`RawMode::stdin()` is what produces "cloo must be run from a terminal", so it has to run before
-anything else that can fail on a non-tty — an earlier `TIOCGWINSZ` on stdout reports "inappropriate
-ioctl" instead, which is a true but useless message. It also has to run before the PTY is spawned,
-so a refusal leaves no child to clean up. A `winsize` that cannot be read is *not* a reason to
-refuse: stdout is asked, then stdin, then a conventional 80x24.
-
-### 2026-07-20 — Draw a final frame after `Pump::Eof`, not only on the frame tick
-The render loop paints on a ~60fps timer, so a child that writes and exits within one tick has its
-last output sitting in the grid, never drawn — `printf hello; exit` shows nothing at all. The loop
-therefore renders once more after EOF if the grid is still dirty. Any future coalescing scheme
-needs the same flush, and `crates/cloo/tests/cli.rs` is what catches its absence.
-
-### 2026-07-20 — The crate graph is a layering, not a chain
-Four M0 tasks each added an edge that "skipped a level" in the old `cloo → {server, client} →
-core → {proto, term}` diagram, and each documented it as an exception. They were not exceptions:
-`cloo-proto` is the wire vocabulary, so every crate that speaks the wire names it directly. The
-rule is now stated as a layering with a real edge table in `docs/ARCHITECTURE.md` — depend
-downward freely, never sideways between `cloo-server` and `cloo-client`, never upward.
-
-### 2026-07-20 — Test the signal restore path from the binary, not the library
-`cloo-client`'s own tests cannot assert the `SIGTERM` restore path, because a library test that
-signals itself kills the test runner. Signal the *binary* as a child instead: `crates/cloo/tests/
-cli.rs` spawns `cloo` on a pseudoterminal and asserts the terminal came back cooked. When adding
-an exit path, check the assertion is not vacuous by breaking the restore and watching it fail.
-
-### 2026-07-21 — A socket file is not proof a daemon is alive
-Daemon ownership is an advisory `flock` on `<socket>.lock`, never the existence of the socket:
-a `SIGKILL`ed daemon leaves a socket behind and a live one has the same file, so the file cannot
-distinguish them, while the kernel drops a `flock` however the holder dies. Holding the lock is
-also what makes stale cleanup safe — the unlink is only reachable once no other daemon can exist.
-
-### 2026-07-21 — Stat a socket path with `symlink_metadata` before unlinking it
-`fs::metadata` follows symlinks, so a symlink at the socket path reports the *target's* file type
-and a "it's a socket, remove it" check passes on something that lives elsewhere. `cloo-server::
-socket` uses `symlink_metadata` and refuses anything that is not itself a socket; `Drop` also
-compares the `(device, inode)` recorded at bind, so a departing daemon cannot unlink a successor
-that already claimed the path. Both cases have tests, and both pass vacuously if you use the
-wrong stat call.
-
-### 2026-07-21 — The server/client edge ban covers dev-dependencies
-An end-to-end attach test naturally wants `cloo-client` in `cloo-server`'s `[dev-dependencies]`,
-and that is the forbidden sideways edge just as much as a real dependency is — Cargo builds it,
-and the graph now has the cycle the layering exists to prevent. `crates/cloo/tests/attach.rs` is
-where a test that needs both halves goes, because the composition root already depends on both.
-
-### 2026-07-21 — A clean close and a truncated frame are different answers
-`FrameStream::recv` returns `Ok(None)` when the peer closes *between* frames and
-`StreamError::Truncated` when it closes *inside* one. Collapsing the two either turns an ordinary
-detach into an error the client reports, or turns a half-written frame into a silent hang-up that
-looks like a normal disconnect. The read buffer's emptiness at EOF is the whole test.
-
-### 2026-07-21 — A daemon must pump the PTY while nobody is attached
-The property "detach leaves the child running" is not only about not killing the child: a daemon
-that reads the PTY only while a client is connected loses every byte written in between, and a
-reattaching client finds a stale grid. `Daemon::wait_for_client` therefore selects over `accept`
-*and* `pump`, and the reattach test asserts on text the child wrote before anyone connected.
-
-### 2026-07-21 — A resize test that checks one half passes with the other missing
-A resize is two operations — the grid reflows and the child hears about it through `TIOCSWINSZ` —
-so asserting only on the wire's row width, or only on the child's `stty size`, leaves half the
-feature untested. `crates/cloo/tests/attach.rs` asserts both from one client, and each half was
-confirmed non-vacuous by breaking the corresponding line of `PtyReactor::resize` and watching it
-fail. Do the same to any resize assertion you add.
-
-### 2026-07-21 — Signal and input race in a pty test unless the assertion is order-free
-A test that sends `SIGWINCH` and then a keystroke, expecting the child to report the *new* size,
-depends on cloo's `select!` picking the resize branch first — it passes alone and fails under a
-loaded parallel run. Have the child report on a loop (`while :; do stty size; sleep 0.1; done`)
-so no ordering matters. Relatedly, `read_until` in `crates/cloo/tests/cli.rs` now polls with the
-time remaining: a blocking read on a pty that goes quiet ignores the deadline entirely and turns
-a clean 20-second failure into a hung suite.
-
-### 2026-07-21 — An actor handle must be the only way in, including for reads
-`Daemon` used to hold the `PtyReactor` and call `snapshot()` on it directly; the session task
-would have been a second path to the same state rather than the only one. It now holds a
-`SessionHandle` — a sender and nothing else — and asks for snapshots over the channel like
-everything else, which is what makes "no `Mutex` on session state" mean something. `SessionEvent`
-splits by kind for the same reason: `Output` is a level and coalesces on a depth-one channel,
-while `Exited` carries information a reader cannot recover and must be sent, not dropped.
-
-### 2026-07-21 — Refusing on `TERM` belongs in the client, not on the wire
-The server cannot enforce "an unresolvable `TERM` may not attach" by looking at the reported
-`TermCaps`: an all-false set is exactly what a capable terminal reporting nothing would also send,
-so inferring the refusal there would turn a legitimate attach away. `TERM` is the client's to read,
-so `cloo-client::capabilities::attach_caps` refuses before the socket is touched, and
-`caps_from_env` is the same detection with the refusal replaced by an all-false default for the
-local pane — one function, two policies, which is what keeps the two paths from drifting.
-
-### 2026-07-21 — Ask the layout first, then the PTY, and roll back with `close`
-Split and close are atomic because of their order, not because of a transaction: the layout is the
-half that can refuse, so it goes first and a refusal never costs a process, and only then is the
-child spawned or its reactor dropped. A spawn that fails is undone by closing the pane just added,
-which works only because collapsing a fresh split restores the previous tree *exactly* — that
-exactness is now a test in `cloo-core::layout`, since the server cannot reach the failure path.
-
-### 2026-07-21 — A child that reports on a loop makes a resize assertion vacuous
-`while :; do stty size; done` leaves its old answer on the grid, so an assertion on it passes
-whether or not the resize under test happened; `while read _; do stty size; done` reports only when
-the test asks, and checking the *last* non-blank line is what pins it to the most recent answer.
-This is the opposite of the M1-03 lesson about ordering — use a loop when a signal races input, an
-on-demand reporter when a stale identical answer would pass.
-
-### 2026-07-21 — Selecting over N PTYs needs no dependency
-The session pumps a runtime-sized set of panes with a hand-rolled `select_all`: box each
-`PtyReactor::pump`, poll them in a `poll_fn`, and rotate the starting index so a loud pane cannot
-starve a quiet one. It is safe only because `pump` is cancel-safe — every future that loses is
-dropped on each call. Box the futures as `dyn Future + Send`, or the whole session task stops being
-`Send` and `tokio::spawn` rejects it with an error that points at the wrong line.
-
-### 2026-07-20 — DESIGN.md was migrated into docs/
-The root `DESIGN.md` was the original planning document and has been folded into
-`docs/PRD.md` (scope, milestones), `docs/ARCHITECTURE.md` (topology, protocol, layout), and
-`docs/DECISIONS.md` (the resolved/open decision log). It no longer exists — do not recreate a
-root-level design doc, since `docs/INDEX.md` forbids root stubs that redirect into `docs/`.
-
-### 2026-07-21 — Encoding input is a function of the child's modes, not the terminal's
-Whether a paste is bracketed, whether a click is reported, and in which encoding are all set by
-private mode sequences the *child* wrote, so only the emulator can answer and only the server sees
-it. That is why `ClientMessage::Paste`/`Focus`/`Mouse` carry events rather than bytes, and why the
-server reports `PaneModes` back — the client needs them to decide whether a click is the
-application's or cloo's chrome's, and it cannot observe them itself.
-
-### 2026-07-21 — A pasted terminator must be stripped, or the bracket is decorative
-`\x1b[201~` inside pasted text closes the bracket early and the remainder of the paste is
-interpreted as typed input — exactly the injection bracketed paste exists to prevent. `paste_bytes`
-strips both delimiters from the body and normalises line endings to `\r`, because a pasted `\n`
-reaches a shell as a literal newline rather than as Enter.
-
-### 2026-07-21 — A lone Escape is a prefix of every sequence the decoder knows
-Holding a partial escape sequence across reads is what makes a split paste or mouse report decode
-correctly, but it also means pressing Escape is held forever waiting for bytes that never come.
-`InputDecoder::flush`, called on the frame tick, is the whole answer — and it deliberately refuses
-to flush mid-paste, since turning half a paste into keystrokes is the failure being prevented.
-
-### 2026-07-21 — A scripted child needs `-icanon` to receive a report with no newline
-`\x1b[I` and an SGR mouse report carry no newline, and a pty in canonical mode delivers nothing to
-the reader until one arrives — an integration test asserting on them hangs to its timeout rather
-than failing. `crates/cloo/tests/attach.rs` runs those children under `stty -echo -icanon` and
-strips the escape byte with `tr`, which is what makes an escape sequence assertable as grid text.
-
-### 2026-07-21 — The Kitty keyboard protocol is off by default in the emulation backend
-`alacritty_terminal`'s `Config::kitty_keyboard` defaults to false, and with it off a child's
-`\x1b[>1u` push is silently discarded — so `Emulator::modes` would report legacy keys forever,
-which is a wrong answer rather than a missing one. cloo turns it on. Related and still open: the
-emulator runs with a `VoidListener`, so any reply it wants to write back to the child (device
-attributes, a keyboard-mode report) is dropped — see DECISIONS.md OPEN-02.
-
-### 2026-07-21 — Subscribe after a resync snapshot, not before it
-The daemon is the only broadcaster, so it can capture a snapshot and create a new `broadcast`
-receiver without an await between them; the receiver then starts strictly after the snapshot. A
-receiver created first could replay an older layout or row after the snapshot and undo the resync.
-
-### 2026-07-21 — Empty OSC titles are reset effects in the wrapper
-`alacritty_terminal` reports an empty OSC 0/1/2 title as `Event::Title("")`, not `ResetTitle`
-(that event is used for configuration reload). `cloo-term` normalizes it to `ResetTitle`; its
-effect listener also drops backend reply events, so no PTY reply or arbitrary control string can
-be mistaken for an outer-terminal effect.
-
-### 2026-07-21 — Zoom is a flag, and that is what makes unzoom exact
-Modelling zoom as a reshaping of the tree — promote the pane, remember the old tree, restore it —
-gets the ratios back only if the copy is perfect. Storing a `zoomed: Option<PaneId>` that only
-`Layout::resolve` reads makes "unzoom preserves every ratio" true by construction rather than by
-test, and it is also why zoom cannot restart a PTY: the only thing it can do to a child is a
-`TIOCSWINSZ` from the ordinary geometry pass, and a hidden pane's child is not even sent that.
-
-### 2026-07-21 — Directional focus must be geometric, not structural
-Walking the tree for "the pane to the left" answers with a *subtree* as often as a pane, and picks
-the wrong leaf whenever the sibling is itself a split. `Layout::neighbor` reads one layout pass
-instead and requires the candidate to overlap on the perpendicular axis, which is what stops focus
-from jumping diagonally. The test that catches a structural implementation is the asymmetric tree —
-a quad passes either way.
-
-### 2026-07-21 — Prove "no restart" with a pid the child prints once
-Nothing above the PTY layer exposes a per-pane child id, so a test that a zoom did not respawn
-anything has no direct handle to assert on. A child that runs `echo pid=$$` once at startup and
-reports on demand afterwards leaves that line on its grid: comparing it before and after the zoom
-cycle fails the moment a pane is torn down and spawned again, since both the pid and the cleared
-grid would change.
-
-### 2026-07-21 — The terminal effect queue must stay `Send` and suppressible
-The session's rotating PTY pump boxes `Send` futures, so an emulator listener cannot use
-`Rc<RefCell>` even though the session actor is the sole logical owner. `cloo-term` uses a bounded
-non-blocking channel instead; a full queue drops a typed client-local effect, which is safe because
-effects never change the grid or authoritative session state.
-
-### 2026-07-21 — Dimming a palette colour is a guess; dimming an RGB one is arithmetic
-"Contrast reduction toward the frame background, not alpha" is implementable exactly only for a
-`Color::Rgb`; for a `Color::Indexed` or the terminal default, cloo does not know what the user's
-palette looks like, so `chrome::dim_cell` falls back to the `DIM` attribute rather than inventing a
-colour. Blending is what keeps a dimmed amber `needs input` distinguishable from a dimmed grey
-`quiet` — the test that catches a lazy "just set DIM everywhere" implementation.
-
-### 2026-07-21 — Prove "the built-ins are data" by reconstructing one
-"No vendor special case" is a property no ordinary test asserts, because a profile with a hidden
-branch still validates and still launches. `profile.rs` instead rebuilds `codex` from the public
-constructor and compares it field for field to `Profile::codex()` — that fails the moment a
-built-in gains anything a user's configured profile could not also express, which is the actual
-rule. `min_size` is validated against `MIN_PANE_SIZE` for the same reason: a recommendation a split
-could never honor would silently mean nothing.
-
-### 2026-07-21 — Coalesce attention in the model, not in each source
-`Attention::set` clears acknowledgment only when the state actually *changes*, so a harness
-re-announcing `needs_input` every second cannot refill a queue the user just cleared. Putting that
-rule in one place is what stops the bell path, the lifecycle path, and the adapter path from each
-inventing their own; provenance is kept beside the state rather than folded into it, so an
-adapter's advisory claim can be attributed instead of presented as fact.
-
-### 2026-07-21 — A pure validator is proved by the path that does not exist
-`cloo-core` performs no I/O, so `WorkingDir::new` checks a path's *shape* and nothing else — the
-test that keeps it honest validates `/definitely/not/here/at/all` successfully. Existence and
-`PATH` resolution are launch-time answers the server owns, and a directory that exists at
-validation time may be gone by launch anyway. Same reasoning bars `~`, which is the shell's and
-unexpanded means a directory literally named `~`.
-
-### 2026-07-21 — A config parser takes text, and syntax and semantics fail differently
-`cloo-core::config::parse` takes the *contents* of `config.toml` and never a path, which is the
-only way a config loader can live in a crate that performs no I/O — the server reads the file at
-M4-01. Inside it, a document error (malformed TOML or an unknown key, which `deny_unknown_fields`
-turns into one) rejects everything and the caller keeps the defaults, while a single profile that
-fails `Profile::validate` is dropped alone with a warning; collapsing the two either loses nine
-good profiles to one typo or silently ignores a key the user believes is applied.
-
-### 2026-07-21 — Fix the header's degradation order, or two panes disagree on one screen
-A header that decides per situation which field to drop renders differently in two equally narrow
-panes, and cannot be asserted against an exact string. `chrome::header_cells` spends width in one
-fixed order (task label, then state text, then title truncation, glyph last) and is tested for
-being *exactly* the pane width at every width from 0 to 60 — that loop, not the pretty cases, is
-what catches an off-by-one in the gap arithmetic.
-
-### 2026-07-21 — A pane is created only from a Launch, and that is what makes "no inference" a type
-`cloo-server::launch::Launch` is the sole way `Session::spawn`/`split` makes a pane: a validated
-profile plus the user's name, task, and cwd, built before any process exists so a bad profile
-never costs a child and a missing program is the only thing left to fail at `execvp`. "cloo does
-not guess a task" is enforced by the type having no constructor that takes a grid or a process
-name — not by a rule someone remembers. Split the `PtyConfig` in two: `PtyConfig::session` carries
-the environment and geometry, `Launch::configure` overwrites the argv and cwd, which is why a
-split can launch a different profile without losing the session's `TERM`.
-
-### 2026-07-21 — Identity is a wire message on its own clock, separate from geometry
-`ServerMessage::Panes(Vec<PaneInfo>)` (handshake v4) carries profile/name/task/cwd, and the
-`DamageTracker` resends it only when the metas change — a resize is not a rename, so a full-screen
-drag must not drag every pane's name across the wire. It is sent whole, not per pane, so a client
-replaces its map and never holds an entry for a pane that closed. `SessionSnapshot::metas` is
-projected from the same `Layout::resolve` pass as the rects, so a client can never be told about a
-pane it has no identity for, or vice versa.
-
-### 2026-07-22 — A PTY EOF races the child becoming reapable
-End of file on a PTY master (the translated `EIO`) fires when the kernel closes the exiting child's
-descriptors, which happens a hair *before* the process becomes a zombie — so a single
-`try_wait` at EOF can return `None` and misreport a crash as a clean exit. `Session::exit_status`
-closes the window with a short bounded spin of `try_wait`, never a blocking `wait`, because a child
-that closed its terminal but kept running (a detach) would wedge the actor forever. The reaped
-status is cached in `Pty` so the shutdown `wait` returns it instead of `waitpid`-ing the same pid
-twice and failing with `ECHILD`.
-
-### 2026-07-22 — Tab switches are projections, not PTY ownership changes
-The session actor holds every pane reactor while the pure session model's tab-local layouts partition
-them; a snapshot projects only the active tab, but inactive PTYs must keep pumping. Tab creation starts
-its child before adding the tab to the model, and closing removes the model entry before dropping exactly
-its panes — a switch then applies geometry to the selected tab without restarting either child.
-
-### 2026-07-22 — Reload configuration by replacement, not mutation
-`cloo-server::config::ConfigManager` reads and validates a whole `config.toml` before assigning it
-to the live value, so a malformed `SIGHUP` reload has no partial state to undo and leaves the last
-valid configuration intact. The parser stays pure in `cloo-core`; path resolution and file I/O live
-in the server, and a missing file is a deliberate reset to the built-ins.
-
-### 2026-07-22 — Copy-mode history reads must not move the viewport
-Copy selection and regex search need the whole retained grid, but scrolling an emulator to collect it
-would move the view a client is drawing. `Emulator::scrollback_text` reads absolute grid lines without
-changing `display_offset`; the session actor owns both that viewport and the copy cursor, and projects
-copy state on its own wire clock so reattachment cannot turn a client cache into an authority.
-
-### 2026-07-22 — Never snapshot scrollback for an inactive copy search
-`scrollback_text` allocates every retained line, so calling it after every `Pump::Bytes` makes a burst
-pay for thousands of history snapshots even when no client entered copy mode. Check for an active
-search first; `crates/cloo/tests/attach.rs`'s burst fixture catches this regression by timing out
-before its final marker otherwise.
-
-### 2026-07-22 — A client cannot place a scrollback position without being told the viewport
-Copy-mode positions are absolute in server-owned history while a client caches only the visible
-grid, so `CopyModeState` carries `viewport_top` (handshake v7) — the retained line drawn on the
-pane's first row — and every highlight is computed in retained-line coordinates rather than by
-guessing an offset. Never clamp an off-screen position onto the nearest visible row: that
-highlights text the user did not select, and the test that catches it selects across a line that
-has already scrolled out.
-
-### 2026-07-22 — An explicit copy is answered to one client, not broadcast
-`Action::CopySelection` is handled in the *socket* task rather than the daemon coordinator, so the
-resulting `ClipboardStore` reaches only the terminal whose user pressed the key — fanning it out
-through the damage broadcast would store one user's selection in every attached clipboard. The
-client-side gate runs before the request too: `EffectPolicy::permits_clipboard` decides whether to
-ask at all, so a client that would refuse the store never makes the server put scrollback on the
-wire.
-
-### 2026-07-22 — A mouse report is hit-tested against what was drawn, not against the wire
-`cloo-client::input::ScreenLayout` is the client's own description of its screen — chrome rows, pane
-grid rectangles in terminal cells, and which pane is focused — because the server's `PaneRect` is a
-pane's *grid* in tab coordinates and knows nothing about the header, gutter, or status bar the
-client drew around it. `hit` claims the chrome rows before consulting any pane, so a wrongly
-described pane cannot swallow a status-bar click, and `MouseRoute::Chrome` carries no `MouseEvent`
-at all, which is what makes "a chrome event never reaches the wire" a type rather than a rule.
-
-### 2026-07-22 — Modes are reported for the focused pane, so every other pane is chrome's
-`ServerMessage::Modes` names one pane and the `DamageTracker` sends it for the focused one only, so
-a client genuinely cannot know whether an unfocused pane's application tracks the mouse. Answering
-"chrome" there is the honest answer *and* the one a user means by clicking an unfocused pane; the
-server closes the loop by encoding a `Command::Mouse` from the **named** pane's own modes and
-refusing a pane that is not visible, so a client cannot write into an arbitrary child.
-
-### 2026-07-22 — An advisory source is narrowed by its vocabulary, not by a check
-The adapter control interface is a second socket (`<session socket>.control`) speaking
-`cloo-proto::adapter`, so "an adapter cannot type into a pane" and "an adapter cannot claim `quiet`"
-are both facts about which enums exist rather than refusals some branch must remember. The gate that
-makes it *opt-in* is the profile's `adapter` field, copied onto `PaneMeta` at launch: the server
-matches the announced name against the pane's own, stamps the provenance itself, and answers every
-report — a silent drop is indistinguishable from success to the shell script an adapter usually is.
-
-### 2026-07-23 — An actor that awaits its own event channel deadlocks against its reader
-The session task used to `send(SessionEvent::Exited).await` when the last pane's child exited, and
-with the depth-one channel already holding a coalesced `Output` that parked the actor — which meant
-it stopped answering `Command::Snapshot`, and the only reader that could drain the channel was
-whoever was awaiting that snapshot. Events now leave through an outbox the task owns and the loop
-selects over a channel permit, so a slow reader costs latency and never liveness. The tell is that
-`exit 0` never reproduced it while `printf 'bye\n'` always did: with no output there is nothing in
-the channel to block behind, which is why every M2-08 lifecycle fixture passed for two milestones.
-
-### 2026-07-23 — A test that awaits an actor reply without a timeout hangs the whole suite
-Between M6-01 and M6-03 `cargo test --workspace` never returned, because `wait_for_text` checked its
-deadline only *after* `handle.snapshot().await` came back and a wedged actor meant it never did.
-Every snapshot in `cloo-server/tests/session.rs` now goes through `snapshot_now`, which wraps the
-call in the same `DEADLINE` — a 20-second failure naming the stall instead of an unbounded hang.
-Any future fixture that awaits an actor reply needs the same wrapper; the suite is ~3 seconds, so
-anything that runs long is a stall, not slow work.
-
-### 2026-07-23 — One overlay model, and two properties that are types
-`cloo-client::overlay` is a single `Overlay` — a list, a cursor, a title — for the session
-switcher, the profile launcher, and pane details, because the style guide gives all three one
-language and three models would drift. Two rules are enforced by construction rather than by a
-branch: `LaunchRequest` has no constructor but confirming a launcher row and a launcher row has
-none but a validated `Profile`, so "explicit profiles only" cannot be violated by a caller; and
-`Dismiss` answers `Dismissed` from every state including an empty list, so no overlay can trap the
-terminal. The rows reuse the pane header's fixed yield order, and the hint row inverts it — the
-dismissal hint is written first so it is the last one standing.
-
-### 2026-07-23 — Half-reverting `deliver_mouse` proves less than it looks
-Confirming the M6-01 mouse fixtures non-vacuous means reverting to the *fully* naive implementation:
-write to the focused pane with no visibility check. Reverting only the pane lookup leaves the
-`is_visible` guard in place, and `a_mouse_event_for_a_closed_pane_is_dropped` then passes against a
-broken implementation, because the guard drops the event before the wrong lookup is ever reached.
-When checking a fixture's honesty, break the specific line that fixture is about.
-
-### 2026-07-23 — The keyboard's ownership rule is the mirror of the mouse's
-`cloo-core::keymap` owns what a chord is *called* and `cloo-client::input` owns what bytes it
-arrives as, because a spelling must not depend on a terminal and an encoding does. The router's one
-property is that **nothing is consumed outside a pending prefix**: pass-through is a copy of the
-slice that arrived rather than a re-encoding of a decoded chord, and a sequence `decode_key` cannot
-name is the pane's, exactly as a mode that was never negotiated is. Confirm any fixture here by
-reverting to a router that looks a chord up without the prefix — five tests fail, and a keymap that
-ate `c` in vim would otherwise ship.
-
-### 2026-07-23 — Interruptible motion means settling, not rewinding
-`cloo-client::motion` ends an in-flight transition at its *end* state when input, a resize, or a
-state change arrives, so the interrupting event's own frame is the one drawn and no half-finished
-ramp is left on screen; a settled `Phase` returns each cell unchanged, which makes that frame
-byte-identical to a client that animates nothing (and to reduce-motion). The frame cap is the other
-half: a transition is seven whole 16ms steps and `Motion::tick` answers `None` on a step it already
-drew, so even a caller sampling once per PTY read costs at most eight frames.
-
-### 2026-07-23 — A vocabulary is how a binding is stopped from naming an impossible command
-`Action::RenameTab` and `Action::CopySearch` carry text a keypress does not, so they have no
-configuration spelling in *either* direction — `parse_action` refuses the name and `action_name`
-answers `None`. That is the same shape as `LaunchRequest` having no constructor but a confirmed
-launcher row: the impossible case is absent from the vocabulary rather than rejected by a branch
-someone has to remember. Relatedly, `S-a` is refused because a terminal reports a shifted `a` as
-`A`, so accepting it would store a binding that could never fire.
-
-### 2026-07-23 — A gutter drag crosses the wire in cells, never as a ratio
-"Ratios never cross the wire" and "a drag lands on a column" meet in `Action::ResizePane { pane,
-dir, delta: i16 }`: the client sends the cells the pointer moved and `Layout::resize` turns them into
-exactly one new ratio on that pane's nearest ancestor split. A ratio on the wire would also have made
-`Action` un-`Eq`, which every existing round-trip test relies on — an `f32` field is a tell that the
-arithmetic belongs on the other side of the socket. The delta is signed and the pane names the
-divider's *leading* side, so the server works out whether it is the split's first or second child.
-
-### 2026-07-23 — A chrome gesture is only allowed to spend commands that already exist
-`ChromeAction::commands` is the whole mouse vocabulary, and it returns `Action`s the keyboard sends,
-because a gesture reachable only with a mouse would be unreachable on a terminal whose `sgr_mouse`
-fallback is "keyboard-driven chrome". That is why the wheel is `FocusPane` + `EnterCopyMode` + three
-`CopyMotion`s rather than a scroll command of its own, and why `FocusPane`/`ResizePane` have no
-keymap spelling — they name a pane, which a pointer supplies and a chord cannot. A press on a divider
-begins a drag and commands *nothing*, which is what keeps a drag from also focusing.
-
-### 2026-07-23 — Coalesced copy-mode frames leave an end-to-end test no baseline
-`crates/cloo/tests/attach.rs`'s wheel fixture sends `EnterCopyMode` and then the motions in two
-separate batches, because the damage tracker sends copy state only when it changed: a client that
-sent the whole list at once sees one frame, already at the final cursor, and any assertion against
-"where entering put it" passes vacuously. Split the batch when a fixture needs to measure a delta
-through a coalescing channel.
-
-### 2026-07-23 — npm publishing credentials are repository-local, not runtime configuration
-The repository-root `.env` holds only the maintainer's `NPM_TOKEN` for an explicitly
-user-authorized `clooterminal` release. It is gitignored and must never be printed, logged,
-committed, or used for any command other than that one publish; cloo itself never reads it.
-
-### 2026-07-24 — The reconnect/resize race is a survivor-redraw property, provable without a client render loop
-There is no client-side render loop wiring wire messages into a `Grid` yet (M6-04+ composition is
-still to come), so M7-01's reconnect/resize race is asserted at the wire in `crates/cloo/tests/
-attach.rs` using the raw `Attached` transport. The corruption to rule out is a geometry
-disagreement: a departing narrower client must resize the *survivor* back up, and because a pane
-whose size changed makes `DamageTracker` resend every row, a full-width row is never applied to a
-stale narrow cache. Assert it by waiting for a `Damage` row of the exact expected width (40 then
-80). Keep the scripted child a plain `read _; exit 0` — the grid reflow alone carries the width, so
-the child never needs to print, but it must still exit or the daemon join hangs.
-
-### 2026-07-24 — A dropped session handle makes the actor block the whole runtime on teardown
-`crates/cloo-server/tests/compat.rs` hung the entire `#[tokio::test]` (current-thread) runtime when
-its effects fixture destructured `SpawnedSession { mut events, .. }` and let the `handle` drop: the
-actor's command channel closed, `run` hit `Step::Command(None) => break`, and the cleanup path calls
-a *blocking* `reactor.wait()` on the surviving pane — a child stuck in `read _` never exits, so the
-single runtime thread wedged and no other future (including the test's own drain) could run. Keep the
-handle alive for the whole test, and let a child that must be drained exit on its own rather than
-block on `read`. Other tests only survive this because they *finish* and let runtime-drop abort the
-detached actor; a test that awaits after the handle drops does not get that reprieve.
-
-### 2026-07-24 — Compose the frame from the hit-tester's own rects, not a parallel geometry
-`compose_frame` (in `cloo-client::renderer`) builds the whole attached picture from `PaneArea` — the
-*same* rect type `input::ScreenLayout` answers a mouse report against — so the frame a user sees and
-the map a click resolves through cannot drift. The tab row is a fixed row zero and the status bar a
-fixed last row; only pane `y`s come from the layout pass, and a header is always the row directly
-above a grid (`area.y - 1`), which is why the header row *is* the top border rather than a separate
-one. Pane bodies go through `chrome::body_span` so dimming stays the one-place `dim_cells` policy —
-a body and its header recede by the same rule — and the composition returns a pure `Vec<Span>`, never
-touching a descriptor.
-
-### 2026-07-24 — A vertical divider is a horizontal split, and ClosePane names no pane
-Routing the four layout actions off the daemon's catch-all (M6-04) has two traps. The axis flips
-names: `Action::SplitVertical` is a *vertical divider* — two panes side by side — which is
-`Direction::Horizontal` in `split_even`, and `SplitHorizontal` stacks them (`Direction::Vertical`).
-And `Action::ClosePane` carries no pane id — a bound `close-pane` names none — so it cannot reach
-`SessionHandle::close(pane)`; it needs `Command::CloseFocused`, which resolves the target from the
-session's own focus, the keyboard's mirror of `Action::FocusPane` being the mouse's. None of this
-touched the wire (the `Action` variants already existed), so the handshake did not bump.
-
-### 2026-07-24 — Keep an attached test client alive until its final command is observed
-A foreground-server fixture that sent `exit` and immediately dropped `Attached` could close its
-socket before the daemon consumed the queued input, leaving the generic shell alive. Await frames
-until EOF after the command; that proves the session processed it and gives the foreground server a
-clean, ownership-driven shutdown instead of a signal-killed one.
-
-### 2026-07-24 — Stage distribution README assets into every optional package
-The root npm package's `files` allowlist and each native package's staging manifest do not inherit
-assets from one another. A README image shipped with all five packages therefore needs both an
-allowlist entry and an explicit copy in `scripts/package-npm.sh`; `npm pack --dry-run` proves the
-artifact contains the image before any maintainer publishes it.
-
-### 2026-07-24 — `openpty` has target-specific pointer mutability
-Linux accepts immutable terminal-settings and window-size pointers, but Apple declares both
-`openpty` parameters mutable. Keep the local `winsize` mutable and pass `null_mut` for the omitted
-`termios`, so the portable call type-checks on both targets without changing inherited defaults.
-
-### 2026-07-27 — A socket file is not a workspace, and the bind is what settles a race
-The bare `cloo` entry decides between attach and create with a `UnixStream::connect`, never a
-`Path::exists`: a killed daemon leaves its socket behind, and `Listener::bind` can only clean that
-up once it holds the lock. The same asymmetry makes the concurrent case free — two first runs both
-spawn `cloo server default`, one wins the `flock` and the other exits 125, so `wait_until_ready`
-probes the socket again *after* seeing its own child exit and attaches to whichever daemon survived.
-Probing before `cloo-client::attach::run` is also what keeps a failed bootstrap in cooked mode,
-since raw mode is only entered inside that call.
-
-### 2026-07-27 — A backgrounded daemon must not share the client's stdio
-`cloo` starts its default workspace by re-executing itself as `cloo server default` with all three
-descriptors on `/dev/null`, because anything the daemon prints would land in the middle of the frame
-the attached client is about to draw. Piping its stderr to capture a startup diagnostic is worse,
-not better: `eprintln!` panics when the write fails, so a parent that drops the read end after
-attaching would kill the daemon later. The recovery path is documentation — the error message names
-`cloo server <session>` as the way to see why.
-
-### 2026-07-27 — A losing daemon's exit is not proof that nothing will serve
-The winner of the startup race holds the socket `flock` from before it unlinks a stale socket until
-after it binds, so the loser is refused inside a window in which nothing is listening — and
-`wait_until_ready`'s single re-probe after its own child exited therefore failed whichever caller
-lost, reproducibly, the first time two bare `cloo`s were started together. It now keeps probing for
-a bounded `DAEMON_HANDOFF_GRACE` before reporting that exit. A caller cannot read the child's reason
-(its stderr is `/dev/null`), so a short grace is the whole distinction between "lost a race" and
-"failed for real".
-
-### 2026-07-27 — An inode number is not proof a socket was replaced
-`clear_stale` unlinks and rebinds, and the filesystem is free to hand the freed inode number
-straight back — a `(device, inode)` comparison then says "reused" about a socket that was in fact
-replaced. Prove replacement with liveness instead: `bind` refuses an existing path, so a daemon
-serving that path can only have unlinked the stale file first. The identity check is still the right
-tool for the opposite question (M8-01's "the live one was joined, not displaced").
-
-### 2026-07-27 — A stale-socket fixture must wait, because a test binary forks
-A thread that binds and immediately drops a listener can still answer a connect for a moment: any
-other test thread calling `Command::spawn` in that window forks a child which inherits the
-descriptor until it execs. `crates/cloo/tests/cli.rs` therefore waits for its stale socket to fall
-silent rather than asserting it once — the run under test would observe the same live socket, so
-this is fixture sequencing, not a cloo bug.
-
-### 2026-07-27 — A styled chrome field cannot be found by a byte window
-The status row's first-attach clues colour the word (`split`) and the key (`%`) differently, so the
-renderer emits an SGR sequence between them and a `frame.windows(n) == b"split %"` search fails on a
-row that drew perfectly. `cloo-client/src/renderer.rs` now strips escape sequences and asserts on
-the visible text instead; a pty fixture in `crates/cloo/tests/cli.rs` matches the clue *word* alone
-for the same reason. Relatedly, `read_until` consumes what it read, so two successive calls for two
-tokens that arrived in one write will hang on the second — read to the last token once and assert
-the rest from the returned buffer.
-
-### 2026-07-27 — A help surface must be read from the keymap, not written down beside it
-`Overlay::help` takes the `Keymap` the router is actually resolving against and looks each listed
-action's chord up in it, so a rebound prefix, a rebound chord, and an unbound action are all shown as
-they are — a hand-written table of the defaults passes every "it lists split and detach" test and
-lies the moment anyone edits `[keys]`. The client-local chords (`?`, `i`, `s`, and the reserved `a`)
-live as constants shared between `overlay` and `attach::open_overlay`, and each row appears only
-while the keymap leaves that key unbound, because `open_overlay` is reached only from
-`KeyRoute::Unbound` — a user who binds `?` keeps their binding and loses the row, rather than
-reading about a surface they can no longer open.
-
-### 2026-07-27 — A profile identifier is what makes "no arbitrary commands" a type
-`Action::LaunchProfile(String)` (handshake v10) carries a profile **ID** and has no field an argv
-could travel in, and `Launch::from_profile_id` is the only server-side function that turns a
-client's request into a pane — there is deliberately no sibling that takes a program. Resolve
-against the daemon's own `Config` *before* touching the session actor, so an unknown ID costs no
-layout change and no child; a string that looks like a shell command is refused by the same rule,
-because it is only ever looked up in the profile table.
-
-### 2026-07-27 — Send the refusals first when a fixture must prove nothing was created
-`crates/cloo/tests/attach.rs`'s launch fixture sends its three refused identifiers *before* the
-configured one and then asserts exactly two panes at the moment the launched pane appears. Sent
-afterwards they would prove nothing: the wire is ordered, so a pane a refused request wrongly
-created is only guaranteed to be visible if that request was already processed.
+## Durable Discoveries
+
+### Session and tab invariants are construction-time guarantees
+A session always has an active tab and a tab always has at least one pane. Keep those facts in the
+model, not at every call site: reject the last-tab close, validate an unknown tab before applying
+that rule, and update the active index when a tab closes. `TabName` and pane text share one
+validator so a title cannot admit characters that a pane name refuses.
+
+### Stream framing distinguishes normal detach from corruption
+Postcard is not self-delimiting, so the transport uses a big-endian `u32` length prefix and treats
+an incomplete buffer as a request to read more. EOF between frames is an ordinary detach;
+EOF inside a frame is a truncated-frame error. Collapsing those cases either reports a harmless
+detach as a failure or hides a damaged message.
+
+### Resolve and min-size validation share the ratio-to-cells conversion
+`cloo-core::layout::split_extent` is the one place a stored ratio becomes cell counts. The
+minimum-size test must use it too, otherwise rounding can accept a split that the later layout pass
+renders below minimum. Resizes still resolve to drawable one-cell floors rather than rejecting a
+smaller terminal.
+
+### Terminal and wire cell types intentionally remain separate
+`cloo-term` duplicates the wire cell, colour, and attribute representations so the emulator wrapper
+stays independent of the protocol crate. `cloo-core` owns the field-by-field conversion. Keep the
+attribute-bit layouts aligned whenever either side changes, and do not solve this by adding an
+intra-workspace dependency to `cloo-term`.
+
+### Emulator grid coordinates are buffer coordinates
+The terminal backend indexes its grid against the whole buffer, not the visible viewport. Convert
+visible row `r` using the display offset before reading it, and account for that offset when locating
+the cursor. This only fails once scrollback exists, so a no-scrollback fixture is not sufficient.
+
+### PTY EOF and cleanup are ownership details
+Linux returns `EIO`, not a zero-byte read, when the final PTY slave closes; translate it to EOF at
+the PTY boundary. Drop the parent copy of the slave immediately after spawning or EOF never arrives.
+The master owns child cleanup, so its drop path must reap rather than leave a zombie behind.
+
+### Terminal restoration has signal-safety constraints
+The raw-mode guard owns normal restoration, while signal restoration needs an independently armed,
+process-global termios slot because a handler cannot borrow the guard. The signal path may use only
+async-signal-safe operations and must restore every enabled reporting mode as well as raw mode.
+Library tests cannot safely signal their own runner; prove that path through the binary on a PTY.
+
+### Renderer tests require deterministic frames and an EOF flush
+Frames are byte-tested, so reset styles absolutely rather than as a delta from a previous render and
+emit only capabilities the client negotiated. The rate-capped loop must also render once after PTY
+EOF when the grid is dirty; otherwise a short-lived `printf` child can exit before its only output
+is painted.
+
+### Socket paths are neither liveness nor permission to unlink
+A socket file does not establish that a daemon is alive: connect/bind plus the advisory lock settle
+that question. Inspect paths with `symlink_metadata`, refuse anything that is not itself a socket,
+and record the bound identity so teardown cannot unlink a successor. These checks protect both
+stale recovery and a live daemon from destructive cleanup.
+
+### Bare-workspace startup is a handoff race, and the daemon has no client stdio
+Concurrent bare `cloo` invocations may each start a server, but only the lock winner serves; a loser
+must keep probing briefly before deciding startup failed. Start the background daemon with stdin,
+stdout, and stderr redirected to `/dev/null`, since shared terminal output corrupts the attached
+client and a dropped stderr pipe can later kill the daemon. Use `cloo server <session>` for visible
+diagnostics.
+
+### The crate graph forbids sideways tests as well as production dependencies
+Crates may depend downward through the documented layers, but `cloo-server` and `cloo-client` may
+never depend on one another, including in `[dev-dependencies]`. A test needing both halves belongs
+in the `cloo` binary crate, which is the composition root. This preserves the server/client
+separation instead of creating an apparently harmless test-only cycle.
+
+### A daemon keeps pumping after detach and snapshots precede subscriptions
+Detaching must not stop PTY reads: otherwise a reattached client sees an obsolete grid and an active
+child can block on a full PTY buffer. On attachment, capture the resync snapshot before creating the
+broadcast receiver, with no await between those actions. Reversing that order permits a stale event
+to arrive after the authoritative snapshot.
+
+### Resize is three coupled behaviours, not one assertion
+A resize updates the cached grid, changes the PTY window size, and prompts the child to handle
+`SIGWINCH`. Integration coverage must assert both the resulting grid geometry and the child-observed
+`stty size`; test scripts must avoid treating a stale, periodically printed size as fresh evidence.
+Treat signal/input ordering as nondeterministic unless the fixture explicitly removes that race.
+
+### Input crosses the wire as events and is encoded from child modes
+The emulator, not the outer terminal, determines bracketed paste, focus, and mouse encoding, so the
+wire transports typed events and the server encodes bytes for the named pane's modes. Strip paste
+terminators out of the body before adding bracketed-paste delimiters, or pasted text can close its
+own bracket. A lone Escape needs a frame-tick flush, but never flush a partial paste as keystrokes.
+
+### Attention has a clock separate from pane metadata and geometry
+Attention travels as its own projection because state without provenance is not sufficient for the
+chrome to describe a pane. Produce pane metadata, attention, and layout geometry from the same
+layout resolution, then diff attention independently so unrelated metadata changes do not resend it.
+The session actor is the only writer and silently ignores reports for panes that have closed.
+
+### Draw and hit-test from the same client geometry
+Server pane rectangles describe grids, while client `PaneArea` also accounts for headers, gutters,
+and status chrome. Frame composition and mouse hit-testing must use that one client geometry source;
+otherwise a click can resolve somewhere other than what the user sees. Claim chrome before panes so
+no chrome event can reach an application as a wire mouse event.
+
+### Session actors must never await their own outbound channel
+A coalesced output event can fill the actor's small event channel while a lifecycle event waits
+behind it, leaving the actor unable to answer the snapshot that would let its reader make progress.
+Use an actor-owned outbox and select for a permit instead. Every test awaiting an actor reply must
+wrap it in its deadline, or a liveness regression hangs the entire suite instead of failing clearly.
+
+### Client launch requests name configured profiles, never commands
+`Action::LaunchProfile` carries a profile identifier only; no client-controlled argv has a path to a
+PTY spawn. Resolve the identifier against daemon configuration before mutating the session so an
+unknown profile, empty identifier, or shell-looking string creates neither a pane nor a child.
+This is the type-level boundary that keeps the launcher declarative and safe.
