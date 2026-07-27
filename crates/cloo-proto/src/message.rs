@@ -674,6 +674,20 @@ pub enum Action {
         /// How many cells to move it by, signed toward `pane` growing.
         delta: i16,
     },
+    /// Launch a configured profile in a new pane beside the focused one.
+    ///
+    /// Carries a profile **identifier** and never a command line. That is the
+    /// whole point of the variant: the server owns the profile table, so the
+    /// only thing this can select is something the user's own configuration
+    /// already defines, and a client cannot ask a session to run arbitrary
+    /// argv by putting it on the wire. An identifier the server's active
+    /// configuration does not name is refused before any layout changes and
+    /// before any child is started.
+    ///
+    /// It carries text a keypress does not, so — like
+    /// [`RenameTab`](Self::RenameTab) — it has no keymap spelling; a client
+    /// reaches it by confirming a profile in its launcher.
+    LaunchProfile(String),
     /// Create a new tab.
     NewTab,
     /// Close the active tab.

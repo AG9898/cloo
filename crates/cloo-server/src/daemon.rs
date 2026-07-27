@@ -13,8 +13,9 @@ use std::io;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use cloo_core::AdapterId;
 use cloo_core::layout::Side;
+use cloo_core::pane::WorkingDir;
+use cloo_core::{AdapterId, Config};
 use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, ClientId, ClientMessage,
     ClipboardTarget, Direction, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size,
@@ -28,7 +29,9 @@ use crate::conn::{self, AttachRequest, Connection};
 use crate::damage::{DamageFrame, DamageTracker};
 use crate::launch::Launch;
 use crate::pty::{PtyConfig, PtyError};
-use crate::session::{Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, usable};
+use crate::session::{
+    EVEN_SPLIT, Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot, usable,
+};
 use crate::socket::{Listener, SocketError, control_path_for};
 
 /// The render tick, capping fan-out at roughly 60fps.
@@ -167,6 +170,18 @@ pub struct Daemon {
     /// The only way into the session. `None` once the daemon releases it so
     /// the session task can finish and report the child's status.
     session: Option<SessionHandle>,
+    /// The profile table a typed launch request is resolved against.
+    ///
+    /// The daemon is the profile authority, which is what makes a launch
+    /// request an *identifier* rather than a command: nothing a client sends
+    /// can add to this table.
+    config: Config,
+    /// Where a pane launched from a profile starts.
+    ///
+    /// The workspace's own directory — the one its first pane was launched in —
+    /// because a client has no filesystem authority here either and the daemon
+    /// may be running from anywhere.
+    cwd: WorkingDir,
     events: mpsc::Receiver<SessionEvent>,
     task: Option<JoinHandle<Result<ExitStatus, PtyError>>>,
     child_id: u32,
@@ -224,6 +239,7 @@ impl Daemon {
             .map_err(DaemonError::Accept)?;
         let control = UnixListener::from_std(std_control).map_err(DaemonError::Accept)?;
 
+        let cwd = launch.meta().cwd.clone();
         let spawned = Session::spawn(config, THE_PANE, launch)?;
         let size = cloo_core::grid::wire_size(config.term_size());
         let (client_tx, client_commands) = mpsc::channel(CLIENT_COMMAND_QUEUE);
@@ -235,6 +251,8 @@ impl Daemon {
             _control: control_listener,
             control,
             session: Some(spawned.handle),
+            config: Config::defaults(),
+            cwd,
             events: spawned.events,
             task: Some(spawned.task),
             child_id: spawned.child_id,
@@ -249,10 +267,28 @@ impl Daemon {
         })
     }
 
+    /// Uses `config` as the profile table this daemon launches from.
+    ///
+    /// A daemon starts on the built-ins, so a caller that reads no
+    /// `config.toml` still has the three documented profiles rather than none.
+    /// The server owner supplies the user's configuration here; a client never
+    /// can, which is the point.
+    #[must_use]
+    pub fn with_config(mut self, config: Config) -> Self {
+        self.config = config;
+        self
+    }
+
     /// The session's current size.
     #[must_use]
     pub fn size(&self) -> Size {
         self.size
+    }
+
+    /// The profile table this daemon resolves a launch request against.
+    #[must_use]
+    pub const fn config(&self) -> &Config {
+        &self.config
     }
 
     /// The child's process id.
@@ -450,6 +486,14 @@ impl Daemon {
                 ClientMessage::Command(Action::SplitHorizontal) => {
                     let _ = self.session()?.split_even(Direction::Vertical).await;
                 }
+                // A typed launch request. The identifier is resolved against
+                // this daemon's own profile table *before* the session actor is
+                // asked for anything, so an unknown one changes no layout and
+                // starts no child; the pane it does create is an ordinary
+                // explicit launch through the one serialized path.
+                ClientMessage::Command(Action::LaunchProfile(profile)) => {
+                    self.launch_profile(&profile).await?;
+                }
                 // Close names no pane: the session resolves it from its own
                 // focus, which is the keyboard's half of close. A last pane
                 // refusing to close is an ordinary answer, like a last tab.
@@ -543,6 +587,29 @@ impl Daemon {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// Splits the focused pane and launches the named profile beside it.
+    ///
+    /// Two refusals are ordinary answers the user sees rather than daemon
+    /// errors, exactly as a split that does not fit is. An identifier this
+    /// configuration does not name is refused here, before the session actor is
+    /// reached at all — nothing is spawned and no ratio moves. A profile that
+    /// resolves but whose program is not on `PATH` is refused by the session
+    /// actor, which rolls its own layout back.
+    ///
+    /// The new pane goes beside the focused one — a vertical divider, which is
+    /// [`Direction::Horizontal`] to the layout tree — because a launched
+    /// harness is a peer of what the user is already looking at.
+    async fn launch_profile(&self, id: &str) -> Result<(), DaemonError> {
+        let Ok(launch) = Launch::from_profile_id(&self.config, id, self.cwd.clone()) else {
+            return Ok(());
+        };
+        let _ = self
+            .session()?
+            .launch(Direction::Horizontal, EVEN_SPLIT, launch)
+            .await;
         Ok(())
     }
 

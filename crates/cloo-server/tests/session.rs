@@ -820,6 +820,119 @@ async fn a_named_profile_reaches_the_pane_it_launched() {
     );
 }
 
+// --- Typed profile launch requests (M8-05) ----------------------------------
+
+/// A configuration document defining a `harness` profile that runs `script`.
+///
+/// Parsed rather than assembled, because that is the only way a profile reaches
+/// a running server: what a launch request can name is exactly what a user's
+/// `config.toml` defined, and this fixture is that document.
+fn configured(script: &str) -> cloo_core::Config {
+    let document = format!(
+        r#"
+        [[profile]]
+        id = "harness"
+        command = ["sh", "-c", {script:?}]
+        "#
+    );
+    cloo_core::config::parse(&document)
+        .expect("the test document is valid")
+        .config
+}
+
+#[tokio::test]
+async fn a_configured_identifier_launches_that_profile_where_it_was_told_to() {
+    // The whole request in one place: an *identifier* resolved against the
+    // active configuration, the resulting pane carrying that profile's identity,
+    // and its child running where the caller said — proved by the child's own
+    // `pwd`, because a `cwd` that only reached the snapshot would look right and
+    // run in the wrong place.
+    let config = configured("pwd; while read _; do pwd; done");
+    let launch = Launch::from_profile_id(
+        &config,
+        "harness",
+        WorkingDir::new("/usr").expect("absolute"),
+    )
+    .expect("the document names this profile");
+
+    let (_, session) = session(120, 40);
+    let new_pane = session
+        .handle
+        .launch(Direction::Horizontal, 0.5, launch)
+        .await
+        .expect("a 120x40 session has room for two panes");
+
+    let snapshot = snapshot_now(&session.handle).await;
+    let info = info_of(&snapshot, new_pane);
+    assert_eq!(info.profile, "harness");
+    assert_eq!(
+        info.name, "harness",
+        "a request names a profile and nothing else, so the pane takes the profile's own name"
+    );
+    assert_eq!(info.task, None, "cloo never invents a task label");
+    assert_eq!(info.cwd, "/usr");
+    assert_eq!(wait_for_line(&session.handle, "/usr").await, "/usr");
+}
+
+#[tokio::test]
+async fn an_identifier_the_configuration_does_not_name_starts_nothing() {
+    // The refusal happens against the profile table, before the session actor
+    // is asked for anything — so there is nothing to roll back. A command line
+    // is refused by the same rule, because it is only ever read as an ID.
+    let config = configured(REPORT_ON_DEMAND);
+    let cwd = || WorkingDir::new("/").expect("absolute");
+    for id in ["no-such-profile", "", "sh -c 'echo hi'"] {
+        assert!(
+            Launch::from_profile_id(&config, id, cwd()).is_err(),
+            "{id:?} must not resolve"
+        );
+    }
+
+    let (root, session) = session(120, 40);
+    let snapshot = snapshot_now(&session.handle).await;
+    assert_eq!(snapshot.panes.len(), 1);
+    assert_eq!(snapshot.metas.len(), 1);
+    assert_eq!(snapshot.focused, root);
+    ask_size(&session.handle, "40 120").await;
+}
+
+#[tokio::test]
+async fn a_configured_profile_whose_program_is_missing_rolls_the_layout_back() {
+    // Resolution succeeds — the configuration really does name this profile —
+    // and the failure lands where it belongs: at `execvp`, after which the
+    // session actor has already undone its own split.
+    let config = cloo_core::config::parse(
+        r#"
+        [[profile]]
+        id = "harness"
+        command = ["cloo-no-such-program-exists"]
+        "#,
+    )
+    .expect("the document is valid")
+    .config;
+    let launch =
+        Launch::from_profile_id(&config, "harness", WorkingDir::new("/").expect("absolute"))
+            .expect("the document names this profile");
+
+    let (root, session) = session(120, 40);
+    let err = session
+        .handle
+        .launch(Direction::Horizontal, 0.5, launch)
+        .await
+        .expect_err("a program that is not on PATH cannot be launched");
+    assert!(matches!(err, PaneError::Spawn(_)), "got {err}");
+    assert!(
+        err.to_string().contains("cloo-no-such-program-exists"),
+        "the error must name the program, got: {err}"
+    );
+
+    let snapshot = snapshot_now(&session.handle).await;
+    assert_eq!(snapshot.panes.len(), 1);
+    assert_eq!(snapshot.metas.len(), 1);
+    assert_eq!(snapshot.focused, root);
+    ask_size(&session.handle, "40 120").await;
+}
+
 // --- Attention state through the session actor (M2-07) ----------------------
 
 /// The attention a snapshot carries for one pane.

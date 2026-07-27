@@ -322,6 +322,26 @@ fn spawn_daemon(
     (pid, handle)
 }
 
+/// The same, for a daemon whose profile table came from a `config.toml`.
+///
+/// Parsed rather than assembled, because that is the only way a profile reaches
+/// a running server: what a typed launch request can name is exactly what the
+/// user's document defined, and this fixture is that document.
+fn spawn_daemon_with_config(
+    socket: &Path,
+    script: &str,
+    document: &str,
+) -> tokio::task::JoinHandle<Result<std::process::ExitStatus, cloo_server::DaemonError>> {
+    let config = cloo_core::config::parse(document)
+        .expect("the test document is valid")
+        .config;
+    let listener = Listener::bind(socket).expect("a fresh socket path must bind");
+    let mut daemon = Daemon::new(listener, &base(), scripted(script))
+        .expect("the daemon must start")
+        .with_config(config);
+    tokio::spawn(async move { daemon.run().await })
+}
+
 /// The same, for a pane whose profile opted into `adapter`.
 ///
 /// The opt-in is the profile's, so it has to be set before the pane exists —
@@ -1565,6 +1585,97 @@ async fn split_zoom_and_close_from_a_client_move_the_reported_layout() {
     assert_eq!(closed.panes[0].pane, first);
 
     // Let the surviving child exit so the daemon can finish.
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    drop(attached);
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn a_typed_launch_request_creates_a_pane_from_the_servers_own_profile_table() {
+    // The whole loop for M8-05: a client sends an *identifier*, the daemon
+    // resolves it against the configuration it loaded, and the pane that
+    // appears carries that profile's identity. Nothing on the wire could have
+    // named a command — `Action::LaunchProfile` has no field for one.
+    let dir = TempDir::new("launch-profile");
+    let socket = dir.socket();
+    let daemon = spawn_daemon_with_config(
+        &socket,
+        "read _; exit 0",
+        r#"
+        [[profile]]
+        id = "harness"
+        command = ["sh", "-c", "read _; exit 0"]
+        "#,
+    );
+
+    let mut attached = client(&socket).await;
+    let start = await_panes(&mut attached).await;
+    assert_eq!(start.len(), 1);
+
+    // An identifier the server's table does not name is refused, and so is a
+    // command line — which reaches the daemon only ever as an ID to look up.
+    // Sent *first*, so a pane it wrongly created would still be counted below.
+    for refused in ["no-such-profile", "", "sh -c 'echo hi'"] {
+        attached
+            .send_command(Action::LaunchProfile(refused.to_owned()))
+            .await
+            .expect("the request must reach the daemon");
+    }
+    attached
+        .send_command(Action::LaunchProfile("harness".to_owned()))
+        .await
+        .expect("the request must reach the daemon");
+
+    let panes = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Panes(panes))
+                    if panes.iter().any(|info| info.profile == "harness") =>
+                {
+                    return panes;
+                }
+                Some(_) => {}
+                None => panic!("the server closed before launching the profile"),
+            }
+        }
+    })
+    .await
+    .expect("a configured profile must reach the session");
+
+    assert_eq!(
+        panes.len(),
+        2,
+        "only the configured identifier created a pane; got {panes:?}"
+    );
+    let launched = panes
+        .iter()
+        .find(|info| info.profile == "harness")
+        .expect("the loop above waited for it");
+    assert_eq!(
+        launched.name, "harness",
+        "a request names a profile and nothing else, so the pane takes the profile's own name"
+    );
+    assert_eq!(launched.task, None, "cloo never invents a task label");
+    assert_eq!(
+        launched.cwd, "/",
+        "a launched pane starts in the workspace's own directory, not one a client chose"
+    );
+
+    // Close the launched pane — the split focused it — and let the survivor
+    // exit so the daemon can finish.
+    attached
+        .send_command(Action::ClosePane)
+        .await
+        .expect("close must reach the daemon");
+    let closed = await_layout(&mut attached, |layout| layout.panes.len() == 1).await;
+    assert_eq!(closed.panes.len(), 1);
     attached
         .send_input(b"\n".to_vec())
         .await

@@ -9,7 +9,8 @@
 //!    must not drift between the parser and the documentation.
 //! 2. The [`Action`] vocabulary — [`parse_action`] and [`action_name`], one
 //!    kebab-case spelling per bindable action. An action that needs an argument a
-//!    key cannot carry — text ([`Action::RenameTab`], [`Action::CopySearch`]) or a
+//!    key cannot carry — text ([`Action::RenameTab`], [`Action::CopySearch`],
+//!    [`Action::LaunchProfile`]) or a
 //!    pane id ([`Action::FocusPane`], [`Action::ResizePane`], which the mouse
 //!    supplies by pointing) — has **no spelling at all**, so a binding can never
 //!    name a command the keypress could not supply an argument for.
@@ -383,8 +384,9 @@ impl fmt::Display for Key {
 /// Every bindable action's configuration spelling, in documentation order.
 ///
 /// Deliberately not every [`Action`]: a spelling exists only where a keypress
-/// carries everything the action needs. [`Action::RenameTab`] and
-/// [`Action::CopySearch`] take text the user has to type somewhere, so they are
+/// carries everything the action needs. [`Action::RenameTab`],
+/// [`Action::CopySearch`], and [`Action::LaunchProfile`] take text the user has
+/// to type or select somewhere, so they are
 /// reached from a surface that can ask for it rather than from a chord that
 /// would have to invent it. [`Action::FocusPane`] and [`Action::ResizePane`] are
 /// out for the same reason with a different argument: they name a pane, which a
@@ -501,11 +503,14 @@ pub fn action_name(action: &Action) -> Option<&'static str> {
         Action::CopySelection(ClipboardTarget::Clipboard) => "copy-to-clipboard",
         Action::CopySelection(ClipboardTarget::PrimarySelection) => "copy-to-primary",
         Action::DetachClient => "detach-client",
-        // The first two need text a chord cannot carry; the last two name a
-        // pane, which a keypress does not either. The keyboard reaches the same
-        // session state through `focus-left` and friends.
+        // The first three need text a chord cannot carry — a profile
+        // identifier is chosen in the launcher, not spelled in a binding — and
+        // the last two name a pane, which a keypress does not either. The
+        // keyboard reaches the same session state through `focus-left` and
+        // friends.
         Action::RenameTab(_)
         | Action::CopySearch { .. }
+        | Action::LaunchProfile(_)
         | Action::FocusPane(_)
         | Action::ResizePane { .. } => return None,
     })
@@ -733,8 +738,12 @@ mod tests {
             }),
             None
         );
+        // A profile identifier is selected in the launcher, not spelled in a
+        // binding — so a chord can no more name one than it can name a regex.
+        assert_eq!(action_name(&Action::LaunchProfile("codex".into())), None);
         assert_eq!(parse_action("rename-tab"), None);
         assert_eq!(parse_action("copy-search"), None);
+        assert_eq!(parse_action("launch-profile"), None);
         assert_eq!(parse_action(""), None);
     }
 

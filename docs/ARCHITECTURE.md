@@ -396,6 +396,28 @@ the user sees, not a daemon error, so the daemon swallows it exactly as it does 
 operation. None of this is a wire change — those `Action` variants already crossed the wire — so the
 handshake is unchanged.
 
+##### Typed profile launches (M8-05, handshake v10)
+
+A split repeats the session's own launch. Launching something *else* is a separate request:
+`Action::LaunchProfile(String)` carries a **profile identifier and never a command line**. That is
+the whole shape of the feature — the server owns the profile table, so the only thing a client can
+select is something the user's own `config.toml` already defined, and there is no wire field an
+argv could travel in.
+
+The daemon holds the active `Config` (`Daemon::with_config`, defaulting to the built-ins) and the
+workspace's own working directory, taken from the launch its first pane was created with.
+`Launch::from_profile_id(&config, id, cwd)` resolves the identifier **before** the session actor is
+asked for anything: an ID the configuration does not name is a `LaunchError::Unknown` that costs no
+layout change and no child. A profile that does resolve becomes an ordinary explicit launch through
+`SessionHandle::launch`, so a program that is not on `PATH` fails at `execvp` and the session actor
+rolls its own split back — the same two-halves-agree property every other launch has. The new pane
+goes beside the focused one (a vertical divider, `Direction::Horizontal`), because a launched
+harness is a peer of what the user is already looking at.
+
+The identifier carries text a keypress does not, so `Action::LaunchProfile` has **no keymap
+spelling** in either direction, exactly like `RenameTab` and `CopySearch`; a client reaches it by
+confirming a row in its profile launcher.
+
 ##### Directional focus and zoom
 
 As of M2-02, `Command::MoveFocus` and `Command::ToggleZoom` sit on top of that without disturbing
@@ -1212,8 +1234,9 @@ alive and pumping, preserving their grids and child processes for a later return
   [Keys and the prefix](#keys-and-the-prefix).
 - **The action vocabulary** — one kebab-case name per bindable `Action`, with `parse_action` and
   `action_name` as inverses over `ACTION_NAMES`. An action that needs text a chord cannot carry
-  (`RenameTab`, `CopySearch`) has **no spelling at all**, so a binding cannot name a command the
-  keypress could not supply an argument for; those are reached from a surface that can ask.
+  (`RenameTab`, `CopySearch`, `LaunchProfile`) has **no spelling at all**, so a binding cannot name
+  a command the keypress could not supply an argument for; those are reached from a surface that
+  can ask — a profile identifier is selected in the launcher, not written in a binding.
 - **`Keymap`** — the prefix chord plus the table reached after it. The defaults are tmux's, with
   `C-b` as the prefix ([DECISIONS.md](DECISIONS.md) RESOLVED-04): `%` and `"` split, `x` closes,
   `hjkl` and the arrows move focus, `z` zooms, `c`/`&`/`n`/`p` are tabs, `[` enters copy mode, and

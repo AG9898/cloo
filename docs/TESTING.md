@@ -500,6 +500,28 @@ rather than a fixed frame count, because the damage tracker sends a `Layout` onl
 changed. It is what proves the daemon's catch-all no longer swallows a layout command; reverting the
 four new match arms to the catch-all fails it.
 
+The typed profile launch request (M8-05) is covered at three layers, one per thing that could be
+wrong. `cloo-proto/src/frame.rs` round-trips `Action::LaunchProfile` — including an empty
+identifier — through the same every-message list every other variant is in, so the wire form is
+covered by the version bump's own fixture rather than a new one. `cloo-server/src/launch.rs` covers
+resolution purely: a configured identifier becomes that profile's launch under the profile's own
+default name, with the caller's directory and no invented task, while an unknown ID, an empty one,
+and a *command line* are each a `LaunchError::Unknown` — the last of those is the whole property,
+since a string that looks like a command is only ever looked up. `cloo-server/tests/session.rs`
+proves the same three answers against real children: a profile from a parsed `config.toml` reaches a
+pane whose metadata names it and whose child's own `pwd` is the directory it was given, an
+identifier the document does not name leaves one pane with the root still answering `stty size`, and
+a configured profile whose program is not on `PATH` fails as `PaneError::Spawn` with the layout
+already rolled back. Those documents are *parsed*, not assembled, because that is the only way a
+profile reaches a running server.
+
+`crates/cloo/tests/attach.rs` closes the loop over a real socket:
+`a_typed_launch_request_creates_a_pane_from_the_servers_own_profile_table` sends three refused
+identifiers *first* — an unknown one, an empty one, and a shell command — and then the configured
+one, so a pane wrongly created by any of them is still counted when the fixture asserts exactly two
+panes at the moment the `harness` pane appears. It was confirmed non-vacuous by resolving against
+`Config::defaults()` instead of the daemon's own table and watching it time out.
+
 Two of the M6-01 fixtures are also what found the stall M6-03 fixed, and `session.rs` now carries the
 regression coverage. `a_snapshot_is_answered_after_every_child_has_exited` runs a child that prints
 one line and exits — output *and then* an exit, which is the whole reproduction, since the bytes

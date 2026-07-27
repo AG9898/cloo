@@ -10,7 +10,7 @@ cloo is a client-server terminal multiplexer in Rust — tmux's functionality wi
 worth looking at. It is designed first as a workspace for many concurrent coding-agent harnesses.
 A daemon owns the PTYs and all session state; thin clients attach over a Unix socket and render.
 
-**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 through M8-04 are
+**The project is pre-alpha.** Planning, the M0–M7 implementation work, and M8-01 through M8-05 are
 complete. The
 daemon/session, workspace, chrome, attached-client runtime, public server lifecycle, compatibility
 foundations, package artifacts, and external brand system are implemented and tested. Plain `cloo`
@@ -21,7 +21,7 @@ makes the keyboard controls discoverable in the first frame. See [`docs/PRD.md`]
 [`docs/workboard.json`](docs/workboard.json).
 
 The canonical task queue is [`docs/workboard.json`](docs/workboard.json), which contains completed
-M0–M7 and M8-01 through M8-04 work plus the remaining M8 default-workspace and attached-UX tasks.
+M0–M7 and M8-01 through M8-05 work plus the remaining M8 attached-UX task.
 
 ---
 
@@ -92,7 +92,7 @@ npm/
 Cargo.toml       Workspace root — shared version/edition/license metadata
 ```
 
-All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01–M8-04 supply the daemon, workspace,
+All six crates are wired together. M1–M6-06, M7-01–M7-02, and M8-01–M8-05 supply the daemon, workspace,
 client primitives, live attached-client integration, compatibility foundations, and the managed
 default-workspace entry. Dependencies are
 declared in the root `[workspace.dependencies]` and are constrained by a
@@ -446,6 +446,15 @@ taking that row with it, and each row naming the `[keys]` action to write), an A
 an exact width ladder; `src/attach.rs` proves `?` opens help while `i` keeps pane details, that an
 open surface consumes navigation and Enter locally, and that a client configured with `M-a` draws
 that prefix and its controls in the composed frame.
+M8-05 puts the server half of the launcher on the wire (handshake v10): `cloo-proto/src/frame.rs`
+round-trips `Action::LaunchProfile` in the same every-message list every other variant is in,
+`cloo-server/src/launch.rs` covers resolution purely — a configured identifier becoming that
+profile's launch, and an unknown ID, an empty one, and a command line each refused as
+`LaunchError::Unknown` — and `cloo-server/tests/session.rs` proves the same three answers against
+real children from a *parsed* `config.toml`: metadata and the child's own `pwd`, an unknown
+identifier leaving one pane, and a missing program rolling the layout back. `crates/cloo/tests/
+attach.rs` closes the loop over a socket, sending the refused identifiers first so a pane any of
+them wrongly created is still counted.
 
 Full test strategy, inventory, and patterns: [`docs/TESTING.md`](docs/TESTING.md)
 
@@ -1093,3 +1102,17 @@ live as constants shared between `overlay` and `attach::open_overlay`, and each 
 while the keymap leaves that key unbound, because `open_overlay` is reached only from
 `KeyRoute::Unbound` — a user who binds `?` keeps their binding and loses the row, rather than
 reading about a surface they can no longer open.
+
+### 2026-07-27 — A profile identifier is what makes "no arbitrary commands" a type
+`Action::LaunchProfile(String)` (handshake v10) carries a profile **ID** and has no field an argv
+could travel in, and `Launch::from_profile_id` is the only server-side function that turns a
+client's request into a pane — there is deliberately no sibling that takes a program. Resolve
+against the daemon's own `Config` *before* touching the session actor, so an unknown ID costs no
+layout change and no child; a string that looks like a shell command is refused by the same rule,
+because it is only ever looked up in the profile table.
+
+### 2026-07-27 — Send the refusals first when a fixture must prove nothing was created
+`crates/cloo/tests/attach.rs`'s launch fixture sends its three refused identifiers *before* the
+configured one and then asserts exactly two panes at the moment the launched pane appears. Sent
+afterwards they would prove nothing: the wire is ordered, so a pane a refused request wrongly
+created is only guaranteed to be visible if that request was already processed.

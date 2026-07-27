@@ -116,6 +116,11 @@ the prefix and split/help shortcuts, `C-b ?` opens an actual command/help surfac
 profile launcher becomes a live way to add a generic, Codex, or Claude pane. Clues live in cloo's
 chrome after its prefix, never in text typed for the child shell.
 
+The server half of that launcher is in place as of **M8-05**: a client asks for a pane by naming a
+*profile*, and the daemon resolves that identifier against the configuration it loaded before the
+session actor is asked for anything. There is no wire form for a command line, so the workspace can
+only ever start something the user's own configuration defines.
+
 ### Out of Scope
 
 Explicitly not in v1:

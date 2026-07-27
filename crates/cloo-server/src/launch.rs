@@ -40,7 +40,9 @@
 //! ```
 
 use std::ffi::OsStr;
+use std::fmt;
 
+use cloo_core::Config;
 use cloo_core::error::MetadataError;
 use cloo_core::pane::{PaneMeta, PaneName, TaskLabel, WorkingDir};
 use cloo_core::profile::{Profile, ProfileCommand};
@@ -84,6 +86,34 @@ impl Launch {
         Ok(Self { profile, meta })
     }
 
+    /// Resolves a profile *identifier* against a configuration.
+    ///
+    /// This is the server's half of a typed launch request: a client names an
+    /// ID and nothing else, and the answer can only ever be a profile the
+    /// user's own configuration already defines. There is deliberately no
+    /// variant of this that takes a program, an argv, or a shell string — the
+    /// server is the profile authority, and the reason a client cannot ask a
+    /// session to run arbitrary commands is that no function here accepts one.
+    ///
+    /// Resolution happens *before* the session actor is asked for anything, so
+    /// an unknown identifier costs no layout change and no child.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LaunchError::Unknown`] when the configuration names no such
+    /// profile, and [`LaunchError::Invalid`] when it names one that does not
+    /// validate.
+    pub fn from_profile_id(
+        config: &Config,
+        id: &str,
+        cwd: WorkingDir,
+    ) -> Result<Self, LaunchError> {
+        let profile = config
+            .profile(id)
+            .ok_or_else(|| LaunchError::Unknown(id.to_owned()))?;
+        Self::new(profile.clone(), None, None, cwd).map_err(LaunchError::Invalid)
+    }
+
     /// The profile this launches.
     #[must_use]
     pub const fn profile(&self) -> &Profile {
@@ -114,6 +144,43 @@ impl Launch {
         base.clone()
             .command(&program, &args)
             .cwd(self.meta.cwd.as_path())
+    }
+}
+
+/// Why a profile identifier did not become a [`Launch`].
+///
+/// Both variants are refusals that happen before anything exists: no pane was
+/// added, no ratio changed, and no process was started.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchError {
+    /// The active configuration names no profile with that ID.
+    ///
+    /// The ID is kept as it arrived so the message can name what was asked for
+    /// — including a client that is a version behind on the profile table.
+    Unknown(String),
+    /// The configuration named the profile, but it does not validate.
+    ///
+    /// A parsed `config.toml` drops an invalid profile with a warning rather
+    /// than keeping it, so this is the defensive half: a configuration built
+    /// any other way still cannot launch something the validator refuses.
+    Invalid(MetadataError),
+}
+
+impl fmt::Display for LaunchError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Unknown(id) => write!(f, "no profile named {id:?} is configured"),
+            Self::Invalid(reason) => write!(f, "that profile cannot be launched: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for LaunchError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Unknown(_) => None,
+            Self::Invalid(reason) => Some(reason),
+        }
     }
 }
 
@@ -222,6 +289,46 @@ mod tests {
         let config = launch.configure(&PtyConfig::new("placeholder"));
         assert_eq!(config.program(), OsStr::new(&login_shell()));
         assert!(config.args().is_empty());
+    }
+
+    #[test]
+    fn a_configured_identifier_resolves_to_that_profiles_launch() {
+        let config = Config::defaults();
+        let launch = Launch::from_profile_id(&config, "codex", cwd())
+            .expect("a built-in profile is in the default configuration");
+        assert_eq!(launch.profile().id.as_str(), "codex");
+        assert_eq!(
+            launch.meta().name.as_str(),
+            "codex",
+            "a request names a profile and nothing else, so the pane takes the profile's own name"
+        );
+        assert_eq!(launch.meta().task, None);
+        assert_eq!(
+            launch.meta().cwd.as_path(),
+            std::path::Path::new("/home/dev/api"),
+            "the caller supplies the directory; the profile never invents one"
+        );
+    }
+
+    #[test]
+    fn an_identifier_the_configuration_does_not_name_is_refused() {
+        // The whole refusal: it happens here, against the configuration, before
+        // the session actor is asked for anything at all.
+        let config = Config::defaults();
+        assert_eq!(
+            Launch::from_profile_id(&config, "no-such-profile", cwd()),
+            Err(LaunchError::Unknown("no-such-profile".to_owned()))
+        );
+        assert_eq!(
+            Launch::from_profile_id(&config, "", cwd()),
+            Err(LaunchError::Unknown(String::new()))
+        );
+        // And an identifier is never read as a command: a profile table that
+        // does not name this cannot be talked into running it.
+        assert!(matches!(
+            Launch::from_profile_id(&config, "/bin/sh -c 'echo hi'", cwd()),
+            Err(LaunchError::Unknown(_))
+        ));
     }
 
     #[test]

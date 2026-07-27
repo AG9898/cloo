@@ -227,6 +227,14 @@ fn wait_until_ready(
 /// nor enables reporting. Its initial generic pane starts at the conventional
 /// 80×24 until an attached terminal negotiates the session's real geometry.
 fn server(request: cli::ServerRequest) -> ExitCode {
+    // The daemon is the profile authority: a client's launch request names an
+    // ID, and this is the table that ID is resolved against. Loaded before the
+    // socket is bound so a bad document is reported by a process that has not
+    // yet claimed a session path.
+    let loaded = cloo_server::config::load_from_environment();
+    for diagnostic in loaded.diagnostics {
+        eprintln!("cloo: warning: {diagnostic}");
+    }
     let launch = match cli::Request::default().into_launch() {
         Ok(launch) => launch,
         Err(err) => {
@@ -272,7 +280,8 @@ fn server(request: cli::ServerRequest) -> ExitCode {
     };
 
     let outcome = runtime.block_on(async {
-        let mut daemon = cloo_server::daemon::Daemon::new(listener, &base, launch)?;
+        let mut daemon =
+            cloo_server::daemon::Daemon::new(listener, &base, launch)?.with_config(loaded.config);
         daemon.run().await
     });
     match outcome {

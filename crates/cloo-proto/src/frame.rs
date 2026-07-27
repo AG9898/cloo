@@ -23,7 +23,7 @@ use crate::error::ProtoError;
 /// that presents as a rendering bug. Adapters share the number rather than
 /// carrying one of their own: both protocols are built from this one crate, so
 /// two versions could only ever disagree by accident.
-pub const PROTOCOL_VERSION: u16 = 9;
+pub const PROTOCOL_VERSION: u16 = 10;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -258,6 +258,10 @@ mod tests {
                 dir: Direction::Vertical,
                 delta: -7,
             }),
+            // An identifier, never a command line — the whole reason this
+            // variant is a `String` and still cannot ask for arbitrary argv.
+            ClientMessage::Command(Action::LaunchProfile("codex".into())),
+            ClientMessage::Command(Action::LaunchProfile(String::new())),
             ClientMessage::Command(Action::NewTab),
             ClientMessage::Command(Action::CloseTab),
             ClientMessage::Command(Action::NextTab),

@@ -44,7 +44,7 @@ pub use config::{
 pub use conn::{AttachRejection, AttachRequest, Connection, accept_attach};
 pub use daemon::{Daemon, DaemonError};
 pub use damage::{DamageFrame, DamageTracker};
-pub use launch::{Launch, login_shell};
+pub use launch::{Launch, LaunchError, login_shell};
 pub use pty::{PaneSnapshot, Pty, PtyConfig, PtyError, PtyReactor, Pump};
 pub use session::{
     Command, CopyModeError, Session, SessionEvent, SessionGone, SessionHandle, SessionSnapshot,

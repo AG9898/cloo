@@ -82,6 +82,17 @@ path by which a pane starts from something a user typed into an overlay or that 
 profile that fails `Profile::validate` is left out of the list rather than offered and refused at
 `execvp`, which keeps a configuration warning from becoming a mystery at the moment of use.
 
+As of M8-05 that request has a wire form: `Action::LaunchProfile(String)` (handshake v10) carries a
+profile **identifier** and has no field an argv could travel in. The daemon is the authority on
+what an identifier means — it resolves the ID against the configuration it loaded, using
+`Launch::from_profile_id`, and refuses an unknown one before the session actor is asked for
+anything, so nothing is spawned and no ratio moves. An ID that does resolve becomes an ordinary
+explicit launch through the session actor: the pane carries that profile's identity from the moment
+it exists, starts in the workspace's own working directory rather than one a client chose, and a
+program that is not on `PATH` fails at `execvp` with the layout already rolled back. There is
+deliberately no server function that turns a client-supplied *command* into a pane — "explicit
+profiles only" is a fact about which functions exist, not a check someone has to remember.
+
 Two kinds of wrongness get two different answers. Syntax is the document's: malformed TOML or an
 unknown key fails the whole parse and the caller keeps the defaults — an ignored typo would be a
 setting the user believes is applied. Semantics are each profile's: a well-formed entry that does
