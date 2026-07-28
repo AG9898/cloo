@@ -26,6 +26,10 @@
 > handling; and `cloo server [session]` / `cloo attach [session]` remain the explicit halves. This
 > is not a released package or a replacement for tmux yet.
 
+> **Visual status:** the images in this README are the approved destination, not captures of the
+> current sparse attached renderer. M9 is the active fidelity pass that aligns the live terminal
+> frame and all eight handoff states with that target.
+
 ## The idea
 
 cloo is a client-server terminal multiplexer written in Rust. A daemon owns your PTYs, grids,
@@ -90,10 +94,10 @@ Code without inferring their state from terminal text.
 
 | Track | Current state |
 |---|---|
-| Product and identity | Settled—the Storm terminal language and the external [brand system](docs/BRANDING.md) share one deliberate visual direction. |
-| Core and workspace model | Implemented and tested—M0–M6-08 plus M7-01–M7-04: PTY ownership, daemon/socket lifecycle, layouts, profiles, attention, tabs, themes, copy mode, mouse behavior, chrome composition, the attached client loop, live visual states, compatibility fixtures, and supported-target packaging are in place. |
+| Product and identity | Settled—the high-fidelity handoff is the terminal UI acceptance contract, and the external [brand system](docs/BRANDING.md) remains separate from terminal chrome. |
+| Core and workspace model | Implemented and tested—PTY ownership, daemon/socket lifecycle, layouts, profiles, attention data, tabs, copy mode, mouse behavior, attached rendering, compatibility fixtures, and supported-target packaging are in place. |
 | What runs today | Plain `cloo` create-or-attaches the global `default` workspace; `cloo <program>` launches one local pane; `cloo server [session]` owns a foreground daemon; `cloo attach [session]` joins one with composed chrome, input routing, resize handling, and layout controls. |
-| Active runtime work | M8 continues: hardening the default-workspace startup races and exposing first-attach keyboard hints plus an in-app help/command surface. |
+| Active runtime work | M9 aligns the live attached UI with the eight-card handoff: complete frames, status/tab composition, notifications, command/session surfaces, resize affordance, and runtime visual preferences. |
 | Compatibility and release | Reconnect/capability hardening, deterministic fixtures, supported-target packaging, and the external brand system are in place. |
 
 ## Follow the build

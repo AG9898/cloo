@@ -10,10 +10,11 @@ cloo is a client-server terminal multiplexer in Rust, designed as a workspace fo
 coding-agent harnesses. A daemon owns PTYs and session state; thin clients attach over a Unix
 socket and render.
 
-**Pre-alpha.** M0–M7 and M8-01 through M8-05 are complete; the remaining M8 work is attached UX.
-Plain `cloo` create-or-attaches `default`; `cloo <program>` remains an in-process one-pane launch;
-`cloo server [session]` is foreground and `cloo attach [session]` joins its multipane frame. Product
-scope is in [`docs/PRD.md`](docs/PRD.md); the canonical task queue is
+**Pre-alpha.** M0–M8 are complete. M9 is the high-fidelity terminal UI pass: the existing sparse
+attached frame is a functional scaffold, while the eight-card handoff is the visual acceptance
+contract. Plain `cloo` create-or-attaches `default`; `cloo <program>` remains an in-process one-pane
+launch; `cloo server [session]` is foreground and `cloo attach [session]` joins its multipane
+frame. Product scope is in [`docs/PRD.md`](docs/PRD.md); the canonical task queue is
 [`docs/workboard.json`](docs/workboard.json).
 
 ---

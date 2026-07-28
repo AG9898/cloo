@@ -54,9 +54,43 @@ These commands create only ignored `dist/` artifacts. The maintainer then follow
 |---|---|---|---|
 | Unit | built-in `#[test]` | `#[cfg(test)]` modules, collocated in `src/` | `cargo test --workspace` |
 | Integration | built-in harness | `crates/<crate>/tests/` | `cargo test --workspace` |
+| Visual golden | deterministic cell fixtures | `crates/cloo-client/tests/visual/` | `cargo test -p cloo-client --test visual` |
+| Live visual PTY | binary integration harness | `crates/cloo/tests/visual_attach.rs` | `cargo test -p cloo --test visual_attach` |
 
-No external test framework. If a property-testing or snapshot crate becomes warranted, add it
-here and record why in [`DECISIONS.md`](DECISIONS.md).
+No external test framework is required for cell goldens: fixtures are explicit rows of characters
+and semantic styles, reviewed as text. If a snapshot or terminal-screen crate becomes warranted,
+add it here and record why in [`DECISIONS.md`](DECISIONS.md).
+
+---
+
+## M9 Visual Acceptance
+
+The handoff's eight cards are acceptance fixtures, not inspiration checked by eye after
+implementation. Each card has a deterministic cell-level scene at its documented reference size
+and capability tier. The fixture asserts the complete composed frame — geometry, characters,
+semantic foreground/background roles, and attributes — rather than testing one helper at a time.
+
+Required coverage:
+
+- Truecolor reference frames for cards 01–08.
+- A 16-color frame for every distinct surface family: daily workspace, overlay, status variant,
+  notification, and active resize.
+- Narrow-width ladders proving optional detail yields before identity, focus, attention,
+  selection, or dismissal controls.
+- Named-theme default-cell mapping and the terminal-inheritance opt-out, with explicit child
+  colors unchanged and the cached grid byte-for-byte equal before and after rendering.
+- Real outer-PTY captures for the one-pane workspace, nested split, command palette, session
+  switcher, notification, and resize states. These drive `cloo attach` or bare `cloo`, so a pure
+  helper that is never connected to `LiveState` cannot satisfy the test.
+- Protocol fixtures for every new status/session projection, including version mismatch and an
+  inspection request that creates no attachment or resize.
+
+Golden updates require an intentional review against
+[`STYLEGUIDE.md`](STYLEGUIDE.md#acceptance-contract-and-delivery-state); regenerating expected
+frames until a failing implementation passes is not an acceptance process. Font rasterization,
+rounded corners, and shadows are outside cell tests. Before M9 is declared complete, capture the
+reference states manually in a truecolor terminal and confirm that the documented cell adaptation
+is recognizably equivalent to the handoff.
 
 ---
 

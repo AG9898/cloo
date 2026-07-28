@@ -1,15 +1,15 @@
 # PRD — cloo
 
-> **Status** (2026-07-24)
+> **Status** (2026-07-28)
 >
 > | Track | State |
 > |---|---|
 > | Shipped | `clooterminal` 0.0.1 is a name-reservation placeholder. The Linux x64 0.0.4 package is prepared for maintainer publication; `cloo` 0.0.1 on crates.io is also a placeholder. |
 > | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
 > | Current CLI | `cloo` attaches to the persistent `default` workspace, creating its background daemon when none is listening (M8-01); `cloo <program> [args…]` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | M8 continues: hardening the default-workspace startup races and making the attached UI expose the essential workspace actions and their shortcuts. Manual release validation and registry publishing remain maintainer-owned actions. |
+> | Next | M9 aligns the live attached UI with the approved high-fidelity handoff. The existing sparse chrome is a functional scaffold, not the visual endpoint. Manual release validation and registry publishing remain maintainer-owned actions. |
 > | Packaging | M7-04 supplies the package structure. The working npm distribution is published directly from a maintainer terminal and currently carries a Linux x64 native dependency only; other prebuilt targets remain deferred. M7-05 adds the approved product mark to the distribution README. |
-> | Remaining release work | M8 is active pre-release product work. Publishing to npm or crates.io still requires explicit maintainer authorization. |
+> | Remaining release work | M9 is active pre-release product work. Publishing to npm or crates.io still requires explicit maintainer authorization. |
 
 ---
 
@@ -75,10 +75,12 @@ that should surface — not after splits are built on top of it.
 - **M2 splits + agent panes.** **Implemented.** Binary layout tree, focus movement, resize, close-and-collapse.
   Profiles launch generic shells, Codex, or Claude Code with explicit pane names, task labels,
   working directories, and attention state. Prefix keymap hardcoded.
-- **M3 tabs + attention navigation.** **Implemented.** Multiple named tabs per session, an always-on status bar,
-  and a compact queue for panes that need input, completed with unread output, or failed.
-- **M4 config + theming.** **Implemented.** TOML at `~/.config/cloo/config.toml`, keybinds parsed into the
-  `Action` enum, theme definitions, live reload on `SIGHUP`. The dedicated visual-identity pass.
+- **M3 tabs + attention navigation.** **Structurally implemented.** Multiple named tabs, an
+  always-on status row, and attention models exist; M9 completes the live attention queue and the
+  handoff-level composition.
+- **M4 config + theming.** **Foundation implemented.** TOML profile/key parsing, named theme
+  tokens, fallbacks, motion primitives, and reload coordination exist. M9 wires theme, focus,
+  status, and motion preferences into the live client and completes the visual-identity pass.
 
 ### Phase 3 — M5–M7: v1 completion
 
@@ -127,6 +129,30 @@ this client can see but that daemon cannot is refused there — so the client sa
 leaving a confirmed row looking like a key that did nothing. Selection, that refusal, and raw-mode
 restoration are all the client's, and ordinary shell text is never reinterpreted as a command.
 
+### Phase 5 — M9: align the live UI with the approved handoff
+
+**Planned.** The high-fidelity handoff is the visual acceptance contract wherever terminal cells
+can express it. Rounded corners, shadows, pixel spacing, and a fixed font receive explicit
+terminal adaptations; they are not reasons to discard the handoff's hierarchy, framing, palette,
+or surface composition.
+
+M9 is staged so each task remains reviewable and leaves enough context for verification and
+handoff:
+
+1. **Visual foundation.** Deterministic reference frames, named-theme default-cell mapping,
+   runtime visual preferences, and the status/session projections needed by truthful chrome.
+2. **Daily workspace.** Handoff cards 01, 02, 03, and 07: session-aware tabs, complete pane
+   frames, gutters, focused/dimmed treatments, nested layouts, notifications, and both status
+   variants.
+3. **Interactive surfaces.** Cards 04, 05, and 08: searchable command palette, real session
+   switcher, live attention queue, and active resize affordance.
+4. **Theme completion.** Card 06: runtime theme/focus/status/motion configuration and a preview
+   rendered by the same helpers as the workspace.
+
+Storm themes map child default foreground/background cells to the selected pane surface and text
+roles. Explicit child colors remain application-owned. A terminal-inheritance option preserves
+the outer terminal's defaults for users who prefer them.
+
 ### Out of Scope
 
 Explicitly not in v1:
@@ -160,6 +186,11 @@ Explicitly not in v1:
   a concurrent invocation joins that same workspace rather than creating a second daemon.
 - The first attached frame makes split and help controls discoverable without interpreting a
   command intended for a pane.
+- At the reference truecolor geometry, all eight handoff states are recognizably equivalent in
+  composition, hierarchy, spacing, and semantic color, with each terminal-only adaptation named
+  in the style guide.
+- Fixed-size golden cell frames and real outer-PTY captures prove the live attached loop, not only
+  isolated chrome helpers, meets the visual contract.
 
 ---
 

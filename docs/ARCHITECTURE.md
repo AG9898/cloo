@@ -545,24 +545,23 @@ own origin, because a header or a status row belongs to the client alone and can
 while pane *contents* always come from a validated `Grid` at column zero. Keeping chrome on its own
 path is what stops client-composed cells from ever being mistaken for server-owned ones.
 
-`compose_frame` (M6-05) assembles the whole attached picture into those spans from one already-
-resolved layout. The tab row owns row zero and the status bar owns the last row — fixed edges, not
-guessed offsets — and every visible pane's grid drops into its own `PaneArea` with a header on the
-row above it. `PaneArea` is the *same* rect the mouse hit-tester answers against, so the frame a
-user sees and the map a click is resolved through cannot drift apart. Each pane arrives as a
-`FramePane`: the resolved area plus the two things only the client holds, its cached `Grid` and the
-`PaneChrome` its header reads from. Bodies come back through `chrome::body_span`, which applies the
-one-place dimming policy so an unfocused body recedes by the same rule as its header; everything
-else — tabs, headers, the status row and the attention summary it carries — comes from the existing
-chrome span helpers. The result is a pure `Vec<Span>` the render loop draws, so the composition
-never touches a descriptor and the renderer stays the only place bytes are produced.
+`compose_frame` (M6-05, expanded in M9) assembles the whole attached picture into those spans from
+one already-resolved layout. The tab row owns row zero and the status bar owns the last row — fixed
+edges, not guessed offsets — and every visible pane's grid drops inside its fully framed
+`PaneArea`. `PaneArea` is the *same* geometry the mouse hit-tester answers against, including frame
+edges and gutters, so the frame a user sees and the map a click is resolved through cannot drift
+apart. Each pane arrives as a `FramePane`: the resolved area plus the two things only the client
+holds, its cached `Grid` and the `PaneChrome` its frame reads from. Bodies come back through the
+one-place theme/dimming policy; complete frame edges, tabs, status, attention, and transient visual
+layers come from chrome helpers. The result is a pure `Vec<Span>` the render loop draws, so
+composition never touches a descriptor and the renderer stays the only place bytes are produced.
 
 #### Chrome
 
 `cloo-client::chrome` turns a pane description — index, title, task label, attention state, focus,
-zoom — into the cells of its header row, and applies the dimming policy to an unfocused pane's
-body. It is a pure function into cells: it emits no bytes, so the renderer remains the only place
-escape sequences are produced, and a narrow header is testable against an exact string.
+zoom — into a complete framed pane and applies theme/default-cell and dimming policies to its body.
+It is a pure function into cells: it emits no bytes, so the renderer remains the only place escape
+sequences are produced, and a fixed frame is testable as a complete cell matrix.
 
 Two rules from the style guide are structural rather than cosmetic. Width is spent in a fixed
 order, so every pane on a screen degrades identically — the task label goes first, then the state's
@@ -571,17 +570,18 @@ never the only signal: every attention state carries an ASCII glyph and, whereve
 label. Focus is not an attention state; it changes the accent and the marker and never the glyph.
 See [`STYLEGUIDE.md`](STYLEGUIDE.md) and `DECISIONS.md` RESOLVED-14.
 
-The palette here is the reference `storm` theme, as constants. Named themes and terminal-palette
-inheritance land in M4-03; nothing in this module reaches session state, which is what makes that
-a client-local change.
+Named themes map child `Color::Default` cells to their pane surface and default text at render time,
+without mutating the client's grid cache. Explicit child colors pass through unchanged.
+Terminal-palette inheritance leaves those default cells to the outer terminal. Nothing in this
+module reaches session state, so two attached clients may make different visual choices.
 
 #### Overlays
 
-`cloo-client::overlay`, as of M3-04, is the session switcher, the profile launcher, and the
-pane-details view as *one* model and one renderer: an `Overlay` is a list, a keyboard cursor, and
-a title, and they differ only in what a row says and what confirming one means. M8-04 adds the help
-surface as a fourth kind of the same model. Like `chrome` it is a pure function into cells, so a row
-is testable against an exact string.
+`cloo-client::overlay` is one model and renderer for the searchable command palette, real session
+switcher, profile launcher, attention queue, pane details, and configuration preview. An `Overlay`
+owns its local query and selection state; variants differ in their row data and typed confirmation
+outcome. Like `chrome` it is a pure function into cells, so a complete fixed-size overlay is
+testable as a cell matrix.
 
 The help surface is built from the live `cloo_core::keymap::Keymap` and from nothing else:
 `Overlay::help` reads the effective prefix into the title and looks each listed action's chord up in
@@ -1063,11 +1063,15 @@ Length-framed postcard over the Unix socket. Implemented in `cloo-proto`.
 
 ```
 Client → Server:  Attach { protocol_version, size, term_caps, session }
+                  InspectSession { protocol_version }
                   Detach  Input(Vec<u8>)  Paste(Vec<u8>)
                   Focus { focused }  Mouse(MouseEvent)
                   Resize(Size)  Command(Action)
 
 Server → Client:  Hello { protocol_version, session, tabs, size }
+                  SessionSummary { name, tabs, panes, clients, uptime }
+                  WorkspaceStatus { name, clients, effective_size }
+                  ConfigReloaded { revision }
                   Refused { reason }
                   Damage { pane, rows: Vec<RowUpdate> }
                   CursorMoved { pane, pos, shape, visible }
@@ -1078,6 +1082,39 @@ Server → Client:  Hello { protocol_version, session, tabs, size }
                   Bell(pane)  Tabs(Vec<TabSummary>)
                   Detached  Exit(code)
 ```
+
+### Visual status projections
+
+M9 adds typed, versioned projections for handoff chrome that the client cannot truthfully derive
+from its visible grid:
+
+- `WorkspaceStatus` is the attached session's display name, attached-client count, and effective
+  minimum terminal size. The daemon publishes it when attachment or sizing changes.
+- `SessionSummary` is a read-only inspection response containing the session name, tab/pane counts,
+  attached-client count, and uptime. A client discovers candidate sockets only inside the same
+  resolved per-user runtime directory, opens each as an untrusted candidate, and includes a row
+  only after that socket answers the versioned inspection handshake. A socket filename or path
+  alone is never treated as a live session.
+
+There is still one daemon per session and no new global authority. The session switcher composes
+the independently verified summaries client-side and attaches through the selected session's
+ordinary socket. Inspection creates no client attachment, does not resize a session, and exposes
+no child transcript.
+
+The clock, effective prefix, selected theme, overlay query/selection, and optional repository label
+are client-local. Repository information may be derived asynchronously from the focused pane's
+reported working directory, must never block the render loop, and is omitted when unavailable.
+Tabs, pane metadata, attention, client counts, and effective sizing remain server projections.
+No status segment may display placeholder data as though it were authoritative.
+
+Visual preferences remain client-local even though the foreground/background daemon is the process
+that receives the documented reload signal. On a successful daemon `SIGHUP` reload it increments a
+configuration revision and publishes `ConfigReloaded`; each attached client then atomically reloads
+the configuration file resolved from its own environment and applies only its validated client
+preferences. A rejected daemon reload publishes no revision, and a rejected client reload retains
+that client's previous valid preferences. The notification carries no palette or keymap data and
+therefore does not turn configuration into session state or require two clients to use the same
+theme.
 
 `Panes` is who the panes are — profile, name, task label, working directory — as opposed to
 `Layout`, which is where they sit. The two are separate messages because they change on

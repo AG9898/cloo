@@ -99,6 +99,39 @@ the terminal must resolve this first.
 
 ## Resolved Decisions
 
+### RESOLVED-19 — The high-fidelity handoff is the terminal UI acceptance contract
+
+**Date:** 2026-07-28
+
+**Decision:** Treat the eight-card UI handoff as the authoritative visual target wherever terminal
+cells can express it. Terminal limitations receive explicit adaptations — square corners, cell
+gutters, no shadows, and the user's font — but do not justify replacing its hierarchy with sparse
+text rows. A visual milestone is accepted against complete fixed-size frames from the live attached
+client, not solely against byte-tested component helpers.
+
+The reference composition includes complete pane frames, a session-aware tab bar, high-fidelity
+minimal and optional powerline status variants, dimmed unfocused panes, live notifications,
+searchable and session-aware overlays, a lit resize divider, and runtime visual preferences. Named
+themes map child default colors onto the pane palette; terminal inheritance remains an explicit
+opt-out and explicit child colors are never rewritten.
+
+**Why:** cloo's product bet is being materially better to look at than tmux. The existing renderer
+proved state ownership, fallbacks, and input safety, but its header-only frame and flat ASCII bars
+were accepted one helper at a time without proving the composed workspace resembled the approved
+design. Making the handoff the acceptance contract reconnects implementation work to the product
+promise while retaining terminal and accessibility constraints.
+
+**Alternatives rejected:** Keeping the current terminal-native reinterpretation would preserve a
+functional UI that does not deliver the project's differentiator. Pixel-perfect browser imitation
+would demand rounded corners, shadows, and font control a terminal does not own. Visual placeholders
+for unavailable server data would make polished chrome untruthful.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md), [`PRD.md`](PRD.md),
+[`ARCHITECTURE.md`](ARCHITECTURE.md), [`TESTING.md`](TESTING.md), `cloo-client` frame composition,
+runtime configuration, and versioned status/session projections. This refines RESOLVED-06,
+RESOLVED-07, RESOLVED-08, RESOLVED-09, and RESOLVED-14 without changing their accessibility,
+ownership, or state-provenance constraints.
+
 ### RESOLVED-18 — A silently refused launch is reported by the client that asked
 
 **Resolved:** 2026-07-27
@@ -282,8 +315,10 @@ mandatory dimming would make cloo hostile to some TUIs and users.
 
 **Resolved:** 2026-07-20
 
-**Decision:** cloo always renders a one-row status bar. The required default is a minimal flat
-layout; a segmented powerline presentation is a configurable enhancement with a glyph fallback.
+**Decision:** cloo always renders a one-row status bar. The required default is a visually
+restrained minimal composition with flat segment boundaries; a segmented powerline presentation
+is a configurable enhancement with a glyph fallback. RESOLVED-19 makes the handoff's minimal bar
+the reference form and the existing plain ASCII line its narrow/capability fallback.
 
 **Why:** Agent workflows need a persistent session, tab, prefix, and attention summary. One
 predictable row is a worthwhile density cost and avoids a contextual UI that appears too late.
@@ -316,6 +351,9 @@ Implemented in M4-03: `cloo-core` owns the `storm`, `night`, `gruvbox`, and `nor
 plus the terminal-palette choice, while `cloo-client` resolves that data to exact RGB or deliberate
 ANSI semantic roles before rendering. The client-local resolution means two attachments can use
 different terminal palettes without changing session state.
+
+RESOLVED-19 additionally maps child default cells through a named theme's pane surface and default
+text roles. Explicit child colors remain untouched, and terminal inheritance remains the opt-out.
 
 ---
 
@@ -446,13 +484,14 @@ thing the client-side-chrome rule exists to prevent.
 
 **Resolved:** 2026-07-21
 
-**Decision:** The pane header is one row that is also the pane's top border: its foreground is the
-theme accent when the pane is focused and the neutral border colour otherwise. Width is spent in a
-fixed order of preference — focus marker, zoom indicator, pane index, title, and state glyph are
-what a header *is*; the task label is dropped first when space runs out, then the state's text
-label, and only then is the title truncated. Below that, the state glyph is the last thing
-standing. Dimming an unfocused pane is an exact blend toward the frame background for a 24-bit
-colour, and the terminal's own `DIM` attribute for a palette index or the terminal default.
+**Decision:** The pane header is one row embedded in the pane's top border and joins complete side
+and bottom edges under RESOLVED-19. Its foreground is the theme accent when the pane is focused and
+the neutral border colour otherwise. Width is spent in a fixed order of preference — focus marker,
+frame corners, zoom indicator, pane index, title, and state glyph are what a header *is*; the task
+label is dropped first when space runs out, then the state's text label, and only then is the title
+truncated. Below that, the state glyph is the last thing standing. Dimming an unfocused pane is an
+exact blend toward the frame background for a 24-bit colour, and the terminal's own `DIM` attribute
+for a palette index or the terminal default.
 
 **Why:** A degradation order that is decided per situation is a degradation order that differs
 between two panes on one screen. Fixing it makes a narrow pane's header testable against an exact

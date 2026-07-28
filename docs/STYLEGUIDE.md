@@ -22,13 +22,46 @@ external documentation assets only; no terminal-renderer or launcher UI path con
 The design is intentionally dark, compact, and monospace. It supports normal terminal work and
 many concurrent coding-agent panes without turning the multiplexer into a dashboard.
 
+## Acceptance Contract and Delivery State
+
+The handoff is the authoritative visual target wherever a terminal cell can express it. Terminal
+constraints permit explicit adaptations — square corners instead of rounded ones, cell gutters
+instead of pixel gaps, no shadows, and the user's terminal font — but they do not permit replacing
+the handoff's hierarchy with an unrelated sparse composition. Every intentional adaptation must be
+named here.
+
+The live renderer at the start of M9 is a functional scaffold, not visual completion. It draws a
+compact tab row, one pane-header row, pane cells, a flat status row, and several ASCII overlays.
+Those pieces prove ownership, routing, and fallback behavior; they do not by themselves satisfy
+this guide. In particular, a helper being byte-tested does not establish that the attached frame
+matches the handoff.
+
+The eight handoff cards define the staged acceptance set:
+
+| Card | Required terminal result | Delivery stage |
+|---|---|---|
+| 01 · Single pane | Session-aware tab bar, fully framed focused pane, themed body, minimal status | Daily workspace |
+| 02 · Vertical split | Equal split, one-cell gutter, accent focus frame, dimmed neighbor, rich status | Daily workspace |
+| 03 · Nested workspace | Nested geometry, pane titles, application-owned content, bounded live toasts | Daily workspace |
+| 04 · Prefix palette | Searchable command surface, scrim, selected row, live keybinding hints | Interactive surfaces |
+| 05 · Session switcher | Real daemon session catalog, attachment state, counts, attach action | Interactive surfaces |
+| 06 · Config and themes | Runtime theme/focus/status/motion settings and a truthful live preview | Theme completion |
+| 07 · Status variants | High-fidelity minimal and powerline compositions with deterministic fallback | Daily workspace |
+| 08 · Pane resize | Live ratio label and lit divider while a keyboard or mouse resize is active | Interactive surfaces |
+
+At reference geometry, truecolor captures of these states must be recognizably equivalent to the
+handoff in composition, hierarchy, spacing, and semantic color. The child transcript itself remains
+application-owned: cloo supplies the pane surface and chrome, while shells, editors, and harnesses
+choose the characters and explicit colors inside their grids.
+
 ## Visual Decisions
 
 - **Focus:** the focused pane has an accent border; unfocused panes are dimmed. Dimming is a
   contrast reduction toward the frame background, not alpha. Implementations must retain
   readable text and must offer a no-dim accessibility configuration.
-- **Status:** one always-on row is the default. The minimal flat form is the required fallback;
-  segmented powerline styling is optional when glyph support is known.
+- **Status:** one always-on row is the default. The high-fidelity minimal form uses flat,
+  visually separated segments; the powerline form is available when glyph support is known.
+  A compact ASCII line is the narrow or limited-capability fallback, not the reference form.
 - **Themes:** `storm` is the reference built-in theme. Theme inheritance follows the user's
   terminal palette when configured, and every treatment has a deliberate 16-color fallback.
 - **Motion:** split, close, focus, and overlay transitions target 120ms, are frame-budgeted and
@@ -71,16 +104,25 @@ rendering to this fixed 16-color-safe table, rather than asking a 256-colour qua
 | default text | white (`7`) |
 | success, warning, error, info | bright green (`10`), bright yellow (`11`), bright red (`9`), bright cyan (`14`) |
 
-`terminal` palette inheritance instead leaves frame, surface, raised surface, primary, and default
-text at the outer terminal's defaults while retaining the same ANSI semantic colours for borders,
-focus, and attention. It therefore honours a user's terminal palette without losing the focused
-`>` marker or an attention glyph such as `!`; those text signals remain mandatory in every theme.
-The client resolves the choice locally, so it never becomes server or session state.
+For a named theme, a child's `Color::Default` foreground and background resolve to that theme's
+default text and pane surface. Explicit child colors remain untouched. This gives otherwise blank
+shell cells the same pane ground as the chrome without writing themed cells back into the client
+cache or server grid.
+
+`terminal` palette inheritance instead leaves frame, surface, raised surface, primary, default
+text, and child default cells at the outer terminal's defaults while retaining the same ANSI
+semantic colours for borders, focus, and attention. It therefore honours a user's terminal palette
+without losing the focused `>` marker or an attention glyph such as `!`; those text signals remain
+mandatory in every theme. The client resolves the choice locally, so it never becomes server or
+session state.
 
 ## Geometry and Chrome
 
 - Render a one-cell gutter between panes. Do not imitate the mock's rounded corners or shadows.
-- A pane header is one row: pane index, profile/name, optional task label, and concise state.
+- Draw a complete rectangular pane frame. Its top edge contains the one-row header; its side and
+  bottom edges remain visible around the body. Box-drawing glyphs may degrade to ASCII while frame
+  color and text markers continue to carry focus.
+- A pane header is one framed row: pane index, profile/name, optional task label, and concise state.
 - The always-on status bar is one row. It prioritizes session, active tab, attention count, and
   prefix hint; git/client/clock segments yield when width is limited.
 - The focused pane uses the accent border. Unfocused panes use a neutral border and reduced
@@ -88,9 +130,9 @@ The client resolves the choice locally, so it never becomes server or session st
 - Use terminal-safe glyphs with ASCII fallbacks: `>` for selection, `!` for attention, `x` for
   failure, and `*` for working. Powerline separators are optional.
 
-The header row *is* the pane's top border: there is no separate border row, and the accent versus
-neutral colour of that one row is what carries focus. Its shape, implemented in
-`cloo-client`'s `chrome` module as of M2-03, is:
+The header row occupies the pane's top border and joins visible side and bottom edges. There is no
+second title row. Accent versus neutral frame color carries focus around the complete pane, with
+the textual marker retained for terminals where color is unavailable. Its wide shape is:
 
 ```
 > Z 3 claude - refactor the layout pass          ! needs input
@@ -102,12 +144,12 @@ neutral colour of that one row is what carries focus. Its shape, implemented in
 focus marker, a space when unfocused (accent when focused, else border)
 ```
 
-Width is spent in a fixed order, so two panes on one screen degrade identically and a narrow
-header is testable against an exact string. The marker, zoom indicator, index, title, and state
-glyph are what a header is. The task label is dropped first, then the state's text label, and only
-then is the title truncated — without an ellipsis, since the marker and index already say which
-pane is being read. Below even that, the state glyph is the last thing standing. See
-[`DECISIONS.md`](DECISIONS.md) RESOLVED-14.
+Width is spent in a fixed order, so two panes on one screen degrade identically and a narrow header
+is testable against an exact string. The marker, frame corners, zoom indicator, index, title, and
+state glyph are what a header is. The task label is dropped first, then the state's text label, and
+only then is the title truncated — without an ellipsis, since the marker and index already say
+which pane is being read. Below even that, the state glyph is the last thing standing. See
+[`DECISIONS.md`](DECISIONS.md) RESOLVED-14 and RESOLVED-19.
 
 Dimming an unfocused pane — header and body alike — is an exact blend toward the frame background
 for a 24-bit colour, and the terminal's own `DIM` attribute for a palette index or the terminal
@@ -117,37 +159,39 @@ treatment off and leaves focus to the accent and the marker.
 
 ### Tab row
 
-The top row is a compact ordered tab bar, rendered as ` 1 shell >2 build`: positions are one-based
-bar positions rather than stable IDs, and `>` marks the active tab in addition to its accent and
-bold treatment. The text marker is mandatory so selection remains visible without colour. Tabs are
-separated by one space and the row is always filled to the terminal width.
+The top row begins with a compact session badge, continues with ordered tab chips, and spends
+remaining right-aligned width on low-priority workspace metadata. The active tab has a raised
+surface and accent underline or lower-edge treatment; `>` also marks it so selection remains
+visible without colour. Positions are one-based bar positions rather than stable IDs. Inactive tabs
+use muted text, and the row is always filled to the terminal width.
 
 At a narrow width the row keeps a contiguous window around the active tab, yielding inactive tabs
-from the far right and then the far left. If only the active chip fits, its title truncates before
-the `>` or its index do; at the smallest widths the marker is what remains. `tab_row_cells` and
-`tab_row_span` in `cloo-client::chrome` are pure cell functions, so this ladder is byte-for-byte
-testable like the pane header.
+from the far right and then the far left. Right-side metadata yields before tabs, and the session
+badge may reduce to its glyph before disappearing. If only the active chip fits, its title
+truncates before the `>` or its index do; at the smallest widths the marker is what remains.
 
 ### Status bar
 
-The always-on bottom row is a minimal flat line, not a powerline segment. Its full form is
-`session:7 >2 build 2! 1x C-b ?`: session identity, active one-based tab and title, the actionable
-attention tally, then the prefix-and-help hint. The active tab's `>` and every attention glyph are
-textual signals; colour supplements them but never carries the meaning alone. An empty attention
-queue is rendered as `0!` in this row, so the count remains explicit.
+The always-on bottom row has two reference compositions:
 
-Width yields in one fixed order: drop the active tab title, shorten `session:7` to `s7`, collapse a
-per-state tally to its total (`3!`), then drop `?` from the `C-b ?` hint. At the narrowest useful
-width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and the
-prefix — that last marker being the configured spelling's own final character, so a rebound `C-a`
-leaves `a`. The prefix that hint names is configurable as of M4-02 — `[keys] prefix` in
-`config.toml`, defaulting to `C-b` — and the keymap is the client's, not session state, so two
-clients attached to one session may legitimately show different hints. As of M8-03 the row draws
-that configured chord verbatim rather than cloo's default spelling. Below four cells no renderer can
-preserve all four fields, so the row is truncated
-from that compact form rather than making up a different layout. `status_bar_cells` and
-`status_bar_span` are pure cell functions and are rendered through the ordinary span path, whose
-non-truecolor fallback down-samples colours while leaving these ASCII signals intact.
+- **Minimal:** accent session segment, active and inactive tab summaries, branch/attention and
+  prefix hints, then a right-aligned clock. Flat separators keep it usable without a powerline
+  font.
+- **Powerline:** mode, session, active tab, branch/attention, client count and effective minimum
+  size, then the clock, joined by powerline separators when supported.
+
+The active tab's `>` and every attention glyph are textual signals; colour supplements them but
+never carries the meaning alone. An empty attention queue is rendered as `0!`, so the count remains
+explicit. Every value has the provenance documented in
+[`ARCHITECTURE.md`](ARCHITECTURE.md#visual-status-projections); unavailable optional values are
+omitted rather than fabricated.
+
+Width yields in one fixed order: clock, client geometry, branch, inactive tab summaries, active tab
+title, full session name, per-state attention detail, and finally the help suffix. At the narrowest
+useful width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and
+the configured prefix's own final character. The prefix is client configuration, so two clients
+attached to one session may legitimately show different hints. Below four cells the row truncates
+that compact form rather than inventing a different layout.
 
 ### First attachment and command discovery
 
@@ -207,6 +251,13 @@ created, closed, reordered, or restarted by one, and a drag past the end stops a
 size rather than being refused. Pressing on a divider begins the drag and does nothing else, so
 dragging a gutter can never also focus a pane.
 
+While a keyboard or mouse resize is active, the divider uses the accent color and carries a compact
+`resize · ratio 0.62` label in the nearest safe header or status segment. The affordance clears
+when the gesture or resize mode ends. Its geometry comes from the same client layout used for
+hit-testing, and only the resulting ratio change crosses to session state. The default prefix
+keeps `h/j/k/l` for focus and resolves arrow chords as one-cell divider resizes around the focused
+pane; terminals without mouse reporting therefore retain the same operation.
+
 A wheel focuses the pane it is over before it scrolls, because scrollback is the focused pane's, and
 a wheel over the tab row or the status bar does nothing at all: there is no scrollback under those
 rows, and scrolling the focused pane instead would move a view the user was not pointing at. A pane
@@ -251,11 +302,20 @@ share one overlay language: dim the background, retain a clear selected row, pro
 hints, and dismiss with Escape. Toasts are concise, stack in a bounded queue, and never cover a
 focused harness input indefinitely. Coalesce repeated events from the same pane.
 
-The session switcher, the profile launcher, the pane-details view, and — as of M8-04 — the help
-surface are that language written
-once, in `cloo-client`'s `overlay` module as of M3-04. An overlay is a title row, a list, and a
-hint row, each exactly the overlay's width, drawn over the raised surface with the screen beneath
-dimmed by the same contrast reduction an unfocused pane takes:
+The prefix surface is a searchable command palette, not only a static help list. It opens with the
+effective prefix, accepts a query without sending text to a pane, filters live keymap actions and
+client surfaces, retains a selected row, and confirms the selected action. An empty query presents
+the discoverable command list; `<prefix> ?` may open the same surface with that list visible.
+
+The session switcher lists the daemon's real session catalog rather than synthesizing the current
+session. Each row carries truthful tab/pane counts, attachment state, and recency when the daemon
+can supply it. Confirming a row attaches or switches through a typed client action; selection alone
+never kills or detaches another session.
+
+The session switcher, profile launcher, pane-details view, attention queue, and command palette use
+one rendering model. An overlay is a title row, a list, and a hint row, each exactly the overlay's
+width, drawn over the raised surface with the screen beneath dimmed by the same contrast reduction
+an unfocused pane takes:
 
 ```
   sessions 1/3
@@ -299,13 +359,12 @@ their width in the same fixed order as an overlay row, and both say the outcome 
 in colour. It clears itself when the pane arrives and lingers only briefly when it does not, so it
 never sits over a harness the user is typing into.
 
-The attached client layers an open overlay over the already composed tab, header, pane-body, and
+The attached client layers an open overlay over the already composed tab, frame, pane-body, and
 status spans: it dims that existing frame without changing any character, then paints the raised
-overlay box above it. Its keys are consumed locally — they never become pane input. As of M8-04 the
-client-local entries are `<prefix> ?` for the help surface, `<prefix> s` for the session surface, and
-`<prefix> i` for the focused pane's details; `<prefix> a` joined them at M8-06. Each is claimed only
-while the keymap leaves that chord unbound, and all use the same Escape dismissal and keyboard
-vocabulary as every overlay.
+overlay box above it. Its keys are consumed locally — they never become pane input. The client-local
+entries remain `<prefix> ?` for commands/help, `<prefix> s` for sessions, `<prefix> i` for focused
+pane details, and `<prefix> a` for the profile launcher. Each is claimed only while the keymap
+leaves that chord unbound, and all use the same Escape dismissal and keyboard vocabulary.
 
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:
@@ -315,7 +374,7 @@ contract concrete:
   `needs_input`, `failed`, `ready`. The count is text and the glyph is a shape, so the tally never
   rests on colour alone; the standalone helper renders nothing for an empty queue while the
   always-on status row supplies its explicit `0!` fallback.
-- **Queue.** `AttentionQueue` holds the newest unacknowledged actionable event per pane —
+- **Queue.** The live `AttentionQueue` holds the newest unacknowledged actionable event per pane —
   `needs_input`, `ready`, or `failed`; progress and the absence of news never enter. Its order is
   deterministic: newest first, a repeat of the same live state coalesces in place, a changed state
   moves its pane to the front, and an acknowledged state does not return until the pane's state
@@ -323,9 +382,20 @@ contract concrete:
   degradation ladder, so a row and a header look identical and the selected row wears the same
   accent a focused pane does. The keyboard drives it through `input::queue_action`: navigate,
   focus the selected pane, acknowledge, or dismiss.
-- **Toasts.** `ToastDeck` is bounded and coalesces per pane — a repeated event becomes one notice
+- **Toasts.** The live `ToastDeck` is bounded and coalesces per pane — a repeated event becomes one notice
   with a growing `(xN)` count moved to newest, and a new pane's toast evicts the oldest when the
-  deck is full, so a burst can never grow the stack without limit.
+  deck is full, so a burst can never grow the stack without limit. Toasts float over the
+  upper-right safe area, never obscure the focused pane's active input row indefinitely, and
+  auto-dismiss after the configured lifetime.
+
+### Configuration and live preview
+
+The configuration surface and the file it represents must agree. Runtime configuration accepts
+theme selection and terminal inheritance, focus dimming, status mode, motion/reduce-motion, and
+the existing key prefix. The overlay shows effective values and a live preview built by the same
+frame helpers as the workspace; it is not a second mock renderer. Invalid or unsupported settings
+retain the last valid value and name the refusal. It is opened as a client-local command from the
+searchable prefix palette, so no additional reserved prefix chord is required.
 
 ## Motion
 
