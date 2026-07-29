@@ -270,7 +270,7 @@ impl Daemon {
         let control = UnixListener::from_std(std_control).map_err(DaemonError::Accept)?;
 
         let cwd = launch.meta().cwd.clone();
-        let spawned = Session::spawn(config, THE_PANE, launch)?;
+        let spawned = Session::spawn_framed(config, THE_PANE, launch)?;
         let size = cloo_core::grid::wire_size(config.term_size());
         let (client_tx, client_commands) = mpsc::channel(CLIENT_COMMAND_QUEUE);
         let (updates, _) = broadcast::channel(DAMAGE_QUEUE);

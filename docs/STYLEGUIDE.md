@@ -30,11 +30,11 @@ instead of pixel gaps, no shadows, and the user's terminal font — but they do 
 the handoff's hierarchy with an unrelated sparse composition. Every intentional adaptation must be
 named here.
 
-The live renderer at the start of M9 is a functional scaffold, not visual completion. It draws a
-compact tab row, one pane-header row, pane cells, a flat status row, and several ASCII overlays.
-Those pieces prove ownership, routing, and fallback behavior; they do not by themselves satisfy
-this guide. In particular, a helper being byte-tested does not establish that the attached frame
-matches the handoff.
+The live renderer is still short of the complete M9 handoff, but pane geometry is no longer the
+header-only scaffold: every attached pane has a complete one-cell top, side, and bottom frame, and
+adjacent framed allocations do not overlap. The remaining overlays and status variants still need
+their card-specific passes. A helper being byte-tested does not by itself establish that the
+attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
 
@@ -152,6 +152,13 @@ the textual marker retained for terminals where color is unavailable. Its wide s
 | zoom indicator, present only while this pane is zoomed (warning)
 focus marker, a space when unfocused (accent when focused, else border)
 ```
+
+The daemon reserves one cell on each side of every attached pane allocation before setting the
+child's PTY size. Those cells are chrome, not hidden application columns or rows. `PaneArea` keeps
+the resulting interior and its surrounding frame together for both composition and mouse routing:
+the body alone can reach the application, every edge focuses its pane, and adjacent edge cells are
+the draggable gutter band. The local in-process one-pane launch has no attached chrome and keeps
+its full PTY size.
 
 Width is spent in a fixed order, so two panes on one screen degrade identically and a narrow header
 is testable against an exact string. The marker, frame corners, zoom indicator, index, title, and

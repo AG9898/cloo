@@ -823,14 +823,25 @@ M3-03 adds the always-on minimal status row through the same pure chrome-and-ren
 M6-05 adds `compose_frame` to `src/renderer.rs`, tested through the same pure span seam:
 
 - A two-pane frame lays every visible pane's grid into its own `PaneArea`, byte-exact: the tab row
-  owns row zero and the status row the last row, each pane's header sits on the row directly above
-  its grid, and a focused body drops in undimmed, row by row, equal to the cached grid at exactly
-  its rect origin — the positions are the resolved layout's, never a guessed offset.
+  owns row zero and the status row the last row, each pane's header fills its top frame between
+  corners, side and bottom edges remain visible without overlap, and a focused body drops in
+  undimmed, row by row, equal to the cached grid at exactly its rect origin — the positions are the
+  resolved layout's, never a guessed offset.
 - An unfocused body recedes while a focused one is untouched, so `chrome::body_span` is the same
   one-place dimming policy `dim_cells` is; a headerless area composes no header row; and a
   zero-sized frame composes nothing rather than panicking.
 - Rendering a composed frame through `render_spans` lands the grid's cells at the pane's rect origin
   in outer-terminal coordinates, tying the composition to byte-exact output.
+
+M9-10 closes the geometry half against live state and a real PTY. `input.rs` hit-tests the body,
+top/header, both side edges, bottom edge, adjacent frame-gutter band, fixed chrome rows, and outside
+cells from the same `PaneArea` the renderer consumes; every chrome cell is proved unable to produce
+a wire mouse event, while a body event keeps pane-local coordinates. The card-01 visual golden now
+contains all four frame edges in truecolor and 16-color. `crates/cloo/tests/attach.rs` resizes a
+daemon-owned session and asserts both damage rows and the child's own `stty size` are two columns
+and two rows smaller than the pane allocation, proving frame cells never enter the PTY. The local
+one-pane `SIGWINCH` fixture still reports the complete outer size, proving the no-chrome path was
+not accidentally inset.
 
 M6-07 layers the remaining client visual state onto that live-frame seam:
 
@@ -1008,10 +1019,10 @@ compatibility beyond the deterministic fixture suite is verified through the man
 | `crates/cloo-server/src/socket.rs` | Socket lifecycle | Pure only: `CLOO_SOCKET`/`XDG_RUNTIME_DIR` precedence, the per-uid `/tmp` fallback, session-name validation, the lock file path, and the adapter control socket derived from the session socket with a lock of its own |
 | `crates/cloo-server/tests/socket.rs` | Socket lifecycle | Bind creating a `0700` directory, a second daemon refused, unlink on drop, stale-socket replacement, refusal to remove a non-socket or follow a symlink, a successor's socket left alone, and a parentless path refused |
 | `crates/cloo-server/src/conn.rs` | Handshake | A matching attach accepted with its `TermCaps` intact field for field, a version mismatch and a non-attach first frame refused with a reason on the wire, a silent peer read as a close, the snapshot batch carrying tabs before geometry with pane identity and attention before contents, and the session's layout pass carried through rather than recomputed; plus the control handshake: an adapter accepted under its own name, and a report before a hello, a mismatched version, and a name outside the `AdapterId` alphabet each refused |
-| `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
+| `crates/cloo-server/src/session.rs` | Session task | Pure only: the degenerate-area guard, one layout pass giving a single pane the whole area, attached geometry insetting that allocation to the framed PTY interior, a handle whose task is gone reporting it rather than hanging, and the input encoders — bracketed and plain paste, a paste that cannot close its own bracket, focus reported only on request, and one fixture per mouse event kind in both the SGR and legacy encodings |
 | `crates/cloo-server/src/damage.rs` | Damage tracking | First-picture resync, changed-row-only frames, no-op snapshots, exit-frame detection, a configuration revision travelling as its own frame rather than as grid damage, and pane identity, attention, and tab selection each resent only when they change rather than on every damaged row |
 | `crates/cloo-server/src/daemon.rs` | Daemon | Frame-rate cap, fixed IDs, minimum-size arithmetic, and a lagged broadcast receiver replacement |
-| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, grid apply/resize rejections, transition frames (including a layered phase that leaves pane-body spans ordinary and a settled byte-identical frame), and `compose_frame` laying every pane's grid into its `PaneArea` with the tab row, headers, and status row positioned from one layout pass while render-time theme mapping and dimming leave the cache unchanged |
+| `crates/cloo-client/src/renderer.rs` | Renderer | Byte-exact full and incremental frames, positioned chrome spans, absolute SGR, colour downsampling (including a status row with truecolor disabled), cursor placement, grid apply/resize rejections, transition frames (including a layered phase that leaves pane-body spans ordinary and a settled byte-identical frame), and `compose_frame` laying every pane's grid into its `PaneArea` with complete non-overlapping top/side/bottom frames, the fixed tab/status rows, and nested gutters positioned from one layout pass while render-time theme mapping and dimming leave the cache unchanged |
 | `crates/cloo-client/src/motion.rs` | Motion | The 120ms transition stepped frame by frame from an injected `Instant`: an interruption settling at the end state rather than rewinding for every motion kind, a bounded frame count however often the transition is sampled, seven whole frames fitting the style guide's budget, reduce-motion drawing exactly one settled frame, both visual stillness switches resolving through `VisualConfig::animates`, a late tick settling rather than overshooting and a backwards clock reading as the start, a second transition replacing the one in flight, and the contrast ramp keeping every character, attribute, and readable colour with the `DIM` fallback for a non-blendable palette entry |
 | `crates/cloo-client/src/theme.rs` | Theme resolution | Named theme RGB tokens, deliberate ANSI semantic fallback below truecolor, outer-terminal palette inheritance, and child default foreground/background mapping that preserves explicit colours |
 | `crates/cloo-client/src/chrome.rs` | Pane chrome | Focus and attention as independent signals, glyph-and-label state without colour, the fixed width-degradation ladder at every width, the zoom marker, dimming by blend with a no-dim fallback, and a compact active-marked tab row yielding around its active tab; plus the attention queue's deterministic order and coalescing, an acknowledged state not refilling it, keyboard navigation and focus/acknowledge, the per-state summary tally, every state rendered text-glyph-and-colour in a row, and the bounded, per-pane-coalescing toast deck; plus the always-on status row's session, active tab, attention, and prefix forms yielding to ASCII markers; and `body_span` mapping child defaults on a copy before applying the shared dimming policy |

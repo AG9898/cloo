@@ -57,8 +57,11 @@ use crate::theme::{Theme, ThemeToken};
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 /// Size of a single blocking stdin read on the helper thread.
 const INPUT_BUF_LEN: usize = 1024;
-/// The chrome rows a one-pane attached frame reserves: tab, header, status.
-const CHROME_ROWS: u16 = 3;
+/// The fixed outer rows reserved before session geometry: tab and status.
+///
+/// Pane headers and bottom edges live inside the session's framed allocations,
+/// so they are not subtracted a second time here.
+const FIXED_CHROME_ROWS: u16 = 2;
 
 /// Everything attaching can refuse to do.
 #[derive(Debug)]
@@ -481,11 +484,10 @@ where
 /// A terminal's usable session area after the frame's fixed chrome rows.
 ///
 /// A client reports the pane area rather than its full outer-terminal height:
-/// tab, pane-header, and status rows are client-owned and must not become a
-/// child's last three grid rows. The server remains authoritative for how that
-/// usable rectangle is divided among panes.
+/// tab and status rows are client-owned and must not become child grid rows.
+/// Pane frames are accounted for by the server's single framed geometry pass.
 const fn session_size(outer: Size) -> Size {
-    Size::new(outer.cols, outer.rows.saturating_sub(CHROME_ROWS))
+    Size::new(outer.cols, outer.rows.saturating_sub(FIXED_CHROME_ROWS))
 }
 
 /// The async attached-client body, entered only after raw mode is armed.
@@ -918,15 +920,10 @@ impl LiveState {
         let mut areas = BTreeMap::new();
         let mut live = BTreeMap::new();
         for rect in &layout.panes {
-            // The server was given the usable area (without the fixed tab,
-            // header, and status rows), so its grid origin is shifted below the
-            // first pane header when it is painted in the outer terminal.
-            let area = PaneArea::new(
-                rect.pane,
-                rect.x,
-                rect.y.saturating_add(CHROME_ROWS - 1),
-                rect.size,
-            );
+            // The server was given the area between the fixed tab and status
+            // rows. Its framed geometry already excludes every pane edge from
+            // the child grid, so only the tab-row offset is added here.
+            let area = PaneArea::new(rect.pane, rect.x, rect.y.saturating_add(1), rect.size);
             let grid = self.grids.remove(&rect.pane).map_or_else(
                 || Grid::new(rect.size),
                 |mut grid| {
@@ -1721,9 +1718,9 @@ mod tests {
                 tab: TabId::new(1),
                 panes: vec![PaneRect {
                     pane,
-                    x: 0,
-                    y: 0,
-                    size: Size::new(8, 2),
+                    x: 1,
+                    y: 1,
+                    size: Size::new(6, 1),
                 }],
                 focused: Some(pane),
                 zoomed: None,
@@ -1749,28 +1746,16 @@ mod tests {
         state
             .apply(ServerMessage::Damage {
                 pane,
-                rows: vec![
-                    RowUpdate {
-                        row: 0,
-                        cells: vec![
-                            Cell {
-                                ch: 'a',
-                                ..Cell::default()
-                            };
-                            8
-                        ],
-                    },
-                    RowUpdate {
-                        row: 1,
-                        cells: vec![
-                            Cell {
-                                ch: 'b',
-                                ..Cell::default()
-                            };
-                            8
-                        ],
-                    },
-                ],
+                rows: vec![RowUpdate {
+                    row: 0,
+                    cells: vec![
+                        Cell {
+                            ch: 'a',
+                            ..Cell::default()
+                        };
+                        6
+                    ],
+                }],
             })
             .expect("the grid damage applies");
 
@@ -1782,19 +1767,22 @@ mod tests {
             "the header is above the grid"
         );
         assert_eq!(
-            spans[2].at,
-            Point::new(0, 2),
+            spans[3].at,
+            Point::new(1, 2),
             "the grid starts below chrome"
         );
-        assert_eq!(spans[2].cells[0].ch, 'a');
-        assert_eq!(spans[3].at, Point::new(0, 3));
-        assert_eq!(spans[3].cells[0].ch, 'b');
+        assert_eq!(spans[3].cells[0].ch, 'a');
+        assert_eq!(spans[5].at, Point::new(0, 3), "the bottom edge is visible");
         assert_eq!(
             spans.last().map(|span| span.at),
             Some(Point::new(0, 4)),
             "the status row owns the last outer-terminal row"
         );
-        assert_eq!(state.screen.hit(0, 2).pane(), Some(pane));
+        assert_eq!(state.screen.hit(1, 2).pane(), Some(pane));
+        assert_eq!(
+            state.screen.hit(0, 2),
+            crate::input::MouseTarget::Chrome(crate::input::ChromeTarget::Frame { pane })
+        );
     }
 
     /// A live state showing `panes` panes on a `width`-wide terminal.
@@ -1891,9 +1879,9 @@ mod tests {
                 tab: TabId::new(1),
                 panes: vec![PaneRect {
                     pane,
-                    x: 0,
-                    y: 0,
-                    size: Size::new(9, 2),
+                    x: 1,
+                    y: 1,
+                    size: Size::new(7, 1),
                 }],
                 focused: Some(pane),
                 zoomed: None,
@@ -1904,7 +1892,7 @@ mod tests {
                 pane,
                 rows: vec![RowUpdate {
                     row: 0,
-                    cells: "copy this"
+                    cells: "copy th"
                         .chars()
                         .map(|ch| Cell {
                             ch,
@@ -1930,7 +1918,7 @@ mod tests {
 
         let spans = state.spans();
         assert!(spans.iter().any(|span| {
-            span.at == Point::new(0, 2)
+            span.at == Point::new(1, 2)
                 && span.cells.iter().map(|cell| cell.ch).collect::<String>() == "copy"
         }));
         assert_eq!(
@@ -2028,9 +2016,9 @@ mod tests {
                 tab: TabId::new(1),
                 panes: vec![PaneRect {
                     pane,
-                    x: 0,
-                    y: 0,
-                    size: Size::new(40, rows.saturating_sub(CHROME_ROWS)),
+                    x: 1,
+                    y: 1,
+                    size: Size::new(38, rows.saturating_sub(4)),
                 }],
                 focused: Some(pane),
                 zoomed: None,

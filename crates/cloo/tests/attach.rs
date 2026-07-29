@@ -853,7 +853,7 @@ async fn await_row_width(attached: &mut Attached<UnixStream>, cols: usize) {
 }
 
 #[tokio::test]
-async fn a_resize_reaches_both_the_grid_and_the_child() {
+async fn composed_frame_resize_reaches_the_interior_grid_and_child() {
     let dir = TempDir::new("resize");
     let socket = dir.socket();
     // `stty size` asks the *pty* what shape it is, which is the only thing that
@@ -870,8 +870,9 @@ async fn a_resize_reaches_both_the_grid_and_the_child() {
         .await
         .expect("the resize must reach the daemon");
 
-    // Half one: the session task reflowed the grid, so rows are 100 wide.
-    await_row_width(&mut attached, 100).await;
+    // Half one: the session task reflowed the child grid to the framed
+    // interior, so the two side edges never become application columns.
+    await_row_width(&mut attached, 98).await;
 
     // Half two: the child's own view of its terminal changed, which only
     // `TIOCSWINSZ` on the pty master can have done. `stty size` prints
@@ -880,7 +881,7 @@ async fn a_resize_reaches_both_the_grid_and_the_child() {
         .send_input(b"\n".to_vec())
         .await
         .expect("input must reach the child");
-    await_text(&mut attached, "40 100").await;
+    await_text(&mut attached, "38 98").await;
 
     tokio::time::timeout(PATIENCE, daemon)
         .await
@@ -910,7 +911,7 @@ async fn a_degenerate_resize_leaves_the_session_alone() {
         .send_input(b"\n".to_vec())
         .await
         .expect("input must reach the child");
-    await_text(&mut attached, "24 80").await;
+    await_text(&mut attached, "22 78").await;
 
     tokio::time::timeout(PATIENCE, daemon)
         .await
@@ -939,7 +940,7 @@ async fn a_shrinking_client_that_leaves_redraws_the_survivor_at_full_width() {
     // A narrower client drags the session down to the component-wise minimum.
     // The survivor's grid reflows to 40 columns with it.
     let narrow = client_sized(&socket, Size::new(40, 24)).await;
-    await_row_width(&mut wide, 40).await;
+    await_row_width(&mut wide, 38).await;
 
     // The narrow client detaches. With only the wide client left the session
     // grows back to 80, and that resize must reach the survivor as a full redraw
@@ -948,7 +949,7 @@ async fn a_shrinking_client_that_leaves_redraws_the_survivor_at_full_width() {
         .detach()
         .await
         .expect("the narrow client detaches cleanly");
-    await_row_width(&mut wide, 80).await;
+    await_row_width(&mut wide, 78).await;
 
     // Let the child exit so the daemon can reap and finish.
     wide.send_input(b"\n".to_vec())
@@ -979,8 +980,8 @@ async fn two_clients_at_different_sizes_share_the_negotiated_minimum() {
     // The smaller client sets the minimum for the whole session, including the
     // client that was already attached at a larger size.
     let mut narrow = client_sized(&socket, Size::new(50, 24)).await;
-    await_row_width(&mut narrow, 50).await;
-    await_row_width(&mut wide, 50).await;
+    await_row_width(&mut narrow, 48).await;
+    await_row_width(&mut wide, 48).await;
 
     wide.send_input(b"\n".to_vec())
         .await
@@ -1257,7 +1258,7 @@ async fn copy_mode_highlights_reach_a_client_and_its_copy_is_policy_gated() {
     // A client caches the visible grid and nothing else, so it applies damage
     // exactly as the real render loop does — starting with the attach snapshot,
     // which is why the cache is filled before any copy command is sent.
-    let mut grid = Grid::new(Size::new(80, 24));
+    let mut grid = Grid::new(Size::new(78, 22));
     tokio::time::timeout(PATIENCE, async {
         loop {
             match attached.recv().await.expect("the connection must hold") {

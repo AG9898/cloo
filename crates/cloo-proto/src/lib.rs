@@ -16,9 +16,9 @@
 //!   drain-and-retry loop exists once instead of once per side.
 //! - [`error`] — the crate-local [`ProtoError`].
 //!
-//! Bump [`PROTOCOL_VERSION`] on **every** change to a wire type. A stale client
-//! attached to a rebuilt server must fail with a clear reattach error rather
-//! than desync and present as a rendering bug.
+//! Bump [`PROTOCOL_VERSION`] on **every** change to a wire type or its
+//! semantics. A stale client attached to a rebuilt server must fail with a
+//! clear reattach error rather than desync and present as a rendering bug.
 //!
 //! See `docs/ARCHITECTURE.md` for the protocol shape.
 

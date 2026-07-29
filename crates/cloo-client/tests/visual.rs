@@ -46,9 +46,9 @@ fn workspace() -> Scene {
         .pane(
             ScenePane::new(
                 PaneId::new(1),
-                0,
+                1,
                 2,
-                Size::new(40, 5),
+                Size::new(38, 4),
                 PaneChrome::new(1, "shell").focused(true),
             )
             .text(&["$ ls", "Cargo.toml  src"]),
@@ -66,6 +66,7 @@ fn workspace_golden() -> ExpectedFrame {
     let reference = |token| Paint::Reference(token);
     let chrome_bg = Paint::Reference(ThemeToken::Surface);
     let pane_bg = Paint::Token(ThemeToken::Surface);
+    let frame_bg = Paint::Token(ThemeToken::Frame);
 
     ExpectedFrame::new()
         .style(
@@ -94,6 +95,10 @@ fn workspace_golden() -> ExpectedFrame {
             SemanticStyle::new(Paint::Token(ThemeToken::Accent), pane_bg),
         )
         .style(
+            'F',
+            SemanticStyle::new(Paint::Token(ThemeToken::Accent), frame_bg),
+        )
+        .style(
             'B',
             SemanticStyle::new(Paint::Token(ThemeToken::Accent), pane_bg).attrs(CellAttrs::BOLD),
         )
@@ -114,28 +119,28 @@ fn workspace_golden() -> ExpectedFrame {
             "AAAAAAA.................................",
         )
         .row(
-            "> 1 shell                      ? unknown",
-            "aammBBBBBssssssssssssssssssssssmmmmmmmmm",
+            "┌> 1 shell                    ? unknown┐",
+            "FaammBBBBBssssssssssssssssssssmmmmmmmmmF",
         )
         .row(
-            "$ ls                                    ",
-            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+            "│$ ls                                  │",
+            "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F",
         )
         .row(
-            "Cargo.toml  src                         ",
-            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+            "│Cargo.toml  src                       │",
+            "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F",
         )
         .row(
-            "                                        ",
-            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+            "│                                      │",
+            "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F",
         )
         .row(
-            "                                        ",
-            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+            "│                                      │",
+            "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F",
         )
         .row(
-            "                                        ",
-            "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
+            "└──────────────────────────────────────┘",
+            "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
         )
         .row(
             "session:1 >1 main 0! C-b ?              ",

@@ -532,10 +532,8 @@ pub fn mouse_owner(modes: PaneModes, report: &MouseReport, over_pane: bool) -> M
 /// what was rendered — rather than re-deriving it from the wire — is what keeps
 /// a hit test agreeing with the picture the user is pointing at.
 ///
-/// `size` is the grid, and the grid alone. The header row sits immediately above
-/// it and is chrome: per `docs/STYLEGUIDE.md` the header row *is* the pane's top
-/// border, so a click on it is a click on the pane's frame, never on its
-/// contents.
+/// `size` is the grid, and the grid alone. A one-cell frame surrounds it. The
+/// header occupies the top edge; the other three edges remain visible chrome.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneArea {
     /// Which pane.
@@ -546,8 +544,8 @@ pub struct PaneArea {
     pub y: u16,
     /// The grid's size, which is the size the server gave the pane.
     pub size: Size,
-    /// Whether a header row was drawn on the row above the grid.
-    pub header: bool,
+    /// Whether a complete one-cell frame was drawn around the grid.
+    pub framed: bool,
 }
 
 impl PaneArea {
@@ -559,14 +557,14 @@ impl PaneArea {
             x,
             y,
             size,
-            header: true,
+            framed: true,
         }
     }
 
     /// The same area with no header row drawn above it.
     #[must_use]
     pub const fn headerless(mut self) -> Self {
-        self.header = false;
+        self.framed = false;
         self
     }
 
@@ -595,11 +593,26 @@ impl PaneArea {
     /// Whether `(col, row)` is on this pane's header row.
     #[must_use]
     pub const fn on_header(&self, col: u16, row: u16) -> bool {
-        self.header
+        self.framed
             && self.y > 0
             && row == self.y - 1
-            && col >= self.x
-            && col < self.x.saturating_add(self.size.cols)
+            && col >= self.x.saturating_sub(1)
+            && col <= self.x.saturating_add(self.size.cols)
+    }
+
+    /// Whether `(col, row)` is on a side or bottom frame edge.
+    #[must_use]
+    pub const fn on_frame(&self, col: u16, row: u16) -> bool {
+        if !self.framed {
+            return false;
+        }
+        let left = self.x.saturating_sub(1);
+        let right = self.x.saturating_add(self.size.cols);
+        let top = self.y.saturating_sub(1);
+        let bottom = self.y.saturating_add(self.size.rows);
+        let on_side = (col == left || col == right) && row >= top && row <= bottom;
+        let on_bottom = row == bottom && col >= left && col <= right;
+        on_side || on_bottom
     }
 }
 
@@ -718,8 +731,13 @@ impl ScreenLayout {
             if area.on_header(col, row) {
                 return MouseTarget::Chrome(ChromeTarget::Header {
                     pane: area.pane,
-                    col: col - area.x,
+                    col: col.saturating_sub(area.x.saturating_sub(1)),
                 });
+            }
+        }
+        for area in &self.panes {
+            if area.on_frame(col, row) {
+                return MouseTarget::Chrome(ChromeTarget::Frame { pane: area.pane });
             }
         }
         MouseTarget::Chrome(ChromeTarget::Gutter)
@@ -748,12 +766,15 @@ impl ScreenLayout {
         // two cases are disjoint, because a cell cannot be both a pane's right
         // edge with a neighbour beside it and its bottom edge with one below.
         let vertical = self.panes.iter().find(|left| {
-            left.x.saturating_add(left.size.cols) == col
-                && (left.y..left.y.saturating_add(left.size.rows)).contains(&row)
-                && self
-                    .panes
-                    .iter()
-                    .any(|right| right.x == col.saturating_add(1) && overlaps_rows(left, right))
+            let left_end = left.x.saturating_add(left.size.cols);
+            col >= left_end
+                && (left.y.saturating_sub(1)..=left.y.saturating_add(left.size.rows)).contains(&row)
+                && self.panes.iter().any(|right| {
+                    right.x > left_end
+                        && col < right.x
+                        && right.x.saturating_sub(left_end) <= 2
+                        && overlaps_rows(left, right)
+                })
         });
         if let Some(left) = vertical {
             return Some(Divider {
@@ -762,12 +783,16 @@ impl ScreenLayout {
             });
         }
         let horizontal = self.panes.iter().find(|above| {
-            above.y.saturating_add(above.size.rows) == row
-                && (above.x..above.x.saturating_add(above.size.cols)).contains(&col)
-                && self
-                    .panes
-                    .iter()
-                    .any(|below| below.y == row.saturating_add(1) && overlaps_cols(above, below))
+            let above_end = above.y.saturating_add(above.size.rows);
+            row >= above_end
+                && (above.x.saturating_sub(1)..=above.x.saturating_add(above.size.cols))
+                    .contains(&col)
+                && self.panes.iter().any(|below| {
+                    below.y > above_end
+                        && row < below.y
+                        && below.y.saturating_sub(above_end) <= 2
+                        && overlaps_cols(above, below)
+                })
         });
         horizontal.map(|above| Divider {
             pane: above.pane,
@@ -853,6 +878,11 @@ pub enum ChromeTarget {
         pane: PaneId,
         /// The column, from the left of the header.
         col: u16,
+    },
+    /// A pane's side or bottom frame edge.
+    Frame {
+        /// The pane enclosed by the frame.
+        pane: PaneId,
     },
     /// Inside a pane's grid, but the application does not own it: it is not
     /// tracking the mouse, the user held the shift override, or the pane is not
@@ -1087,9 +1117,9 @@ impl ChromeMouse {
         match target {
             // A header names its pane, and the header row is that pane's top
             // border: clicking a pane's frame is clicking the pane.
-            ChromeTarget::PaneBody { pane, .. } | ChromeTarget::Header { pane, .. } => {
-                Some(ChromeAction::Focus(pane))
-            }
+            ChromeTarget::PaneBody { pane, .. }
+            | ChromeTarget::Header { pane, .. }
+            | ChromeTarget::Frame { pane } => Some(ChromeAction::Focus(pane)),
             ChromeTarget::TabRow { .. }
             | ChromeTarget::StatusBar { .. }
             | ChromeTarget::Gutter
@@ -1132,13 +1162,13 @@ const fn along(dir: Direction, report: &MouseReport) -> u16 {
 /// at.
 fn scroll(target: ChromeTarget, up: bool) -> Option<ChromeAction> {
     match target {
-        ChromeTarget::PaneBody { pane, .. } | ChromeTarget::Header { pane, .. } => {
-            Some(ChromeAction::Scroll {
-                pane,
-                up,
-                lines: WHEEL_LINES,
-            })
-        }
+        ChromeTarget::PaneBody { pane, .. }
+        | ChromeTarget::Header { pane, .. }
+        | ChromeTarget::Frame { pane } => Some(ChromeAction::Scroll {
+            pane,
+            up,
+            lines: WHEEL_LINES,
+        }),
         ChromeTarget::TabRow { .. }
         | ChromeTarget::StatusBar { .. }
         | ChromeTarget::Gutter
@@ -1867,17 +1897,18 @@ mod tests {
     /// ```text
     ///  row 0        tab row
     ///  row 1        header(1)              header(2)
-    ///  rows 2..=8   pane 1 grid, cols 0..=9   |   pane 2 grid, cols 11..=19
+    ///  rows 2..=7   pane 1 grid, cols 1..=8   ||  pane 2 grid, cols 11..=18
+    ///  row 8        bottom frames
     ///  row 9        status bar
-    ///  col 10       gutter
+    ///  cols 9..=10  the adjacent one-cell frame gutters
     /// ```
     fn screen() -> ScreenLayout {
         ScreenLayout::new(Size::new(20, 10))
             .tab_row(0)
             .status_row(9)
             .focus(Some(PaneId::new(1)))
-            .pane(PaneArea::new(PaneId::new(1), 0, 2, Size::new(10, 7)))
-            .pane(PaneArea::new(PaneId::new(2), 11, 2, Size::new(9, 7)))
+            .pane(PaneArea::new(PaneId::new(1), 1, 2, Size::new(8, 6)))
+            .pane(PaneArea::new(PaneId::new(2), 11, 2, Size::new(8, 6)))
     }
 
     fn at(col: u16, row: u16) -> MouseReport {
@@ -1892,7 +1923,7 @@ mod tests {
     #[test]
     fn every_region_of_a_drawn_screen_hit_tests_to_itself() {
         let screen = screen();
-        let cases: [(&str, u16, u16, MouseTarget); 7] = [
+        let cases: [(&str, u16, u16, MouseTarget); 10] = [
             (
                 "the tab row",
                 3,
@@ -1914,7 +1945,7 @@ mod tests {
                 3,
                 MouseTarget::Pane {
                     pane: PaneId::new(1),
-                    at: Point::new(2, 1),
+                    at: Point::new(1, 1),
                 },
             ),
             (
@@ -1927,10 +1958,36 @@ mod tests {
                 },
             ),
             (
-                "the gutter between them",
+                "the frame gutter between them",
+                9,
+                4,
+                MouseTarget::Chrome(ChromeTarget::Frame {
+                    pane: PaneId::new(1),
+                }),
+            ),
+            (
+                "the neighbouring frame gutter",
                 10,
                 4,
-                MouseTarget::Chrome(ChromeTarget::Gutter),
+                MouseTarget::Chrome(ChromeTarget::Frame {
+                    pane: PaneId::new(2),
+                }),
+            ),
+            (
+                "an outer side frame",
+                19,
+                4,
+                MouseTarget::Chrome(ChromeTarget::Frame {
+                    pane: PaneId::new(2),
+                }),
+            ),
+            (
+                "a bottom frame",
+                4,
+                8,
+                MouseTarget::Chrome(ChromeTarget::Frame {
+                    pane: PaneId::new(1),
+                }),
             ),
             (
                 "the status bar",
@@ -2038,7 +2095,7 @@ mod tests {
             route,
             MouseRoute::Application(MouseEvent {
                 pane: PaneId::new(1),
-                at: Point::new(2, 1),
+                at: Point::new(1, 1),
                 kind: MouseKind::Press(MouseButton::Left),
                 mods: MouseMods::NONE,
             }),
@@ -2066,7 +2123,14 @@ mod tests {
                     col: 4,
                 },
             ),
-            ("the gutter", 10, 4, ChromeTarget::Gutter),
+            (
+                "the frame gutter",
+                9,
+                4,
+                ChromeTarget::Frame {
+                    pane: PaneId::new(1),
+                },
+            ),
             ("the status bar", 7, 9, ChromeTarget::StatusBar { col: 7 }),
             ("off screen", 40, 40, ChromeTarget::Outside),
         ];
@@ -2103,7 +2167,7 @@ mod tests {
             route_mouse(&screen(), tracking(MouseTracking::Off), &at(2, 3)),
             MouseRoute::Chrome(ChromeTarget::PaneBody {
                 pane: PaneId::new(1),
-                at: Point::new(2, 1),
+                at: Point::new(1, 1),
             })
         );
     }
@@ -2116,7 +2180,7 @@ mod tests {
             route_mouse(&screen(), tracking(MouseTracking::Motion), &shifted),
             MouseRoute::Chrome(ChromeTarget::PaneBody {
                 pane: PaneId::new(1),
-                at: Point::new(2, 1),
+                at: Point::new(1, 1),
             })
         );
     }
@@ -2145,17 +2209,17 @@ mod tests {
     /// so both kinds of divider exist at once:
     ///
     /// ```text
-    ///  col 10       vertical divider (the one-cell gutter)
-    ///  row 5        horizontal divider, which is pane 3's header row
+    ///  cols 9..=10  vertical divider (the adjacent frame gutters)
+    ///  rows 4..=5   horizontal divider (the adjacent frame gutters)
     /// ```
     fn stacked() -> ScreenLayout {
         ScreenLayout::new(Size::new(20, 10))
             .tab_row(0)
             .status_row(9)
             .focus(Some(PaneId::new(1)))
-            .pane(PaneArea::new(PaneId::new(1), 0, 2, Size::new(10, 7)))
-            .pane(PaneArea::new(PaneId::new(2), 11, 2, Size::new(9, 3)))
-            .pane(PaneArea::new(PaneId::new(3), 11, 6, Size::new(9, 3)))
+            .pane(PaneArea::new(PaneId::new(1), 1, 2, Size::new(8, 6)))
+            .pane(PaneArea::new(PaneId::new(2), 11, 2, Size::new(8, 2)))
+            .pane(PaneArea::new(PaneId::new(3), 11, 6, Size::new(8, 2)))
     }
 
     fn kind(kind: MouseKind, col: u16, row: u16) -> MouseReport {
@@ -2171,7 +2235,7 @@ mod tests {
     fn a_divider_is_found_from_the_pane_rectangles_on_either_side_of_it() {
         let screen = stacked();
         assert_eq!(
-            screen.divider(10, 4),
+            screen.divider(9, 3),
             Some(Divider {
                 pane: PaneId::new(1),
                 dir: Direction::Horizontal,
@@ -2179,7 +2243,7 @@ mod tests {
             "the gutter column names the pane on its left"
         );
         assert_eq!(
-            screen.divider(13, 5),
+            screen.divider(13, 4),
             Some(Divider {
                 pane: PaneId::new(2),
                 dir: Direction::Vertical,
@@ -2315,10 +2379,10 @@ mod tests {
                 "an unfocused pane's body",
                 ChromeTarget::PaneBody {
                     pane: PaneId::new(2),
-                    at: Point::new(1, 2),
+                    at: Point::new(1, 1),
                 },
                 12,
-                4,
+                3,
                 Some(ChromeAction::Focus(PaneId::new(2))),
             ),
             (

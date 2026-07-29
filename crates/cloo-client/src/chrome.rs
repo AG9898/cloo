@@ -569,6 +569,53 @@ pub fn header_span(at: Point, chrome: &PaneChrome, width: u16, options: ChromeOp
     Span::new(at, header_cells(chrome, width, options))
 }
 
+/// Builds the pane's complete top frame edge.
+///
+/// The header occupies the edge between the two corners, so this adds no
+/// second title row. The returned width is `body_width + 2`.
+#[must_use]
+pub fn top_frame_cells(chrome: &PaneChrome, body_width: u16, options: ChromeOptions) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(usize::from(body_width).saturating_add(2));
+    cells.push(frame_cell('┌', chrome.focused, options));
+    cells.extend(header_cells(chrome, body_width, options));
+    cells.push(frame_cell('┐', chrome.focused, options));
+    cells
+}
+
+/// Builds one vertical pane-frame edge cell.
+#[must_use]
+pub fn side_frame_cell(focused: bool, options: ChromeOptions) -> Cell {
+    frame_cell('│', focused, options)
+}
+
+/// Builds the pane's complete bottom frame edge.
+#[must_use]
+pub fn bottom_frame_cells(focused: bool, body_width: u16, options: ChromeOptions) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(usize::from(body_width).saturating_add(2));
+    cells.push(frame_cell('└', focused, options));
+    cells.extend(std::iter::repeat_n(
+        frame_cell('─', focused, options),
+        usize::from(body_width),
+    ));
+    cells.push(frame_cell('┘', focused, options));
+    cells
+}
+
+/// One cell of a pane's visible side or corner treatment.
+fn frame_cell(ch: char, focused: bool, options: ChromeOptions) -> Cell {
+    let mut cell = Cell {
+        ch,
+        fg: if focused { ACCENT } else { BORDER },
+        bg: FRAME,
+        attrs: CellAttrs::NONE,
+    };
+    cell = options.theme.map_storm_cell(cell);
+    if !focused && options.dim_unfocused {
+        cell = dim_cell_with_theme(cell, options.theme);
+    }
+    cell
+}
+
 /// Appends `text` as styled cells over the chrome surface.
 fn push_str(cells: &mut Vec<Cell>, text: &str, fg: Color, attrs: CellAttrs) {
     for ch in text.chars() {

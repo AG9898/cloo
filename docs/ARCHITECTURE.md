@@ -334,11 +334,18 @@ cannot drift.
 `Session::resize` is why the serialization matters. Resize is a three-way race between the grid,
 the child's `TIOCSWINSZ`, and the application's own `SIGWINCH` handling, and the only way to
 reason about it is for one actor to do the halves in a fixed order. It runs **one layout pass** —
-`Layout::resolve` — and drives every pane's geometry from its output, so the rect a client is told
-about and the `winsize` its child is given cannot come from two different computations. Within a
-pane, `PtyReactor::resize` keeps the grid-then-ioctl order. A degenerate area is ignored rather
+`Layout::resolve` — and, for daemon-owned attached sessions, applies the fixed one-cell pane-frame
+inset once to that result. The same interior rectangles drive the wire snapshot and every child's
+`winsize`, so frame cells can never become PTY cells and the two answers cannot disagree. The
+in-process one-pane launcher requests the unframed session form and retains its full geometry.
+Within a pane, `PtyReactor::resize` keeps the grid-then-ioctl order. A degenerate area is ignored rather
 than refused: a client that briefly reports zero rows mid-drag has no bearing on a child that is
 running fine, and refusing would turn a cosmetic glitch into a dead session.
+
+Protocol v12 makes the attached-session `PaneRect` projection explicitly interior geometry: its
+position and size name the child grid after the daemon's frame inset, never the surrounding client
+chrome. Older clients interpreted those cells as the whole pane treatment, so the semantic change
+is handshake-gated even though the serialized fields themselves did not change.
 
 Output flows back as a `SessionEvent`. `Output` is a *level*, not an edge — at most one is ever
 queued, so a session producing bytes faster than anyone reads them coalesces into a single pending
@@ -545,15 +552,17 @@ own origin, because a header or a status row belongs to the client alone and can
 while pane *contents* always come from a validated `Grid` at column zero. Keeping chrome on its own
 path is what stops client-composed cells from ever being mistaken for server-owned ones.
 
-`compose_frame` (M6-05, expanded in M9) assembles the whole attached picture into those spans from
+`compose_frame` (M6-05, expanded in M9-10) assembles the whole attached picture into those spans from
 one already-resolved layout. The tab row owns row zero and the status bar owns the last row — fixed
 edges, not guessed offsets — and every visible pane's grid drops inside its fully framed
 `PaneArea`. `PaneArea` is the *same* geometry the mouse hit-tester answers against, including frame
 edges and gutters, so the frame a user sees and the map a click is resolved through cannot drift
 apart. Each pane arrives as a `FramePane`: the resolved area plus the two things only the client
 holds, its cached `Grid` and the `PaneChrome` its frame reads from. Bodies come back through the
-one-place theme/dimming policy; complete frame edges, tabs, status, attention, and transient visual
-layers come from chrome helpers. The result is a pure `Vec<Span>` the render loop draws, so
+one-place theme/dimming policy; the header fills the top frame between its corners, side cells and
+the bottom edge remain visible, and the complete focused frame uses accent while an unfocused frame
+and body follow the client's dimming preference. Tabs, status, attention, and transient visual
+layers also come from chrome helpers. The result is a pure `Vec<Span>` the render loop draws, so
 composition never touches a descriptor and the renderer stays the only place bytes are produced.
 
 #### Chrome
@@ -1233,7 +1242,8 @@ nothing about PTYs or rendering.
 first time anyone rebuilds mid-session. A clean "version mismatch, reattach" beats a protocol
 desync that presents as a rendering bug.
 
-`PROTOCOL_VERSION` lives in `cloo-proto` and **must be bumped on every change to a wire type.**
+`PROTOCOL_VERSION` lives in `cloo-proto` and **must be bumped on every change to a wire type or
+the meaning of one of its fields.**
 `Attach` carries the client's version and `Hello` echoes the server's, so either side can catch
 a mismatch before interpreting a single message. `check_version` returns
 `ProtoError::VersionMismatch`, whose `Display` output is the user-facing reattach message; the

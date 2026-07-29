@@ -10,9 +10,10 @@
 //! three-way race between the grid, the child's `TIOCSWINSZ`, and the
 //! application's own `SIGWINCH` handling, and the only way to reason about it
 //! is for one actor to do both halves in a fixed order. [`Session::resize`]
-//! runs **one layout pass** — `Layout::resolve` — and drives every pane's
-//! geometry from its output, so the rect a client is told about and the
-//! `winsize` the child is given can never come from two different computations.
+//! runs **one layout pass** — `Layout::resolve` followed by the fixed pane-frame
+//! inset — and drives every pane's geometry from its output, so the rect a
+//! client is told about and the `winsize` the child is given can never come
+//! from two different computations.
 //!
 //! Output flows the other way as [`SessionEvent`]. `Output` is a *level*, not
 //! an edge: at most one is ever queued, and a session producing bytes faster
@@ -82,6 +83,9 @@ use crate::pty::{PaneSnapshot, PtyConfig, PtyError, PtyReactor, Pump};
 /// enough that a wedged session applies backpressure instead of growing without
 /// bound.
 const COMMAND_QUEUE: usize = 64;
+
+/// Cells reserved on every side of a pane allocation for client-drawn chrome.
+const PANE_FRAME_CELLS: u16 = 1;
 
 /// The share of a pane a split leaves with the pane that was split.
 ///
@@ -947,6 +951,8 @@ pub struct Session {
     /// tab is active.
     model: SessionModel,
     area: Size,
+    /// Whether daemon clients reserve a one-cell frame around each PTY.
+    framed: bool,
     /// What belongs to the *session* rather than to a profile: the environment
     /// every pane inherits and a fallback geometry. A [`Launch`] is applied over
     /// it to produce one pane's configuration.
@@ -990,10 +996,36 @@ impl Session {
         pane: PaneId,
         launch: Launch,
     ) -> Result<SpawnedSession, PtyError> {
+        Self::spawn_with_frame(base, pane, launch, false)
+    }
+
+    /// Launches a daemon-owned session whose clients draw pane frames.
+    ///
+    /// As [`Self::spawn`], but every PTY and wire rectangle is the interior of
+    /// its one-cell frame.
+    pub fn spawn_framed(
+        base: &PtyConfig,
+        pane: PaneId,
+        launch: Launch,
+    ) -> Result<SpawnedSession, PtyError> {
+        Self::spawn_with_frame(base, pane, launch, true)
+    }
+
+    fn spawn_with_frame(
+        base: &PtyConfig,
+        pane: PaneId,
+        launch: Launch,
+        framed: bool,
+    ) -> Result<SpawnedSession, PtyError> {
         let config = launch.configure(base);
+        let area = cloo_core::grid::wire_size(config.term_size());
+        let config = if framed {
+            config.wire_size(framed_size(area))?
+        } else {
+            config
+        };
         let reactor = PtyReactor::spawn(&config)?;
         let child_id = reactor.child_id();
-        let area = cloo_core::grid::wire_size(config.term_size());
 
         let (commands, command_rx) = mpsc::channel(COMMAND_QUEUE);
         // Capacity one on purpose: `Output` is a level, so a second one adds
@@ -1016,6 +1048,7 @@ impl Session {
                 pane,
             ),
             area,
+            framed,
             config: base.clone(),
             default_launch: launch,
             ids: cloo_core::PaneIdAllocator::resuming_after(pane),
@@ -1371,7 +1404,14 @@ impl Session {
     /// for a program that only looks once, a lasting wrong answer.
     fn spawn_pane(&self, pane: PaneId, launch: &Launch) -> Result<Pane, PtyError> {
         let size = match self.active_tab().layout().rect_of(pane, self.area) {
-            Some(rect) => TermSize::new(rect.size.cols, rect.size.rows)?,
+            Some(rect) => {
+                let size = if self.framed {
+                    framed_size(rect.size)
+                } else {
+                    rect.size
+                };
+                TermSize::new(size.cols, size.rows)?
+            }
             // Unreachable: the pane was resolved a moment ago.
             None => self.config.term_size(),
         };
@@ -1496,8 +1536,13 @@ impl Session {
     /// and keeps pumping it even while another tab is active.
     fn new_tab(&mut self) -> Result<TabId, PaneError> {
         let pane_id = self.ids.peek();
-        let size = TermSize::new(self.area.cols, self.area.rows)
-            .unwrap_or_else(|_| self.config.term_size());
+        let interior = if self.framed {
+            framed_size(self.area)
+        } else {
+            self.area
+        };
+        let size =
+            TermSize::new(interior.cols, interior.rows).unwrap_or_else(|_| self.config.term_size());
         let config = self
             .default_launch
             .configure(&self.config.clone().size(size));
@@ -1887,7 +1932,7 @@ impl Session {
     /// nowhere else, so the rect a client is told about and the winsize its
     /// child is given cannot disagree.
     fn apply_geometry(&mut self) -> Result<(), PtyError> {
-        let rects = self.active_tab().layout().resolve(self.area);
+        let rects = self.resolved_panes();
         for rect in rects {
             // A pane squeezed to nothing by a shrunken area keeps its last
             // usable geometry; the ratios are still there when it grows back.
@@ -1911,8 +1956,8 @@ impl Session {
     /// identity for a pane that is not on screen.
     fn snapshot(&self) -> SessionSnapshot {
         let tab = self.model.active();
+        let panes = self.resolved_panes();
         let active = self.active_tab();
-        let panes = active.layout().resolve(self.area);
         let metas = panes
             .iter()
             .filter_map(|rect| {
@@ -1945,6 +1990,16 @@ impl Session {
                 .focused_pane()
                 .map_or_else(PaneSnapshot::default, |pane| pane.reactor.snapshot()),
             modes: self.modes(),
+        }
+    }
+
+    /// The one geometry projection used for both PTYs and client snapshots.
+    fn resolved_panes(&self) -> Vec<PaneRect> {
+        let rects = self.active_tab().layout().resolve(self.area);
+        if self.framed {
+            framed_panes(rects)
+        } else {
+            rects
         }
     }
 
@@ -2280,6 +2335,32 @@ pub fn usable(area: Size) -> bool {
     area.cols > 0 && area.rows > 0
 }
 
+/// Converts layout allocations into the interior grids children actually own.
+///
+/// The ratio tree still resolves the entire session rectangle. Reserving one
+/// cell on every side here keeps chrome out of PTY geometry while preserving
+/// the invariant that snapshots and `TIOCSWINSZ` use the same rectangles.
+fn framed_panes(rects: Vec<PaneRect>) -> Vec<PaneRect> {
+    rects
+        .into_iter()
+        .map(|rect| PaneRect {
+            pane: rect.pane,
+            x: rect.x.saturating_add(PANE_FRAME_CELLS),
+            y: rect.y.saturating_add(PANE_FRAME_CELLS),
+            size: framed_size(rect.size),
+        })
+        .collect()
+}
+
+/// The child grid inside one complete one-cell pane frame.
+const fn framed_size(size: Size) -> Size {
+    let edges = PANE_FRAME_CELLS.saturating_mul(2);
+    Size::new(
+        size.cols.saturating_sub(edges),
+        size.rows.saturating_sub(edges),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Encoding input for a pane's application
 // ---------------------------------------------------------------------------
@@ -2480,6 +2561,21 @@ mod tests {
         assert_eq!(rects.len(), 1);
         assert_eq!(rects[0].size, Size::new(100, 40));
         assert_eq!((rects[0].x, rects[0].y), (0, 0));
+    }
+
+    #[test]
+    fn framed_geometry_gives_the_child_only_the_interior_cells() {
+        let layout = Layout::new(PaneId::new(1));
+        let rects = framed_panes(layout.resolve(Size::new(100, 40)));
+        assert_eq!(
+            rects,
+            vec![PaneRect {
+                pane: PaneId::new(1),
+                x: 1,
+                y: 1,
+                size: Size::new(98, 38),
+            }]
+        );
     }
 
     #[test]

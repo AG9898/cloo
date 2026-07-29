@@ -30,8 +30,8 @@ use cloo_proto::{
 };
 
 use crate::chrome::{
-    AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, body_span, header_span, status_bar_span,
-    tab_row_span,
+    AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, body_span, bottom_frame_cells,
+    side_frame_cell, status_bar_span, tab_row_span, top_frame_cells,
 };
 use crate::input::PaneArea;
 use crate::motion::{MotionKind, Phase, phase_cell};
@@ -275,23 +275,45 @@ pub fn compose_frame(
 
     for pane in panes {
         let area = pane.area;
-        if area.header && area.y > 0 {
-            spans.push(header_span(
-                Point::new(area.x, area.y - 1),
-                &pane.header,
-                area.size.cols,
-                options,
+        if area.framed && area.y > 0 {
+            spans.push(Span::new(
+                Point::new(area.x.saturating_sub(1), area.y - 1),
+                top_frame_cells(&pane.header, area.size.cols, options),
             ));
         }
         for row in 0..pane.grid.size().rows {
             let Some(cells) = pane.grid.row(row) else {
                 continue;
             };
+            if area.framed {
+                spans.push(Span::new(
+                    Point::new(area.x.saturating_sub(1), area.y.saturating_add(row)),
+                    vec![side_frame_cell(pane.header.focused, options)],
+                ));
+            }
             spans.push(body_span(
                 Point::new(area.x, area.y.saturating_add(row)),
                 cells,
                 pane.header.focused,
                 options,
+            ));
+            if area.framed {
+                spans.push(Span::new(
+                    Point::new(
+                        area.x.saturating_add(area.size.cols),
+                        area.y.saturating_add(row),
+                    ),
+                    vec![side_frame_cell(pane.header.focused, options)],
+                ));
+            }
+        }
+        if area.framed {
+            spans.push(Span::new(
+                Point::new(
+                    area.x.saturating_sub(1),
+                    area.y.saturating_add(area.size.rows),
+                ),
+                bottom_frame_cells(pane.header.focused, area.size.cols, options),
             ));
         }
     }
@@ -1339,16 +1361,16 @@ mod tests {
     fn compose_lays_every_pane_grid_into_its_rect_with_chrome_around_it() {
         let size = Size::new(20, 6);
         let tabs = one_tab();
-        let left_grid = filled_grid(Size::new(9, 3), 'a');
-        let right_grid = filled_grid(Size::new(9, 3), 'b');
+        let left_grid = filled_grid(Size::new(8, 2), 'a');
+        let right_grid = filled_grid(Size::new(8, 2), 'b');
         let panes = [
             FramePane::new(
-                PaneArea::new(PaneId::new(1), 0, 2, Size::new(9, 3)),
+                PaneArea::new(PaneId::new(1), 1, 2, Size::new(8, 2)),
                 &left_grid,
                 PaneChrome::new(1, "one").focused(true),
             ),
             FramePane::new(
-                PaneArea::new(PaneId::new(2), 11, 2, Size::new(9, 3)),
+                PaneArea::new(PaneId::new(2), 11, 2, Size::new(8, 2)),
                 &right_grid,
                 PaneChrome::new(2, "two").attention(Attention::NeedsInput),
             ),
@@ -1365,9 +1387,9 @@ mod tests {
             ChromeOptions::default(),
         );
 
-        // Tab row, then pane one (header + three body rows), then pane two, then
-        // the status row: never guessed offsets, one span per drawn thing.
-        assert_eq!(spans.len(), 1 + (1 + 3) + (1 + 3) + 1);
+        // Tab row, then each complete frame (top, three spans per body row,
+        // bottom), then status. No two spans occupy the same cell.
+        assert_eq!(spans.len(), 1 + (1 + 3 * 2 + 1) * 2 + 1);
 
         // The tab row owns row zero, full width.
         assert_eq!(spans[0].at, Point::new(0, 0));
@@ -1375,15 +1397,20 @@ mod tests {
 
         // Pane one's header sits on the row directly above its grid.
         assert_eq!(spans[1].at, Point::new(0, 1));
-        assert_eq!(text_of(&spans[1].cells), "> 1 one ?");
+        assert_eq!(text_of(&spans[1].cells), "┌> 1 on ?┐");
+        assert_eq!(
+            spans[2].cells[0].fg,
+            crate::theme::Theme::storm().color(crate::theme::ThemeToken::Accent),
+            "focus accents the complete frame, not only its header"
+        );
 
         // Its focused body drops in undimmed at exactly the pane's rect origin.
         // Default child colours resolve on the copied span while the cached
         // grid remains byte-for-byte unchanged.
         let left_before = left_grid.clone();
-        for (offset, span) in spans[2..5].iter().enumerate() {
+        for (offset, span) in [spans[3].clone(), spans[6].clone()].iter().enumerate() {
             let row = u16::try_from(offset).expect("small");
-            assert_eq!(span.at, Point::new(0, 2 + row));
+            assert_eq!(span.at, Point::new(1, 2 + row));
             let source = left_grid.row(row).expect("row exists");
             assert_eq!(
                 span.cells,
@@ -1397,10 +1424,15 @@ mod tests {
         assert_eq!(left_grid, left_before);
 
         // Pane two starts at its own left edge, header above grid.
-        assert_eq!(spans[5].at, Point::new(11, 1));
-        assert!(text_of(&spans[5].cells).contains("two"));
-        assert!(text_of(&spans[5].cells).contains('!'));
-        assert_eq!(spans[6].at, Point::new(11, 2));
+        assert_eq!(spans[9].at, Point::new(10, 1));
+        assert!(text_of(&spans[9].cells).contains("tw"));
+        assert!(text_of(&spans[9].cells).contains('!'));
+        assert_eq!(spans[11].at, Point::new(11, 2));
+        assert_ne!(
+            spans[10].cells[0].fg,
+            crate::theme::Theme::storm().color(crate::theme::ThemeToken::Border),
+            "the unfocused frame follows the dimming preference"
+        );
 
         // The status row owns the last row, full width, and carries the session
         // (in its width-20 short form) and the prefix hint.
@@ -1416,17 +1448,70 @@ mod tests {
     }
 
     #[test]
+    fn nested_frames_cover_every_edge_without_overlapping() {
+        let left = filled_grid(Size::new(8, 6), 'l');
+        let upper = filled_grid(Size::new(8, 2), 'u');
+        let lower = filled_grid(Size::new(8, 2), 'd');
+        let panes = [
+            FramePane::new(
+                PaneArea::new(PaneId::new(1), 1, 2, left.size()),
+                &left,
+                PaneChrome::new(1, "left").focused(true),
+            ),
+            FramePane::new(
+                PaneArea::new(PaneId::new(2), 11, 2, upper.size()),
+                &upper,
+                PaneChrome::new(2, "upper"),
+            ),
+            FramePane::new(
+                PaneArea::new(PaneId::new(3), 11, 6, lower.size()),
+                &lower,
+                PaneChrome::new(3, "lower").attention(Attention::Ready),
+            ),
+        ];
+        let spans = compose_frame(
+            Size::new(20, 10),
+            &one_tab(),
+            SessionId::new(1),
+            &panes,
+            &crate::chrome::AttentionQueue::new(),
+            &crate::chrome::PrefixHint::default(),
+            ChromeOptions::default(),
+        );
+
+        let mut occupied = std::collections::HashSet::new();
+        for span in &spans {
+            for offset in 0..span.cells.len() {
+                let col = span
+                    .at
+                    .col
+                    .saturating_add(u16::try_from(offset).expect("small frame"));
+                assert!(
+                    occupied.insert((col, span.at.row)),
+                    "two spans overlap at ({col}, {})",
+                    span.at.row
+                );
+            }
+        }
+        assert_eq!(
+            occupied.len(),
+            20 * 10,
+            "the nested frame leaves no stale background cells"
+        );
+    }
+
+    #[test]
     fn an_unfocused_pane_body_is_dimmed_and_a_focused_one_is_not() {
         let grid = filled_grid(Size::new(4, 1), 'x');
         let before = grid.clone();
         let make = |focused: bool| {
             let panes = [FramePane::new(
-                PaneArea::new(PaneId::new(1), 0, 1, Size::new(4, 1)),
+                PaneArea::new(PaneId::new(1), 1, 1, Size::new(4, 1)),
                 &grid,
                 PaneChrome::new(1, "p").focused(focused),
             )];
             compose_frame(
-                Size::new(4, 3),
+                Size::new(6, 4),
                 &[],
                 SessionId::new(1),
                 &panes,
@@ -1435,7 +1520,6 @@ mod tests {
                 ChromeOptions::default(),
             )
         };
-        // With no tabs the frame is header + body + status; the body is index 1.
         let focused = make(true);
         let unfocused = make(false);
         let themed = grid
@@ -1445,10 +1529,18 @@ mod tests {
             .copied()
             .map(|cell| crate::theme::Theme::storm().map_child_cell(cell))
             .collect::<Vec<_>>();
-        assert_eq!(focused[1].cells, themed, "a focused body is not dimmed");
-        assert_ne!(unfocused[1].cells, themed, "an unfocused body recedes");
+        let focused_body = focused
+            .iter()
+            .find(|span| span.at == Point::new(1, 1) && span.cells.len() == 4)
+            .expect("focused body");
+        let unfocused_body = unfocused
+            .iter()
+            .find(|span| span.at == Point::new(1, 1) && span.cells.len() == 4)
+            .expect("unfocused body");
+        assert_eq!(focused_body.cells, themed, "a focused body is not dimmed");
+        assert_ne!(unfocused_body.cells, themed, "an unfocused body recedes");
         assert_eq!(
-            text_of(&unfocused[1].cells),
+            text_of(&unfocused_body.cells),
             "xxxx",
             "dimming changes colour, never the text"
         );
