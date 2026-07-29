@@ -31,6 +31,7 @@ use cloo_client::input::{
     ChromeMouse, MouseReport, MouseRoute, ScreenLayout, WHEEL_LINES, route_mouse,
 };
 use cloo_client::renderer::Grid;
+use cloo_client::session_catalog::discover_sessions_from;
 use cloo_client::theme::Theme;
 use cloo_core::pane::{PaneName, TaskLabel, WorkingDir};
 use cloo_core::profile::{AdapterId, Profile, ProfileCommand};
@@ -772,6 +773,147 @@ async fn inspect_session_rejects_stale_and_malformed_peers_without_harming_clien
         UnixStream::connect(&socket).await.is_err(),
         "a disappeared session must fail as a connection, not stale data"
     );
+}
+
+#[tokio::test]
+async fn session_catalog_verifies_sockets_orders_summaries_and_bounds_slow_peers() {
+    let dir = TempDir::new("session-catalog");
+    let runtime = dir.0.clone();
+    let socket_dir = runtime.join("cloo");
+    fs::create_dir_all(&socket_dir).expect("the runtime socket directory is creatable");
+
+    // Filenames intentionally sort opposite to daemon-owned names. The
+    // catalog must order the verified summaries, never infer identity from a
+    // directory entry.
+    let zeta_socket = socket_dir.join("a.sock");
+    let alpha_socket = socket_dir.join("z.sock");
+    let zeta = spawn_named_daemon(&zeta_socket, "zeta", "read _; exit 0");
+    let alpha = spawn_named_daemon(&alpha_socket, "alpha", "read _; exit 0");
+
+    fs::write(socket_dir.join("forged.sock"), b"not a socket")
+        .expect("the ordinary file is creatable");
+    std::os::unix::fs::symlink(&alpha_socket, socket_dir.join("linked.sock"))
+        .expect("the socket symlink is creatable");
+    let stale_path = socket_dir.join("stale.sock");
+    drop(
+        std::os::unix::net::UnixListener::bind(&stale_path)
+            .expect("a stale socket file is creatable"),
+    );
+
+    // This candidate accepts the versioned request and then says nothing. Its
+    // private deadline must not keep the verified daemons out of the result.
+    let slow_path = socket_dir.join("slow.sock");
+    let slow_listener =
+        tokio::net::UnixListener::bind(&slow_path).expect("the slow candidate binds");
+    let slow = tokio::spawn(async move {
+        let (stream, _) = slow_listener
+            .accept()
+            .await
+            .expect("the catalog connects to the slow candidate");
+        let mut conn = FrameStream::new(stream);
+        let request = conn
+            .recv::<ClientMessage>()
+            .await
+            .expect("the slow candidate reads the request");
+        assert!(matches!(
+            request,
+            Some(ClientMessage::InspectSession {
+                protocol_version: PROTOCOL_VERSION
+            })
+        ));
+        std::future::pending::<()>().await;
+    });
+
+    let entries = tokio::time::timeout(
+        PATIENCE,
+        discover_sessions_from(
+            None,
+            Some(runtime.as_os_str()),
+            999,
+            Duration::from_millis(50),
+        ),
+    )
+    .await
+    .expect("one slow candidate cannot hang discovery")
+    .expect("the runtime directory can be read");
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.summary.name.as_str())
+            .collect::<Vec<_>>(),
+        ["alpha", "zeta"]
+    );
+    assert_eq!(
+        entries
+            .iter()
+            .map(|entry| entry.summary.clients)
+            .collect::<Vec<_>>(),
+        [0, 0],
+        "inspection must not attach either catalog client"
+    );
+    assert_eq!(entries[0].socket, alpha_socket);
+    assert_eq!(entries[1].socket, zeta_socket);
+
+    slow.abort();
+    let _ = slow.await;
+
+    for socket in [&alpha_socket, &zeta_socket] {
+        client(socket)
+            .await
+            .send_input(b"\n".to_vec())
+            .await
+            .expect("cleanup input reaches the session");
+    }
+    for daemon in [alpha, zeta] {
+        tokio::time::timeout(PATIENCE, daemon)
+            .await
+            .expect("the daemon exits")
+            .expect("the daemon task does not panic")
+            .expect("the daemon stays healthy");
+    }
+}
+
+#[tokio::test]
+async fn session_catalog_socket_override_is_one_verified_candidate() {
+    let dir = TempDir::new("session-catalog-override");
+    let runtime = dir.0.clone();
+    let socket_dir = runtime.join("cloo");
+    fs::create_dir_all(&socket_dir).expect("the runtime socket directory is creatable");
+    let selected_socket = dir.0.join("custom-endpoint");
+    let ignored_socket = socket_dir.join("ignored.sock");
+    let selected = spawn_named_daemon(&selected_socket, "selected", "read _; exit 0");
+    let ignored = spawn_named_daemon(&ignored_socket, "ignored", "read _; exit 0");
+
+    let entries = discover_sessions_from(
+        Some(selected_socket.as_os_str()),
+        Some(runtime.as_os_str()),
+        999,
+        Duration::from_millis(100),
+    )
+    .await
+    .expect("the override needs no directory scan");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].socket, selected_socket);
+    assert_eq!(entries[0].summary.name, "selected");
+    assert_eq!(
+        entries[0].summary.clients, 0,
+        "the override is inspected, not attached"
+    );
+
+    for socket in [&selected_socket, &ignored_socket] {
+        client(socket)
+            .await
+            .send_input(b"\n".to_vec())
+            .await
+            .expect("cleanup input reaches the session");
+    }
+    for daemon in [selected, ignored] {
+        tokio::time::timeout(PATIENCE, daemon)
+            .await
+            .expect("the daemon exits")
+            .expect("the daemon task does not panic")
+            .expect("the daemon stays healthy");
+    }
 }
 
 #[test]

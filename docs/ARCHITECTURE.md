@@ -1157,6 +1157,20 @@ from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake
   includes a row only after that socket answers the versioned inspection handshake. A socket
   filename or path alone is never treated as a live session.
 
+M9-09 implements that discovery in `cloo-client::session_catalog`. With no override it enumerates
+only direct entries in `$XDG_RUNTIME_DIR/cloo`, or `/tmp/cloo-$UID` under the existing fallback,
+and uses `symlink_metadata` to admit socket objects without following symlinks. Regular files,
+directories, symlinks, stale sockets, control sockets, and arbitrary listeners can therefore be
+present without becoming catalog rows: every candidate must answer
+`InspectSession { protocol_version }` with a `SessionSummary` before its private 500ms deadline.
+Candidates are inspected concurrently so one silent endpoint cannot serially delay the rest, and
+verified entries are ordered by daemon-reported name with socket path as the deterministic tie
+breaker. A non-empty `CLOO_SOCKET` suppresses directory enumeration and is treated as exactly one
+untrusted candidate, preserving isolated development while still requiring the same handshake.
+The inspection connection sends no size or capabilities, enters no client table or damage
+subscription, and rejects attach, damage, or other replies without interpreting them as catalog
+data.
+
 There is still one daemon per session and no new global authority. The session switcher composes
 the independently verified summaries client-side and attaches through the selected session's
 ordinary socket. Inspection creates no client attachment, does not resize a session, and exposes

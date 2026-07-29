@@ -29,8 +29,8 @@ use cloo_core::{Config, Profile, VisualConfig};
 use cloo_proto::{
     Action, AttentionState, ClientMessage, CopyModeState, CursorShape, FrameStream, LayoutSnapshot,
     MouseEvent, PROTOCOL_VERSION, PaneAttention, PaneId, PaneInfo, PaneModes, Point, ProtoError,
-    ServerMessage, SessionId, Size, StreamError, TabSummary, TermCaps, WorkspaceStatus,
-    check_version,
+    ServerMessage, SessionId, SessionSummary, Size, StreamError, TabSummary, TermCaps,
+    WorkspaceStatus, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
@@ -135,6 +135,66 @@ impl From<StreamError> for AttachError {
 impl From<CapsError> for AttachError {
     fn from(value: CapsError) -> Self {
         Self::Capabilities(value)
+    }
+}
+
+/// Everything a read-only session inspection can refuse to do.
+///
+/// Inspection is deliberately separate from [`AttachError`]: it sends no
+/// terminal size or capabilities and never becomes an attached client.
+#[derive(Debug)]
+pub enum InspectError {
+    /// Nothing is listening on the candidate socket.
+    NoDaemon(PathBuf),
+    /// The candidate socket could not be connected to.
+    Connect {
+        /// The candidate path.
+        path: PathBuf,
+        /// The underlying failure.
+        source: io::Error,
+    },
+    /// The peer rejected the versioned inspection.
+    Refused(String),
+    /// The peer answered with something other than a session summary.
+    UnexpectedReply,
+    /// The peer closed before answering.
+    Closed,
+    /// The framed connection failed.
+    Stream(StreamError),
+}
+
+impl fmt::Display for InspectError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoDaemon(path) => {
+                write!(f, "no cloo daemon is listening on {}", path.display())
+            }
+            Self::Connect { path, source } => {
+                write!(f, "could not inspect {}: {source}", path.display())
+            }
+            Self::Refused(reason) => write!(f, "the cloo server refused inspection: {reason}"),
+            Self::UnexpectedReply => {
+                f.write_str("the candidate replied to inspection with something else")
+            }
+            Self::Closed => f.write_str("the candidate closed during inspection"),
+            Self::Stream(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for InspectError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Connect { source, .. } => Some(source),
+            Self::Stream(err) => Some(err),
+            Self::NoDaemon(_) | Self::Refused(_) | Self::UnexpectedReply | Self::Closed => None,
+        }
+    }
+}
+
+impl From<StreamError> for InspectError {
+    fn from(value: StreamError) -> Self {
+        Self::Stream(value)
     }
 }
 
@@ -388,6 +448,57 @@ pub async fn attach(
         }
     })?;
     handshake(FrameStream::new(stream), size, term_caps, session).await
+}
+
+/// Inspects one untrusted socket candidate without attaching to it.
+///
+/// The request carries this build's protocol version and no terminal
+/// capabilities or geometry. Only a [`ServerMessage::SessionSummary`] is
+/// accepted; attach frames, damage, and every other reply are rejected without
+/// being interpreted as session data.
+///
+/// # Errors
+///
+/// Returns [`InspectError::NoDaemon`] for a stale or vanished socket, or the
+/// specific connection, framing, refusal, or reply-shape failure.
+pub async fn inspect(path: &Path) -> Result<SessionSummary, InspectError> {
+    let stream = UnixStream::connect(path)
+        .await
+        .map_err(|source| match source.kind() {
+            io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound => {
+                InspectError::NoDaemon(path.to_owned())
+            }
+            _ => InspectError::Connect {
+                path: path.to_owned(),
+                source,
+            },
+        })?;
+    inspect_handshake(FrameStream::new(stream)).await
+}
+
+/// Performs a read-only inspection over an already-connected transport.
+///
+/// Split out from [`inspect`] so the exact one-request/one-summary exchange is
+/// unit-testable without a filesystem socket.
+///
+/// # Errors
+///
+/// Returns the peer's refusal, a framing failure, a close before the reply, or
+/// [`InspectError::UnexpectedReply`] for anything but a session summary.
+pub async fn inspect_handshake<T: AsyncRead + AsyncWrite + Unpin>(
+    mut conn: FrameStream<T>,
+) -> Result<SessionSummary, InspectError> {
+    conn.send(&ClientMessage::InspectSession {
+        protocol_version: PROTOCOL_VERSION,
+    })
+    .await?;
+
+    match conn.recv::<ServerMessage>().await? {
+        Some(ServerMessage::SessionSummary(summary)) => Ok(summary),
+        Some(ServerMessage::Refused { reason }) => Err(InspectError::Refused(reason)),
+        Some(_) => Err(InspectError::UnexpectedReply),
+        None => Err(InspectError::Closed),
+    }
 }
 
 /// Performs the attach handshake over an already-connected transport.
@@ -1504,6 +1615,68 @@ mod tests {
         assert_eq!(attached.size(), Size::new(80, 24));
         assert_eq!(attached.tabs().len(), 1);
         scripted.await.expect("the scripted server finishes");
+    }
+
+    #[tokio::test]
+    async fn session_catalog_inspection_sends_only_the_versioned_read_only_request() {
+        let (client, server) = duplex(4096);
+        let scripted = tokio::spawn(async move {
+            let mut conn = FrameStream::new(server);
+            let request = conn
+                .recv::<ClientMessage>()
+                .await
+                .expect("the inspection arrives");
+            assert_eq!(
+                request,
+                Some(ClientMessage::InspectSession {
+                    protocol_version: PROTOCOL_VERSION,
+                }),
+                "inspection must carry no size, capabilities, or attachment"
+            );
+            conn.send(&ServerMessage::SessionSummary(SessionSummary {
+                name: "agents".to_owned(),
+                tabs: 2,
+                panes: 4,
+                clients: 1,
+                uptime_secs: 9,
+            }))
+            .await
+            .expect("the summary sends");
+        });
+
+        let summary = inspect_handshake(FrameStream::new(client))
+            .await
+            .expect("a summary completes inspection");
+        assert_eq!(summary.name, "agents");
+        assert_eq!((summary.tabs, summary.panes, summary.clients), (2, 4, 1));
+        scripted.await.expect("the scripted peer finishes");
+    }
+
+    #[tokio::test]
+    async fn session_catalog_inspection_rejects_attach_and_grid_replies() {
+        for reply in [
+            hello(),
+            ServerMessage::Damage {
+                pane: PaneId::new(1),
+                rows: Vec::new(),
+            },
+        ] {
+            let (client, server) = duplex(4096);
+            let scripted = tokio::spawn(async move {
+                let mut conn = FrameStream::new(server);
+                let _request = conn
+                    .recv::<ClientMessage>()
+                    .await
+                    .expect("the inspection arrives");
+                conn.send(&reply).await.expect("the wrong reply sends");
+            });
+
+            let err = inspect_handshake(FrameStream::new(client))
+                .await
+                .expect_err("inspection must never become an attach or grid reader");
+            assert!(matches!(err, InspectError::UnexpectedReply), "got {err}");
+            scripted.await.expect("the scripted peer finishes");
+        }
     }
 
     #[tokio::test]
