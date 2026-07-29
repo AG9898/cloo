@@ -11,22 +11,22 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io;
 use std::process::ExitStatus;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cloo_core::layout::Side;
 use cloo_core::pane::WorkingDir;
 use cloo_core::{AdapterId, Config};
 use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, ClientId, ClientMessage,
-    ClipboardTarget, Direction, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size,
-    StreamError, WorkspaceStatus,
+    ClipboardTarget, Direction, OuterTerminalEffect, PaneId, ServerMessage, SessionId,
+    SessionSummary, Size, StreamError, WorkspaceStatus,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
 use crate::config::{ConfigManager, Reload, ReloadWatch};
-use crate::conn::{self, AttachRequest, Connection};
+use crate::conn::{self, AttachRequest, ClientRequest, Connection};
 use crate::damage::{DamageFrame, DamageTracker};
 use crate::launch::Launch;
 use crate::pty::{PtyConfig, PtyError};
@@ -121,6 +121,10 @@ enum ClientCommand {
         client: ClientId,
         request: AttachRequest,
         reply: oneshot::Sender<ClientStart>,
+    },
+    /// A version-checked inspection needs one current read-only summary.
+    Inspect {
+        reply: oneshot::Sender<SessionSummary>,
     },
     /// A normal post-handshake client message.
     Message {
@@ -222,6 +226,8 @@ pub struct Daemon {
     size: Size,
     /// The session name supplied by the process that created this daemon.
     name: String,
+    /// Monotonic origin for the read-only session uptime.
+    started: Instant,
     /// Current geometry reported by every attached client.
     ///
     /// Degenerate sizes remain in this map so the client count stays truthful,
@@ -310,6 +316,7 @@ impl Daemon {
             child_id: spawned.child_id,
             size,
             name,
+            started: Instant::now(),
             client_sizes: BTreeMap::new(),
             published_status: None,
             next_client: 1,
@@ -545,6 +552,20 @@ impl Daemon {
                     snapshot,
                     updates,
                 });
+            }
+            ClientCommand::Inspect { reply } => {
+                // Inspection is advisory. If the session disappears between
+                // accepting the socket and taking this snapshot, dropping the
+                // private reply closes only that inspection connection.
+                if let Ok(snapshot) = self.snapshot().await {
+                    let _ = reply.send(SessionSummary {
+                        name: self.name.clone(),
+                        tabs: u16::try_from(snapshot.tabs.len()).unwrap_or(u16::MAX),
+                        panes: snapshot.pane_count,
+                        clients: u16::try_from(self.client_sizes.len()).unwrap_or(u16::MAX),
+                        uptime_secs: self.started.elapsed().as_secs(),
+                    });
+                }
             }
             ClientCommand::Message { client, message } => match message {
                 ClientMessage::Input(bytes) => self.session()?.input(bytes).await?,
@@ -840,9 +861,29 @@ impl Daemon {
 /// task, but never the coordinator's damage publication or the session actor.
 async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Sender<ClientCommand>) {
     let mut conn = Connection::new(stream);
-    let request = match conn::accept_attach(&mut conn).await {
+    let request = match conn::accept_client(&mut conn).await {
         Ok(request) => request,
         Err(_) => return,
+    };
+
+    if request == ClientRequest::Inspect {
+        let (reply, summary) = oneshot::channel();
+        if commands
+            .send(ClientCommand::Inspect { reply })
+            .await
+            .is_err()
+        {
+            return;
+        }
+        let Ok(summary) = summary.await else {
+            return;
+        };
+        let _ = conn.send(&ServerMessage::SessionSummary(summary)).await;
+        let _ = conn.shutdown().await;
+        return;
+    }
+    let ClientRequest::Attach(request) = request else {
+        return;
     };
 
     let (reply, started) = oneshot::channel();

@@ -1,9 +1,10 @@
 //! One client connection: the handshake, and the snapshot that follows it.
 //!
-//! A connection is worthless until it has been through [`accept_attach`], which
+//! A connection is worthless until it has been through [`accept_client`], which
 //! is the only place the server decides whether a peer is speaking its
 //! protocol. The rule is that nothing is interpreted before the version is
-//! agreed: the first frame must be an [`ClientMessage::Attach`], and any
+//! agreed: the first frame must be an [`ClientMessage::Attach`] or
+//! [`ClientMessage::InspectSession`](cloo_proto::ClientMessage::InspectSession), and any
 //! refusal is sent as [`ServerMessage::Refused`] with a rendered
 //! [`ProtoError`] before the connection is dropped. A client that is told *why*
 //! it was turned away can print something a user can act on; a client that just
@@ -46,13 +47,22 @@ pub struct AttachRequest {
     pub session: Option<SessionId>,
 }
 
+/// A version-checked first frame on a session socket.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClientRequest {
+    /// Join the session and subscribe to its updates.
+    Attach(AttachRequest),
+    /// Read one summary without becoming an attached client.
+    Inspect,
+}
+
 /// Why an attach was refused.
 #[derive(Debug)]
 pub enum AttachRejection {
     /// The peer speaks a different protocol version.
     Version(ProtoError),
-    /// The first frame was something other than an attach.
-    NotAnAttach,
+    /// The first frame was neither an attach nor an inspection.
+    NotAHandshake,
     /// The peer closed before saying anything.
     Closed,
     /// The connection failed while the handshake was in flight.
@@ -63,7 +73,9 @@ impl core::fmt::Display for AttachRejection {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Version(e) => write!(f, "{e}"),
-            Self::NotAnAttach => f.write_str("the first message on a connection must be an attach"),
+            Self::NotAHandshake => {
+                f.write_str("the first message on a connection must be an attach or inspection")
+            }
             Self::Closed => f.write_str("the client closed before attaching"),
             Self::Stream(e) => write!(f, "{e}"),
         }
@@ -75,12 +87,12 @@ impl std::error::Error for AttachRejection {
         match self {
             Self::Version(e) => Some(e),
             Self::Stream(e) => Some(e),
-            Self::NotAnAttach | Self::Closed => None,
+            Self::NotAHandshake | Self::Closed => None,
         }
     }
 }
 
-/// Reads the first frame and validates it as an attach.
+/// Reads the first frame and validates it as an attach or inspection.
 ///
 /// On a version mismatch or a wrong first message, a
 /// [`ServerMessage::Refused`] carrying the rendered reason is sent before the
@@ -90,9 +102,9 @@ impl std::error::Error for AttachRejection {
 ///
 /// Returns the [`AttachRejection`] that was reported to the client, or the
 /// transport failure that prevented reporting one.
-pub async fn accept_attach<T: AsyncRead + AsyncWrite + Unpin>(
+pub async fn accept_client<T: AsyncRead + AsyncWrite + Unpin>(
     conn: &mut Connection<T>,
-) -> Result<AttachRequest, AttachRejection> {
+) -> Result<ClientRequest, AttachRejection> {
     let first = match conn.recv::<ClientMessage>().await {
         Ok(Some(message)) => message,
         Ok(None) => return Err(AttachRejection::Closed),
@@ -107,21 +119,50 @@ pub async fn accept_attach<T: AsyncRead + AsyncWrite + Unpin>(
             session,
         } => match check_version(protocol_version) {
             Ok(()) => {
-                return Ok(AttachRequest {
+                return Ok(ClientRequest::Attach(AttachRequest {
                     size,
                     term_caps,
                     session,
-                });
+                }));
             }
             Err(mismatch) => AttachRejection::Version(mismatch),
         },
-        _ => AttachRejection::NotAnAttach,
+        ClientMessage::InspectSession { protocol_version } => {
+            match check_version(protocol_version) {
+                Ok(()) => return Ok(ClientRequest::Inspect),
+                Err(mismatch) => AttachRejection::Version(mismatch),
+            }
+        }
+        _ => AttachRejection::NotAHandshake,
     };
 
     // Best effort: the peer may already be gone, and the refusal it is being
     // sent is the more useful thing to report either way.
     let _ = refuse(conn, &rejection.to_string()).await;
     Err(rejection)
+}
+
+/// Reads the first frame and accepts only an attach.
+///
+/// Kept as the narrow library entry point for callers that cannot serve
+/// inspection. The daemon uses [`accept_client`] so both handshakes share the
+/// same version gate.
+///
+/// # Errors
+///
+/// Returns the reported rejection, including an inspection where only an
+/// attach was expected.
+pub async fn accept_attach<T: AsyncRead + AsyncWrite + Unpin>(
+    conn: &mut Connection<T>,
+) -> Result<AttachRequest, AttachRejection> {
+    match accept_client(conn).await? {
+        ClientRequest::Attach(request) => Ok(request),
+        ClientRequest::Inspect => {
+            let rejection = AttachRejection::NotAHandshake;
+            let _ = refuse(conn, "this endpoint expected an attach").await;
+            Err(rejection)
+        }
+    }
 }
 
 /// Why a control connection was refused.
@@ -322,6 +363,7 @@ mod tests {
                 title: "api".into(),
                 active: true,
             }],
+            pane_count: 1,
             area: Size::new(2, 1),
             panes: vec![PaneRect {
                 pane,
@@ -427,6 +469,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_matching_inspection_is_accepted_without_attach_metadata() {
+        let (client, server) = duplex(1024);
+        let mut client = Connection::new(client);
+        let mut server = Connection::new(server);
+
+        client
+            .send(&ClientMessage::InspectSession {
+                protocol_version: PROTOCOL_VERSION,
+            })
+            .await
+            .expect("inspection sends");
+
+        let request = accept_client(&mut server)
+            .await
+            .expect("inspection is accepted");
+        assert_eq!(request, ClientRequest::Inspect);
+    }
+
+    #[tokio::test]
+    async fn a_stale_inspection_is_refused_by_the_same_version_gate() {
+        let (client, server) = duplex(1024);
+        let mut client = Connection::new(client);
+        let mut server = Connection::new(server);
+
+        client
+            .send(&ClientMessage::InspectSession {
+                protocol_version: PROTOCOL_VERSION.wrapping_add(1),
+            })
+            .await
+            .expect("inspection sends");
+
+        let err = accept_client(&mut server)
+            .await
+            .expect_err("a stale inspection must be refused");
+        assert!(matches!(err, AttachRejection::Version(_)), "got {err}");
+
+        let reply: Option<ServerMessage> = client.recv().await.expect("a refusal arrives");
+        let Some(ServerMessage::Refused { reason }) = reply else {
+            panic!("expected a refusal, got {reply:?}");
+        };
+        assert!(reason.contains("version mismatch"), "got: {reason}");
+        assert!(reason.contains("reattach"), "got: {reason}");
+    }
+
+    #[tokio::test]
     async fn a_first_message_that_is_not_an_attach_is_refused() {
         let (client, server) = duplex(1024);
         let mut client = Connection::new(client);
@@ -440,13 +527,16 @@ mod tests {
         let err = accept_attach(&mut server)
             .await
             .expect_err("input before attach must be refused");
-        assert!(matches!(err, AttachRejection::NotAnAttach), "got {err}");
+        assert!(matches!(err, AttachRejection::NotAHandshake), "got {err}");
 
         let reply: Option<ServerMessage> = client.recv().await.expect("a refusal arrives");
         let Some(ServerMessage::Refused { reason }) = reply else {
             panic!("expected a refusal, got {reply:?}");
         };
-        assert!(reason.contains("must be an attach"), "got: {reason}");
+        assert!(
+            reason.contains("must be an attach or inspection"),
+            "got: {reason}"
+        );
     }
 
     #[tokio::test]

@@ -240,6 +240,7 @@ mod tests {
                 title: "shell".into(),
                 active: true,
             }],
+            pane_count: 1,
             area: size,
             panes: vec![PaneRect {
                 pane,

@@ -41,7 +41,9 @@ pub use config::{
     ConfigFile, ConfigLoadError, ConfigManager, ConfigPathError, InitialConfig, Reload,
     ReloadWatch, load_from_environment, resolve_config_path,
 };
-pub use conn::{AttachRejection, AttachRequest, Connection, accept_attach};
+pub use conn::{
+    AttachRejection, AttachRequest, ClientRequest, Connection, accept_attach, accept_client,
+};
 pub use daemon::{Daemon, DaemonError};
 pub use damage::{DamageFrame, DamageTracker};
 pub use launch::{Launch, LaunchError, login_shell};

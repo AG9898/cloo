@@ -454,6 +454,11 @@ pub struct SessionSnapshot {
     /// The whole tab bar, in display order. This is projection data: the
     /// session actor remains the sole owner of tab state.
     pub tabs: Vec<TabSummary>,
+    /// How many panes the session holds across every tab.
+    ///
+    /// Unlike [`panes`](Self::panes), this includes panes outside the active
+    /// tab. It is projection metadata for read-only inspection, not geometry.
+    pub pane_count: u16,
     /// The session's area, in cells.
     pub area: Size,
     /// Every visible pane in the active tab and where it sits, from one
@@ -1979,6 +1984,7 @@ impl Session {
         SessionSnapshot {
             tab,
             tabs: self.tab_summaries(),
+            pane_count: u16::try_from(self.panes.len()).unwrap_or(u16::MAX),
             area: self.area,
             panes,
             metas,

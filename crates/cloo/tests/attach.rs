@@ -38,7 +38,8 @@ use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, AttentionSource,
     AttentionState, ClientMessage, ClipboardTarget, CopyMotion, FrameStream, MouseButton,
     MouseEvent, MouseKind, MouseMods, MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId,
-    PaneModes, Point, RowUpdate, SearchDirection, ServerMessage, Size, TermCaps, WorkspaceStatus,
+    PaneModes, Point, RowUpdate, SearchDirection, ServerMessage, SessionSummary, Size, TermCaps,
+    WorkspaceStatus,
 };
 use cloo_server::daemon::Daemon;
 use cloo_server::launch::Launch;
@@ -478,6 +479,37 @@ async fn client_sized(socket: &Path, size: Size) -> Attached<UnixStream> {
         .expect("the attach must succeed")
 }
 
+/// Reads the one-frame inspection reply and proves the server closes without
+/// turning the connection into an attachment or transcript stream.
+async fn inspect_session(socket: &Path) -> SessionSummary {
+    let stream = UnixStream::connect(socket)
+        .await
+        .expect("the daemon must be listening");
+    let mut conn = FrameStream::new(stream);
+    conn.send(&ClientMessage::InspectSession {
+        protocol_version: PROTOCOL_VERSION,
+    })
+    .await
+    .expect("the inspection must send");
+
+    let reply = tokio::time::timeout(PATIENCE, conn.recv::<ServerMessage>())
+        .await
+        .expect("inspection must not hang")
+        .expect("the summary must decode");
+    let Some(ServerMessage::SessionSummary(summary)) = reply else {
+        panic!("expected one session summary, got {reply:?}");
+    };
+    let next = tokio::time::timeout(PATIENCE, conn.recv::<ServerMessage>())
+        .await
+        .expect("the inspection connection must close")
+        .expect("the clean close must decode");
+    assert_eq!(
+        next, None,
+        "inspection must not send grids, layout, or damage"
+    );
+    summary
+}
+
 /// Reads until one matching typed outer-terminal request arrives.
 async fn await_effect(
     attached: &mut Attached<UnixStream>,
@@ -557,6 +589,21 @@ async fn await_panes(attached: &mut Attached<UnixStream>) -> Vec<cloo_proto::Pan
     .expect("pane identity must reach an attached client")
 }
 
+/// Reads until the server reports the requested number of tabs.
+async fn await_tab_count(attached: &mut Attached<UnixStream>, count: usize) {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Tabs(tabs)) if tabs.len() == count => return,
+                Some(_) => {}
+                None => panic!("the server closed before reporting {count} tabs"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the daemon never reported {count} tabs"));
+}
+
 /// Reads until the daemon publishes exactly the expected attached status.
 async fn await_workspace_status(
     attached: &mut Attached<UnixStream>,
@@ -586,6 +633,145 @@ async fn await_workspace_status(
         "effective size comes from workspace status"
     );
     status
+}
+
+#[tokio::test]
+async fn inspect_session_returns_truthful_counts_without_attaching() {
+    let dir = TempDir::new("inspect-summary");
+    let socket = dir.socket();
+    let daemon = spawn_named_daemon(&socket, "release-train", "printf ready; read _; exit 0");
+
+    let empty = inspect_session(&socket).await;
+    assert_eq!(
+        empty,
+        SessionSummary {
+            name: "release-train".to_owned(),
+            tabs: 1,
+            panes: 1,
+            clients: 0,
+            uptime_secs: empty.uptime_secs,
+        }
+    );
+    assert!(
+        empty.uptime_secs < PATIENCE.as_secs(),
+        "a new daemon should report a recent monotonic uptime"
+    );
+
+    let mut attached = client_sized(&socket, Size::new(100, 30)).await;
+    await_text(&mut attached, "ready").await;
+    attached
+        .send_command(Action::SplitVertical)
+        .await
+        .expect("the split must reach the daemon");
+    await_layout(&mut attached, |layout| layout.panes.len() == 2).await;
+    let occupied = inspect_session(&socket).await;
+    assert_eq!(occupied.name, "release-train");
+    assert_eq!((occupied.tabs, occupied.panes, occupied.clients), (1, 2, 1));
+    assert!(
+        occupied.uptime_secs >= empty.uptime_secs,
+        "monotonic uptime cannot run backwards"
+    );
+    assert_eq!(
+        attached.size(),
+        Size::new(100, 30),
+        "inspection must not join or change the negotiated geometry"
+    );
+
+    attached
+        .send_command(Action::NewTab)
+        .await
+        .expect("the new tab must reach the daemon");
+    await_tab_count(&mut attached, 2).await;
+    let across_tabs = inspect_session(&socket).await;
+    assert_eq!(
+        (across_tabs.tabs, across_tabs.panes, across_tabs.clients),
+        (2, 3, 1),
+        "pane counts include inactive tabs without exposing their contents"
+    );
+
+    attached
+        .send_command(Action::CloseTab)
+        .await
+        .expect("the temporary tab must close");
+    await_tab_count(&mut attached, 1).await;
+    attached
+        .send_command(Action::ClosePane)
+        .await
+        .expect("the temporary split must close");
+    await_layout(&mut attached, |layout| layout.panes.len() == 1).await;
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("the active client must remain usable");
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+#[tokio::test]
+async fn inspect_session_rejects_stale_and_malformed_peers_without_harming_clients() {
+    let dir = TempDir::new("inspect-refusals");
+    let socket = dir.socket();
+    let daemon = spawn_daemon(&socket, "printf ready; read _; exit 0").1;
+    let mut attached = client(&socket).await;
+    await_text(&mut attached, "ready").await;
+
+    let stream = UnixStream::connect(&socket)
+        .await
+        .expect("the daemon must be listening");
+    let mut stale = FrameStream::new(stream);
+    stale
+        .send(&ClientMessage::InspectSession {
+            protocol_version: PROTOCOL_VERSION.wrapping_add(1),
+        })
+        .await
+        .expect("the stale inspection must send");
+    let reply = tokio::time::timeout(PATIENCE, stale.recv::<ServerMessage>())
+        .await
+        .expect("the refusal must not hang")
+        .expect("the refusal must decode");
+    let Some(ServerMessage::Refused { reason }) = reply else {
+        panic!("expected a refusal, got {reply:?}");
+    };
+    assert!(reason.contains("version mismatch"), "got: {reason}");
+
+    let malformed = UnixStream::connect(&socket)
+        .await
+        .expect("the daemon must still be listening");
+    malformed
+        .writable()
+        .await
+        .expect("the malformed peer must become writable");
+    assert_eq!(
+        malformed
+            .try_write(&u32::MAX.to_be_bytes())
+            .expect("the malformed frame must write"),
+        4
+    );
+    let mut malformed = FrameStream::new(malformed);
+    let closed = tokio::time::timeout(PATIENCE, malformed.recv::<ServerMessage>())
+        .await
+        .expect("a malformed first frame must fail or close promptly");
+    assert!(
+        closed.is_err() || matches!(closed, Ok(None)),
+        "a malformed peer must receive no session data: {closed:?}"
+    );
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("the active client must remain usable");
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+    assert!(
+        UnixStream::connect(&socket).await.is_err(),
+        "a disappeared session must fail as a connection, not stale data"
+    );
 }
 
 #[test]

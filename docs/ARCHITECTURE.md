@@ -1146,6 +1146,11 @@ from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake
   frame in its own right, carrying its own version and neither a size nor capabilities, because the
   peer sending it has no terminal to describe and never becomes an attached client. Uptime is whole
   seconds off the daemon's monotonic clock, so it cannot run backwards over a wall-clock adjustment.
+  As of M9-08 the session socket serves this handshake through a private coordinator request: it
+  snapshots tab and all-tab pane counts, reads the daemon's attached-client table and monotonic
+  start time, sends exactly one summary, and closes. The inspection path never enters the client
+  size table or subscribes to damage; a malformed or stale first frame is confined to that socket,
+  and a session that disappears before the private reply simply closes the inspection.
   The reply is counts rather than collections — tab titles and pane names would leak a workspace's
   contents to every process that can reach the socket. A client discovers candidate sockets only
   inside the same resolved per-user runtime directory, opens each as an untrusted candidate, and
