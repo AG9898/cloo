@@ -68,11 +68,25 @@
 //! [keys.bindings]
 //! "|" = "split-vertical"         # an addition, or an override of a default
 //! "x" = "none"                   # `none` removes a binding entirely
+//!
+//! # Appearance. Every key is optional; the table below is the default.
+//! [visual]
+//! theme = "storm"                # a named palette, or `terminal` to inherit
+//! dim_unfocused = true           # `false` is the no-dim accessibility option
+//! status = "minimal"             # or `powerline`
+//! motion = true                  # `false` animates nothing at all
+//! reduce_motion = false          # `true` settles every transition immediately
 //! ```
 //!
 //! Chord spellings are [`crate::keymap::Key::parse`]'s and action names are
 //! [`crate::keymap::ACTION_NAMES`]. Bindings are reached *after* the prefix, so
 //! nothing in that table can shadow a key an application is using.
+//!
+//! `[visual]` is validated as **one unit**, unlike a profile or a binding: a
+//! value cloo cannot read leaves every visual preference at its default and says
+//! so. A half-applied appearance is one nobody chose — a powerline bar over an
+//! inherited palette the user never asked for is worse than the documented
+//! default they already know.
 
 use core::fmt;
 use std::collections::BTreeMap;
@@ -84,6 +98,7 @@ use cloo_proto::Size;
 use crate::error::MetadataError;
 use crate::keymap::{Key, KeyError, Keymap, parse_action};
 use crate::profile::{AdapterId, Profile, ProfileCommand, ProfileId};
+use crate::theme::ThemeChoice;
 
 /// The value that removes a binding rather than naming an action.
 const UNBIND: &str = "none";
@@ -163,6 +178,14 @@ pub enum ConfigWarning {
         /// The action name as written.
         action: String,
     },
+    /// A `[visual]` value cloo has no spelling for. The whole table falls back
+    /// to its defaults, because an appearance is chosen as one thing.
+    BadVisual {
+        /// The key inside `[visual]` that could not be read.
+        field: &'static str,
+        /// The value as it appeared in the document.
+        value: String,
+    },
 }
 
 impl fmt::Display for ConfigWarning {
@@ -187,7 +210,117 @@ impl fmt::Display for ConfigWarning {
                 f,
                 "binding {key:?} was ignored: no action is called {action:?}"
             ),
+            Self::BadVisual { field, value } => write!(
+                f,
+                "visual {field} {value:?} is not one cloo knows; \
+                 the whole [visual] table kept its defaults"
+            ),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Visual preferences
+// ---------------------------------------------------------------------------
+
+/// How the always-on status row is composed.
+///
+/// Both forms carry the same data and yield in the same order; they differ only
+/// in their separators, which is why the choice is a presentation preference
+/// rather than a second status model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StatusMode {
+    /// Flat, visually separated segments. The documented default.
+    #[default]
+    Minimal,
+    /// Segmented powerline separators, for a terminal with the glyphs.
+    Powerline,
+}
+
+impl StatusMode {
+    /// Every status mode in stable configuration order.
+    pub const ALL: [Self; 2] = [Self::Minimal, Self::Powerline];
+
+    /// The stable configuration spelling for this mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Powerline => "powerline",
+        }
+    }
+
+    /// Parses one configuration spelling.
+    #[must_use]
+    pub const fn parse(value: &str) -> Option<Self> {
+        match value.as_bytes() {
+            b"minimal" => Some(Self::Minimal),
+            b"powerline" => Some(Self::Powerline),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for StatusMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The validated `[visual]` table: how this client should look.
+///
+/// Every field is client-local. Nothing here reaches session state, so two
+/// terminals attached to one session may legitimately disagree about all of it.
+/// The fields are public because none of them constrains another — each is
+/// already a total type — and a client building one for a test should not have
+/// to go through the parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VisualConfig {
+    /// The chrome palette, or the outer terminal's own.
+    pub theme: ThemeChoice,
+    /// Whether unfocused panes are dimmed. `false` is the documented no-dim
+    /// accessibility option, never a rendering shortcut.
+    pub dim_unfocused: bool,
+    /// Which status-row composition to draw.
+    pub status: StatusMode,
+    /// Whether layout transitions animate at all.
+    pub motion: bool,
+    /// Whether a transition settles immediately instead of ramping.
+    ///
+    /// Kept separate from [`Self::motion`] because they answer different
+    /// questions: one is a preference about cloo, the other is an accessibility
+    /// declaration a client may later also learn from its environment. Ask
+    /// [`Self::animates`] rather than either field alone.
+    pub reduce_motion: bool,
+}
+
+impl VisualConfig {
+    /// The appearance cloo uses with no `[visual]` table: Storm, dimmed
+    /// neighbours, the minimal status row, and ordinary motion.
+    #[must_use]
+    pub const fn defaults() -> Self {
+        Self {
+            theme: ThemeChoice::Named(crate::theme::ThemeName::Storm),
+            dim_unfocused: true,
+            status: StatusMode::Minimal,
+            motion: true,
+            reduce_motion: false,
+        }
+    }
+
+    /// Whether a transition should ramp rather than settle at once.
+    ///
+    /// The one question the renderer asks: motion switched off and reduce-motion
+    /// switched on are the same frame, so no caller has to combine them itself.
+    #[must_use]
+    pub const fn animates(self) -> bool {
+        self.motion && !self.reduce_motion
+    }
+}
+
+impl Default for VisualConfig {
+    fn default() -> Self {
+        Self::defaults()
     }
 }
 
@@ -197,23 +330,25 @@ impl fmt::Display for ConfigWarning {
 
 /// A validated configuration.
 ///
-/// Today it holds profiles and the keymap. Theme selection and the rest of the
-/// surface land alongside them; the fields are private and reached through
-/// accessors so adding one is not a breaking change for every caller.
+/// Today it holds profiles, the keymap, and the visual preferences. The fields
+/// are private and reached through accessors so adding one is not a breaking
+/// change for every caller.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     profiles: Vec<Profile>,
     keys: Keymap,
+    visual: VisualConfig,
 }
 
 impl Config {
     /// The configuration cloo uses with no config file: the three built-in
-    /// profiles and the `C-b` keymap.
+    /// profiles, the `C-b` keymap, and the documented default appearance.
     #[must_use]
     pub fn defaults() -> Self {
         Self {
             profiles: Profile::built_ins(),
             keys: Keymap::defaults(),
+            visual: VisualConfig::defaults(),
         }
     }
 
@@ -221,6 +356,12 @@ impl Config {
     #[must_use]
     pub const fn keys(&self) -> &Keymap {
         &self.keys
+    }
+
+    /// Theme, dimming, status, and motion preferences — all client-local.
+    #[must_use]
+    pub const fn visual(&self) -> &VisualConfig {
+        &self.visual
     }
 
     /// Every profile, in launcher order — built-ins first, in their built-in
@@ -278,6 +419,60 @@ struct RawConfig {
     profile: Vec<RawProfile>,
     #[serde(default)]
     keys: Option<RawKeys>,
+    #[serde(default)]
+    visual: Option<RawVisual>,
+}
+
+/// The `[visual]` table. The names are strings here and enums after validation;
+/// the booleans are booleans in both, so a `motion = "yes"` is a document error
+/// from the parser rather than something this module has to answer.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawVisual {
+    #[serde(default)]
+    theme: Option<String>,
+    #[serde(default)]
+    dim_unfocused: Option<bool>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    motion: Option<bool>,
+    #[serde(default)]
+    reduce_motion: Option<bool>,
+}
+
+impl RawVisual {
+    /// Validates the table as one unit.
+    ///
+    /// Returns the first unreadable value rather than a partial appearance: the
+    /// caller keeps [`VisualConfig::defaults`] whole, so a user who mistyped
+    /// `status` does not also lose the theme they spelled correctly into a look
+    /// that is neither what they wrote nor what cloo documents.
+    fn into_visual(self) -> Result<VisualConfig, ConfigWarning> {
+        let mut visual = VisualConfig::defaults();
+        if let Some(written) = self.theme {
+            visual.theme = ThemeChoice::parse(&written).ok_or(ConfigWarning::BadVisual {
+                field: "theme",
+                value: written,
+            })?;
+        }
+        if let Some(written) = self.status {
+            visual.status = StatusMode::parse(&written).ok_or(ConfigWarning::BadVisual {
+                field: "status",
+                value: written,
+            })?;
+        }
+        if let Some(dim) = self.dim_unfocused {
+            visual.dim_unfocused = dim;
+        }
+        if let Some(motion) = self.motion {
+            visual.motion = motion;
+        }
+        if let Some(reduce) = self.reduce_motion {
+            visual.reduce_motion = reduce;
+        }
+        Ok(visual)
+    }
 }
 
 /// The `[keys]` table. TOML itself refuses a repeated key inside `bindings`, so
@@ -360,7 +555,8 @@ impl RawProfile {
 ///
 /// [`ConfigError`] when the document is not well-formed TOML or names a key
 /// cloo does not know. A profile that parses but does not *validate* is not an
-/// error — it is dropped with a [`ConfigWarning`] and the rest still loads.
+/// error — it is dropped with a [`ConfigWarning`] and the rest still loads, and
+/// an unreadable `[visual]` value warns and keeps that whole table's defaults.
 pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
     let raw: RawConfig = toml::from_str(text).map_err(|e| ConfigError(e.to_string()))?;
 
@@ -388,6 +584,13 @@ pub fn parse(text: &str) -> Result<Loaded, ConfigError> {
 
     if let Some(keys) = raw.keys {
         apply_keys(keys, &mut config.keys, &mut warnings);
+    }
+
+    if let Some(visual) = raw.visual {
+        match visual.into_visual() {
+            Ok(visual) => config.visual = visual,
+            Err(warning) => warnings.push(warning),
+        }
     }
 
     Ok(Loaded { config, warnings })
@@ -463,6 +666,7 @@ mod tests {
 
     use crate::layout::MIN_PANE_SIZE;
     use crate::profile::HARNESS_MIN_SIZE;
+    use crate::theme::ThemeName;
 
     fn ids(config: &Config) -> Vec<String> {
         config.profiles().iter().map(|p| p.id.to_string()).collect()
@@ -969,6 +1173,168 @@ mod tests {
         }
         .to_string();
         assert!(message.contains("C-b"), "{message}");
+    }
+
+    // -- Visual preferences -------------------------------------------------
+
+    #[test]
+    fn a_document_with_no_visual_table_is_the_documented_appearance() {
+        let loaded = parse("").expect("valid");
+        let visual = loaded.config.visual();
+        assert_eq!(visual.theme, ThemeChoice::Named(ThemeName::Storm));
+        assert!(visual.dim_unfocused);
+        assert_eq!(visual.status, StatusMode::Minimal);
+        assert!(visual.motion);
+        assert!(!visual.reduce_motion);
+        assert!(visual.animates());
+        assert_eq!(visual, &VisualConfig::defaults());
+    }
+
+    #[test]
+    fn a_visual_table_round_trips_into_typed_accessors() {
+        let loaded = parse(
+            r#"
+            [visual]
+            theme = "nord"
+            dim_unfocused = false
+            status = "powerline"
+            motion = true
+            reduce_motion = true
+            "#,
+        )
+        .expect("valid");
+        assert!(loaded.warnings.is_empty());
+        assert_eq!(
+            loaded.config.visual(),
+            &VisualConfig {
+                theme: ThemeChoice::Named(ThemeName::Nord),
+                dim_unfocused: false,
+                status: StatusMode::Powerline,
+                motion: true,
+                reduce_motion: true,
+            }
+        );
+        assert!(
+            !loaded.config.visual().animates(),
+            "reduce-motion answers the renderer's one question on its own"
+        );
+    }
+
+    #[test]
+    fn every_named_theme_and_terminal_inheritance_is_spellable() {
+        for theme in ThemeName::ALL {
+            let loaded = parse(&format!("[visual]\ntheme = {:?}\n", theme.as_str()))
+                .unwrap_or_else(|e| panic!("{theme} should parse: {e}"));
+            assert_eq!(loaded.config.visual().theme, ThemeChoice::Named(theme));
+        }
+        let loaded = parse("[visual]\ntheme = \"terminal\"\n").expect("valid");
+        assert_eq!(loaded.config.visual().theme, ThemeChoice::Terminal);
+        assert_eq!(loaded.config.visual().theme.named(), None);
+
+        for status in StatusMode::ALL {
+            let loaded = parse(&format!("[visual]\nstatus = {:?}\n", status.as_str()))
+                .unwrap_or_else(|e| panic!("{status} should parse: {e}"));
+            assert_eq!(loaded.config.visual().status, status);
+        }
+    }
+
+    #[test]
+    fn switching_motion_off_is_the_same_answer_as_reduce_motion() {
+        let off = parse("[visual]\nmotion = false\n").expect("valid");
+        assert!(!off.config.visual().animates());
+        assert!(
+            !off.config.visual().reduce_motion,
+            "the fields stay distinct"
+        );
+
+        let reduced = parse("[visual]\nreduce_motion = true\n").expect("valid");
+        assert!(!reduced.config.visual().animates());
+        assert!(reduced.config.visual().motion);
+    }
+
+    #[test]
+    fn an_unreadable_theme_name_keeps_the_whole_visual_table() {
+        // Atomic on purpose: a half-applied appearance is one nobody chose.
+        let loaded = parse(
+            r#"
+            [visual]
+            theme = "solarized"
+            dim_unfocused = false
+            status = "powerline"
+            "#,
+        )
+        .expect("well-formed");
+        assert_eq!(
+            loaded.warnings,
+            [ConfigWarning::BadVisual {
+                field: "theme",
+                value: "solarized".to_owned(),
+            }]
+        );
+        assert_eq!(
+            loaded.config.visual(),
+            &VisualConfig::defaults(),
+            "no other visual key may survive the refusal"
+        );
+    }
+
+    #[test]
+    fn an_unreadable_status_name_is_refused_the_same_way() {
+        let loaded = parse(
+            r#"
+            [[profile]]
+            id = "notes"
+
+            [visual]
+            theme = "nord"
+            status = "fancy"
+            "#,
+        )
+        .expect("well-formed");
+        assert_eq!(
+            loaded.warnings,
+            [ConfigWarning::BadVisual {
+                field: "status",
+                value: "fancy".to_owned(),
+            }]
+        );
+        assert_eq!(loaded.config.visual(), &VisualConfig::defaults());
+        assert!(
+            loaded.config.profile("notes").is_some(),
+            "an appearance nobody could read must not cost the profiles"
+        );
+    }
+
+    #[test]
+    fn a_visual_warning_names_the_field_the_value_and_the_fallback() {
+        let message = ConfigWarning::BadVisual {
+            field: "status",
+            value: "fancy".to_owned(),
+        }
+        .to_string();
+        assert!(message.contains("status"), "{message}");
+        assert!(message.contains("\"fancy\""), "{message}");
+        assert!(message.contains("defaults"), "{message}");
+    }
+
+    #[test]
+    fn an_unusable_motion_value_is_a_document_error() {
+        // A boolean key given a string is the parser's objection, so nothing in
+        // the document is applied — not even the theme beside it.
+        let (config, warnings) =
+            parse_or_defaults("[visual]\ntheme = \"nord\"\nmotion = \"yes\"\n");
+        assert_eq!(config, Config::defaults());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("motion"), "{warnings:?}");
+        assert!(parse("[visual]\nreduce_motion = 1\n").is_err());
+        assert!(parse("[visual]\ndim_unfocused = \"no\"\n").is_err());
+    }
+
+    #[test]
+    fn an_unknown_visual_key_is_a_document_error() {
+        let err = parse("[visual]\ntheam = \"nord\"\n").expect_err("unknown key");
+        assert!(err.message().contains("theam"), "{err}");
+        assert!(parse("[vsual]\ntheme = \"nord\"\n").is_err());
     }
 
     #[test]

@@ -15,9 +15,10 @@
 //! - [`profile`] — launch profiles: the built-in `generic`, `codex`, and
 //!   `claude` are three values of one struct, not three code paths.
 //! - [`config`] — parsing `config.toml` *text* into a validated [`Config`],
-//!   merging local profiles over the built-ins. Reading the file is the
-//!   server's; a document error is returned for its owner to handle, and a
-//!   single bad profile is dropped with a warning rather than costing the rest.
+//!   merging local profiles, key bindings, and visual preferences over the
+//!   built-ins. Reading the file is the server's; a document error is returned
+//!   for its owner to handle, and a single bad profile is dropped with a warning
+//!   rather than costing the rest.
 //! - [`keymap`] — key chords, their configuration spellings, and the tmux-shaped
 //!   `C-b` prefix table. A [`Keymap`] answers what a chord means *after* the
 //!   prefix and never what ordinary typing means; the prefix state machine is
@@ -52,7 +53,7 @@ pub mod session;
 pub mod tab;
 pub mod theme;
 
-pub use config::{Config, ConfigError, ConfigWarning};
+pub use config::{Config, ConfigError, ConfigWarning, StatusMode, VisualConfig};
 pub use copy_mode::{
     CopyMode, CopyMotion, CopyPoint, CopySelection, SearchDirection, SearchError, SearchMatch,
     SearchState,

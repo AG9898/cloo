@@ -400,9 +400,28 @@ contract concrete:
 
 The configuration surface and the file it represents must agree. Runtime configuration accepts
 theme selection and terminal inheritance, focus dimming, status mode, motion/reduce-motion, and
-the existing key prefix. The overlay shows effective values and a live preview built by the same
+the existing key prefix. As of M9-02 that is the `[visual]` table of `config.toml`, parsed by
+`cloo-core::config` into a `VisualConfig`:
+
+```toml
+[visual]
+theme = "storm"                # storm | night | gruvbox | nord | terminal
+dim_unfocused = true           # false is the no-dim accessibility option
+status = "minimal"             # minimal | powerline
+motion = true                  # false animates nothing at all
+reduce_motion = false          # true settles every transition immediately
+```
+
+The values shown are the defaults an absent table yields, and they are the appearance every card in
+this guide is drawn at. `terminal` shares the theme namespace with the four named palettes, so one
+key names one appearance. `motion` and `reduce_motion` are separate keys and one question:
+`VisualConfig::animates()` is false when either asks for stillness.
+
+The overlay shows effective values and a live preview built by the same
 frame helpers as the workspace; it is not a second mock renderer. Invalid or unsupported settings
-retain the last valid value and name the refusal. It is opened as a client-local command from the
+retain the last valid value and name the refusal — a theme or status name cloo cannot read leaves
+the *whole* `[visual]` table at its defaults rather than applying the keys around it, because a
+half-applied appearance is one nobody chose. It is opened as a client-local command from the
 searchable prefix palette, so no additional reserved prefix chord is required.
 
 ## Motion

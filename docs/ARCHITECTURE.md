@@ -964,6 +964,32 @@ keeps the prior valid configuration. M2-06 launches from profiles. M4-02 adds th
 the same document and the same warning rules — see [Keymap](#keymap) — so a `Config` now carries
 the prefix and its bindings alongside the profiles.
 
+M9-02 adds the third table, `[visual]`, reached through `Config::visual()` as a `VisualConfig`:
+
+```toml
+[visual]
+theme = "storm"                # a named palette, or `terminal` to inherit
+dim_unfocused = true           # `false` is the no-dim accessibility option
+status = "minimal"             # or `powerline`
+motion = true                  # `false` animates nothing at all
+reduce_motion = false          # `true` settles every transition immediately
+```
+
+Those five keys are the whole appearance surface, and the values above are the defaults an absent
+table yields. `ThemeChoice` puts `terminal` inheritance in the *same* namespace as the four named
+palettes, so one key names one appearance and no second switch can contradict it; `StatusMode` is a
+presentation preference over one status model rather than a second model. `motion` and
+`reduce_motion` stay distinct fields — one is a preference about cloo, the other an accessibility
+declaration a client may later also read from its environment — and `VisualConfig::animates()` is
+the single question a renderer asks, so no caller combines them itself.
+
+Unlike a profile or a binding, `[visual]` validates as **one unit**: a theme or status name cloo
+cannot read warns with `ConfigWarning::BadVisual` and leaves *every* visual preference at its
+default. A half-applied appearance is one nobody chose, and it would be indistinguishable from a
+working configuration. A wrong-typed value — `motion = "yes"` — remains an ordinary document error.
+The type is client-local data only: parsing it here keeps it out of session state, and applying it
+belongs to the attached client (M9-05), not to the daemon that happens to own the reload signal.
+
 M2-07 makes the session actor the one serialized path for that attention state. `Command::SetAttention`
 and `Command::AcknowledgeAttention` arrive on the same `mpsc` as every other mutation, so the
 coalescing rule in `Attention::set` — re-reporting a state keeps its acknowledgment — cannot be

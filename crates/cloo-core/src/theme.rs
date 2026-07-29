@@ -185,9 +185,52 @@ pub enum ThemeChoice {
     Terminal,
 }
 
+impl ThemeChoice {
+    /// The configuration spelling that asks for the outer terminal's palette.
+    ///
+    /// It sits in the same namespace as the named themes on purpose: a user
+    /// picks one appearance with one key, rather than a theme name plus a
+    /// separate "actually, inherit instead" switch that could contradict it.
+    pub const TERMINAL: &'static str = "terminal";
+
+    /// The stable configuration spelling for this choice.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Named(theme) => theme.as_str(),
+            Self::Terminal => Self::TERMINAL,
+        }
+    }
+
+    /// Parses one configuration spelling: a named theme, or `terminal`.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        if value == Self::TERMINAL {
+            return Some(Self::Terminal);
+        }
+        ThemeName::parse(value).map(Self::Named)
+    }
+
+    /// The named palette, or `None` when the outer terminal's own palette is
+    /// what was asked for.
+    #[must_use]
+    pub const fn named(self) -> Option<ThemeName> {
+        match self {
+            Self::Named(theme) => Some(theme),
+            Self::Terminal => None,
+        }
+    }
+}
+
 impl Default for ThemeChoice {
     fn default() -> Self {
         Self::Named(ThemeName::Storm)
+    }
+}
+
+impl fmt::Display for ThemeChoice {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -217,6 +260,24 @@ mod tests {
             assert_eq!(all.len(), 12, "{theme} maps every style-guide token");
         }
         assert_eq!(ThemeName::parse("solarized"), None);
+    }
+
+    #[test]
+    fn a_palette_choice_is_a_named_theme_or_the_terminals_own() {
+        for theme in ThemeName::ALL {
+            let choice = ThemeChoice::Named(theme);
+            assert_eq!(ThemeChoice::parse(choice.as_str()), Some(choice));
+            assert_eq!(choice.named(), Some(theme));
+        }
+        assert_eq!(
+            ThemeChoice::parse("terminal"),
+            Some(ThemeChoice::Terminal),
+            "inheritance shares the theme namespace so one key names one appearance"
+        );
+        assert_eq!(ThemeChoice::Terminal.named(), None);
+        assert_eq!(ThemeChoice::parse("Storm"), None);
+        assert_eq!(ThemeChoice::parse(""), None);
+        assert_eq!(ThemeChoice::default().to_string(), "storm");
     }
 
     #[test]
