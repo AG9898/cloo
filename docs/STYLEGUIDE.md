@@ -417,6 +417,15 @@ this guide is drawn at. `terminal` shares the theme namespace with the four name
 key names one appearance. `motion` and `reduce_motion` are separate keys and one question:
 `VisualConfig::animates()` is false when either asks for stillness.
 
+As of M9-05, an attached client keeps that complete typed value in its `LiveState` from the first
+frame onward. The selected theme is resolved against that terminal's capabilities, `dim_unfocused`
+drives the existing pane treatment, and `motion` plus `reduce_motion` construct the live motion
+model; the status choice is retained for the minimal/powerline composition stages rather than
+guessed from terminal output. A successful daemon reload revision makes each client reload its own
+resolved file and replace the visual value as one unit. A rejected local document keeps the
+preceding appearance, and no palette or accessibility choice enters session state, so two clients
+on one workspace may intentionally look different.
+
 The overlay shows effective values and a live preview built by the same
 frame helpers as the workspace; it is not a second mock renderer. Invalid or unsupported settings
 retain the last valid value and name the refusal — a theme or status name cloo cannot read leaves

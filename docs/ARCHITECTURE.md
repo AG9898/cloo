@@ -1168,6 +1168,20 @@ the built-ins, and publishes nothing. Diagnostics leave the library through a ca
 rather than a print: a background daemon's stderr is `/dev/null` by design, so only the process
 that owns a terminal — `cloo server [session]` — decides where a refused document is reported.
 
+M9-05 wires the client half without making configuration session state. The composition root gives
+an attach its complete locally resolved `Config` and retains that same local file in a separate
+`ConfigManager`. `LiveState` keeps the resulting `VisualConfig`, the theme resolved for this
+terminal's negotiated capabilities, and the newest reload revision it has attempted. The first
+frame therefore uses the local theme, focus dimming, status choice, and combined motion setting
+instead of reconstructing Storm and animated defaults. When `ConfigReloaded` arrives, the attached
+loop asks its local manager for one complete replacement and swaps only the validated visual value;
+a rejected local read records the revision but keeps every preceding preference, and a duplicate or
+older revision is ignored. Replacing motion settings also settles any in-flight transition rather
+than letting a frame authored under the old preference survive. The reload callback stays inside
+the existing raw-mode guard, so success, rejection, detach, and later errors all take the unchanged
+restoration path. Two clients can consequently resolve different files and palettes while viewing
+the same server-owned grids and session metadata.
+
 `Panes` is who the panes are — profile, name, task label, working directory — as opposed to
 `Layout`, which is where they sit. The two are separate messages because they change on
 completely different clocks: geometry moves on every resize, identity only when a pane is

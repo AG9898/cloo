@@ -48,6 +48,7 @@
 
 use std::time::{Duration, Instant};
 
+use cloo_core::VisualConfig;
 use cloo_proto::{Cell, CellAttrs, Color};
 
 use crate::renderer::Span;
@@ -128,6 +129,19 @@ impl MotionSettings {
     pub const fn reduced() -> Self {
         Self {
             reduce_motion: true,
+        }
+    }
+
+    /// Resolves the two visual motion switches into the one answer this model
+    /// needs.
+    ///
+    /// `motion = false` and `reduce_motion = true` both settle immediately;
+    /// keeping that combination here means the attached loop never grows a
+    /// second interpretation of [`VisualConfig::animates`].
+    #[must_use]
+    pub const fn from_visual(visual: VisualConfig) -> Self {
+        Self {
+            reduce_motion: !visual.animates(),
         }
     }
 }
@@ -610,6 +624,28 @@ mod tests {
         assert_eq!(MotionSettings::default(), MotionSettings::animated());
         assert!(!MotionSettings::default().reduce_motion);
         assert!(MotionSettings::reduced().reduce_motion);
+    }
+
+    #[test]
+    fn visual_motion_and_reduce_motion_resolve_to_one_setting() {
+        let mut visual = VisualConfig::defaults();
+        assert_eq!(
+            MotionSettings::from_visual(visual),
+            MotionSettings::animated()
+        );
+
+        visual.motion = false;
+        assert_eq!(
+            MotionSettings::from_visual(visual),
+            MotionSettings::reduced()
+        );
+
+        visual.motion = true;
+        visual.reduce_motion = true;
+        assert_eq!(
+            MotionSettings::from_visual(visual),
+            MotionSettings::reduced()
+        );
     }
 
     // -- Painting ---------------------------------------------------------

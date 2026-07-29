@@ -321,18 +321,21 @@ fn attach(request: cli::AttachRequest) -> ExitCode {
 /// once — the path it probed and the path it attaches to cannot drift apart.
 fn attach_to(socket: &Path) -> ExitCode {
     let loaded = cloo_server::config::load_from_environment();
-    for diagnostic in loaded.diagnostics {
+    for diagnostic in &loaded.diagnostics {
         eprintln!("cloo: warning: {diagnostic}");
     }
+    let config = loaded.config.clone();
+    let mut manager = loaded.into_manager();
 
-    // The keymap decides which chords this client resolves; the profiles are
-    // what its launcher offers. Neither is an authority over the daemon — a
-    // launch still crosses the wire as an identifier that daemon looks up.
-    match cloo_client::attach::run(
-        socket,
-        loaded.config.keys().clone(),
-        loaded.config.profiles().to_vec(),
-    ) {
+    // The whole validated local configuration reaches the client so its first
+    // frame uses the resolved visual preferences. A daemon reload revision
+    // invokes this client's own manager: only a complete applied document is
+    // handed back, while a refused local read retains the client's last visual
+    // value. Profiles remain launcher data and the daemon still resolves every
+    // launch identifier against its independently loaded table.
+    match cloo_client::attach::run(socket, config, move || {
+        manager.reload().applied().then(|| manager.config().clone())
+    }) {
         Ok(status) => ExitCode::from(u8::try_from(status).unwrap_or(EXIT_FAILURE)),
         Err(err) => {
             eprintln!("cloo: {err}");

@@ -24,8 +24,8 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use cloo_core::Profile;
 use cloo_core::keymap::Keymap;
+use cloo_core::{Config, Profile, VisualConfig};
 use cloo_proto::{
     Action, AttentionState, ClientMessage, CopyModeState, CursorShape, FrameStream, LayoutSnapshot,
     MouseEvent, PROTOCOL_VERSION, PaneAttention, PaneId, PaneInfo, PaneModes, Point, ProtoError,
@@ -42,7 +42,7 @@ use crate::input::{
     ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
     OuterModes, PaneArea, ScreenLayout, overlay_action, route_mouse,
 };
-use crate::motion::{Motion, MotionKind, Phase};
+use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
 use crate::outer::current_size;
 use crate::overlay::{
     ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, LaunchNotice, LaunchRequest, Overlay, OverlayOutcome,
@@ -425,12 +425,14 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
 /// Runs one attached client until it detaches, the daemon exits, or the socket
 /// closes.
 ///
-/// The caller supplies the resolved keymap so the client applies the same
-/// configurable prefix table it advertises in its chrome, and the resolved
-/// profiles so its launcher offers what the configuration actually defines. The
-/// profiles are the *launcher's* list and never an authority: the daemon owns
-/// the table a launch identifier is resolved against, so a profile this client
-/// can see but that daemon cannot is refused there and reported here.
+/// The caller supplies the complete resolved local configuration so the client
+/// applies the same keymap it advertises, offers the profiles it resolved, and
+/// uses its visual preferences from the first frame. `reload_config` repeats
+/// that client-local resolution after a daemon reload revision and returns
+/// `None` when the replacement was rejected. Profiles remain the *launcher's*
+/// list and never an authority: the daemon owns the table a launch identifier
+/// is resolved against, so a profile this client can see but that daemon cannot
+/// is refused there and reported here.
 ///
 /// Entering raw mode, enabling outer-terminal reporting, restoring both on every
 /// exit path, and owning the render loop all live here because they are client
@@ -440,7 +442,10 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
 ///
 /// Returns an actionable attach, terminal, rendering, or signal error. The raw
 /// mode guard restores the terminal before an error reaches the caller.
-pub fn run(path: &Path, keymap: Keymap, profiles: Vec<Profile>) -> Result<i32, AttachRunError> {
+pub fn run<F>(path: &Path, config: Config, reload_config: F) -> Result<i32, AttachRunError>
+where
+    F: FnMut() -> Option<Config>,
+{
     // This has to be first. A pipe should explain that this is not an attached
     // terminal, and no attach attempt or reporting mode should precede it.
     let raw = RawMode::stdin().map_err(AttachRunError::RawMode)?;
@@ -456,7 +461,14 @@ pub fn run(path: &Path, keymap: Keymap, profiles: Vec<Profile>) -> Result<i32, A
         .enable_time()
         .build()
         .map_err(AttachRunError::Runtime)?;
-    let result = runtime.block_on(live_loop(path, outer_size, caps, modes, keymap, profiles));
+    let result = runtime.block_on(live_loop(
+        path,
+        outer_size,
+        caps,
+        modes,
+        config,
+        reload_config,
+    ));
 
     // Restore before `main` prints an error: diagnostics written while raw are
     // unreadable, and `RawMode` also turns reporting modes back off here.
@@ -477,21 +489,27 @@ const fn session_size(outer: Size) -> Size {
 }
 
 /// The async attached-client body, entered only after raw mode is armed.
-async fn live_loop(
+async fn live_loop<F>(
     path: &Path,
     outer_size: Size,
     caps: TermCaps,
     modes: OuterModes,
-    keymap: Keymap,
-    profiles: Vec<Profile>,
-) -> Result<i32, AttachRunError> {
+    config: Config,
+    mut reload_config: F,
+) -> Result<i32, AttachRunError>
+where
+    F: FnMut() -> Option<Config>,
+{
     // Install this before attaching, so the one `SIGWINCH` that happens while
     // the socket handshake is in flight cannot be lost.
     let mut resizes = ResizeWatch::new(outer_size).map_err(AttachRunError::Signal)?;
     // The chrome shows the chord this client actually resolved, so a rebound
     // prefix is discoverable from the first frame rather than only from the
     // configuration file.
+    let keymap = config.keys().clone();
     let prefix = keymap.prefix().to_string();
+    let profiles = config.profiles().to_vec();
+    let visual = *config.visual();
     let mut attached = attach(path, session_size(outer_size), caps, None).await?;
     let mut state = LiveState::new(
         outer_size,
@@ -499,6 +517,7 @@ async fn live_loop(
         attached.tabs().to_vec(),
         prefix,
     )
+    .preferences(caps, visual)
     .profiles(profiles);
     let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
@@ -510,7 +529,7 @@ async fn live_loop(
     let mut chrome = ChromeMouse::new();
     let mut frames = tokio::time::interval(FRAME_INTERVAL);
     frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut motion = Motion::default();
+    let mut motion = Motion::new(state.motion_settings());
     let mut phase = None;
     let mut dirty = true;
     let mut detaching = false;
@@ -538,6 +557,18 @@ async fn live_loop(
                 return Ok(status);
             }
             Step::Server(Some(ServerMessage::Detached)) | Step::Server(None) => return Ok(0),
+            Step::Server(Some(ServerMessage::ConfigReloaded { revision })) => {
+                if state.needs_reload(revision)
+                    && state.reload_visual(revision, reload_config().map(|config| *config.visual()))
+                {
+                    // A changed motion preference takes effect on this frame;
+                    // no transition authored under the preceding preference
+                    // survives the atomic visual replacement.
+                    motion = Motion::new(state.motion_settings());
+                    phase = None;
+                    dirty = true;
+                }
+            }
             Step::Server(Some(message)) => {
                 let transition = state.transition_for(&message);
                 dirty |= state.apply(message)?;
@@ -658,6 +689,14 @@ struct LiveState {
     profiles: Vec<Profile>,
     /// The launch this client is still waiting on, or the refusal it is showing.
     launch: Option<LaunchNotice>,
+    /// The fully validated visual preferences this client resolved locally.
+    visual: VisualConfig,
+    /// The palette resolved for this outer terminal's negotiated capabilities.
+    theme: Theme,
+    /// Capabilities are retained only to resolve a replacement theme on reload.
+    caps: TermCaps,
+    /// The newest daemon reload revision this client has attempted locally.
+    config_revision: u64,
 }
 
 impl LiveState {
@@ -683,6 +722,63 @@ impl LiveState {
             prefix_pending: false,
             profiles: Vec::new(),
             launch: None,
+            visual: VisualConfig::defaults(),
+            theme: Theme::new(VisualConfig::defaults().theme, TermCaps::default()),
+            caps: TermCaps::default(),
+            config_revision: 0,
+        }
+    }
+
+    /// Supplies this attached client's resolved visual preferences.
+    ///
+    /// This builder runs before the first frame, so the default fields in
+    /// [`Self::new`] remain useful to small unit fixtures without becoming the
+    /// production answer.
+    fn preferences(mut self, caps: TermCaps, visual: VisualConfig) -> Self {
+        self.caps = caps;
+        self.theme = Theme::new(visual.theme, caps);
+        self.visual = visual;
+        self
+    }
+
+    /// Whether a reload notification is newer than the one already observed.
+    fn needs_reload(&self, revision: u64) -> bool {
+        revision > self.config_revision
+    }
+
+    /// Applies one daemon reload revision to this client's local appearance.
+    ///
+    /// The caller supplies `None` when its own file did not produce a complete
+    /// validated [`Config`]. The revision is still observed so a duplicate
+    /// notification cannot make a later file edit apply without another
+    /// successful daemon reload, while every prior visual field remains
+    /// unchanged.
+    fn reload_visual(&mut self, revision: u64, visual: Option<VisualConfig>) -> bool {
+        if !self.needs_reload(revision) {
+            return false;
+        }
+        self.config_revision = revision;
+        let Some(visual) = visual else {
+            return false;
+        };
+        if visual == self.visual {
+            return false;
+        }
+        self.theme = Theme::new(visual.theme, self.caps);
+        self.visual = visual;
+        true
+    }
+
+    /// The single motion answer derived from the live visual preferences.
+    fn motion_settings(&self) -> MotionSettings {
+        MotionSettings::from_visual(self.visual)
+    }
+
+    /// Theme and focus treatment for the frame about to be composed.
+    fn chrome_options(&self) -> ChromeOptions {
+        ChromeOptions {
+            dim_unfocused: self.visual.dim_unfocused,
+            theme: self.theme,
         }
     }
 
@@ -769,11 +865,11 @@ impl LiveState {
                 self.tabs = tabs;
                 Ok(true)
             }
-            // The status projections and the reload revision are received but
-            // not yet drawn or applied: caching status is M9-07's half and
-            // reloading client preferences is M9-05's. A summary is not part of
-            // an attached stream at all — it answers an inspection on a
-            // connection that never became a client.
+            // The status projections are received but not yet drawn: caching
+            // status is M9-07's half. Reload revisions are handled by the live
+            // loop because only it owns the local reload callback. A summary is
+            // not part of an attached stream at all — it answers an inspection
+            // on a connection that never became a client.
             ServerMessage::WorkspaceStatus(_)
             | ServerMessage::SessionSummary(_)
             | ServerMessage::ConfigReloaded { .. }
@@ -921,7 +1017,7 @@ impl LiveState {
             &panes,
             &self.queue,
             &self.prefix_hint(),
-            ChromeOptions::default(),
+            self.chrome_options(),
         );
         if let Some(copy_mode) = &self.copy_mode {
             if let (Some(area), Some(grid)) = (
@@ -932,13 +1028,13 @@ impl LiveState {
                     Point::new(area.x, area.y),
                     grid,
                     copy_mode,
-                    Theme::storm(),
+                    self.theme,
                 ));
                 spans.push(copy_status_span(
                     Point::new(0, self.outer_size.rows.saturating_sub(1)),
                     copy_mode,
                     self.outer_size.cols,
-                    Theme::storm(),
+                    self.theme,
                 ));
             }
         }
@@ -950,7 +1046,7 @@ impl LiveState {
                 Point::new(0, self.outer_size.rows.saturating_sub(1)),
                 notice,
                 self.outer_size.cols,
-                Theme::storm(),
+                self.theme,
             ));
         }
         spans
@@ -962,7 +1058,7 @@ impl LiveState {
         let mut chrome: Vec<bool> = base.iter().map(|span| !self.is_body_span(span)).collect();
         let mut spans = if self.overlay.is_some() {
             base.iter()
-                .map(|span| backdrop_span(span.at, &span.cells, Theme::storm()))
+                .map(|span| backdrop_span(span.at, &span.cells, self.theme))
                 .collect()
         } else {
             base
@@ -974,7 +1070,7 @@ impl LiveState {
                 self.outer_size.cols.saturating_sub(size.cols) / 2,
                 self.outer_size.rows.saturating_sub(size.rows) / 2,
             );
-            let overlays = overlay_spans(at, overlay, size, Theme::storm());
+            let overlays = overlay_spans(at, overlay, size, self.theme);
             chrome.extend(std::iter::repeat_n(true, overlays.len()));
             spans.extend(overlays);
         }
@@ -1179,7 +1275,7 @@ fn draw(
             &frame.spans,
             &frame.chrome,
             phase,
-            Theme::storm().color(ThemeToken::Frame),
+            state.theme.color(ThemeToken::Frame),
             state.cursor(),
         ),
         None => renderer.render_spans(&frame.spans, state.cursor()),
@@ -2154,6 +2250,113 @@ mod tests {
             state.launch.is_none(),
             "the pane the launch asked for arriving retires the notice"
         );
+    }
+
+    #[test]
+    fn a_fresh_client_keeps_every_resolved_visual_preference() {
+        let visual = VisualConfig {
+            theme: cloo_core::ThemeChoice::Named(cloo_core::ThemeName::Nord),
+            dim_unfocused: false,
+            status: cloo_core::StatusMode::Powerline,
+            motion: false,
+            reduce_motion: false,
+        };
+        let caps = TermCaps {
+            truecolor: true,
+            ..TermCaps::default()
+        };
+        let state = LiveState::new(
+            Size::new(40, 8),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        )
+        .preferences(caps, visual);
+
+        assert_eq!(state.visual, visual);
+        assert_eq!(state.theme.choice(), visual.theme);
+        assert!(!state.chrome_options().dim_unfocused);
+        assert_eq!(state.visual.status, cloo_core::StatusMode::Powerline);
+        assert_eq!(state.motion_settings(), MotionSettings::reduced());
+    }
+
+    #[test]
+    fn rejected_and_duplicate_reload_revisions_preserve_the_previous_preferences() {
+        let caps = TermCaps {
+            truecolor: true,
+            ..TermCaps::default()
+        };
+        let initial = VisualConfig {
+            theme: cloo_core::ThemeChoice::Named(cloo_core::ThemeName::Night),
+            ..VisualConfig::defaults()
+        };
+        let mut state = LiveState::new(
+            Size::new(40, 8),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        )
+        .preferences(caps, initial);
+
+        assert!(!state.reload_visual(1, None));
+        assert_eq!(state.visual, initial);
+        assert_eq!(state.theme.choice(), initial.theme);
+        assert!(
+            !state.reload_visual(1, Some(VisualConfig::defaults())),
+            "fixing a file after a rejected revision needs a newer daemon revision"
+        );
+        assert_eq!(state.visual, initial);
+    }
+
+    #[test]
+    fn a_new_valid_revision_replaces_visual_preferences_as_one_value() {
+        let caps = TermCaps {
+            truecolor: true,
+            ..TermCaps::default()
+        };
+        let mut state = LiveState::new(
+            Size::new(40, 8),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        )
+        .preferences(caps, VisualConfig::defaults());
+        let replacement = VisualConfig {
+            theme: cloo_core::ThemeChoice::Terminal,
+            dim_unfocused: false,
+            status: cloo_core::StatusMode::Powerline,
+            motion: true,
+            reduce_motion: true,
+        };
+
+        assert!(state.reload_visual(7, Some(replacement)));
+        assert_eq!(state.visual, replacement);
+        assert_eq!(state.theme.choice(), cloo_core::ThemeChoice::Terminal);
+        assert!(!state.chrome_options().dim_unfocused);
+        assert_eq!(state.motion_settings(), MotionSettings::reduced());
+        assert_eq!(state.config_revision, 7);
+    }
+
+    #[test]
+    fn two_clients_can_resolve_different_themes_for_one_session() {
+        let caps = TermCaps {
+            truecolor: true,
+            ..TermCaps::default()
+        };
+        let session = SessionId::new(7);
+        let storm = LiveState::new(Size::new(40, 8), session, hello_tabs(), "C-b".to_owned())
+            .preferences(caps, VisualConfig::defaults());
+        let nord_visual = VisualConfig {
+            theme: cloo_core::ThemeChoice::Named(cloo_core::ThemeName::Nord),
+            ..VisualConfig::defaults()
+        };
+        let nord = LiveState::new(Size::new(40, 8), session, hello_tabs(), "C-b".to_owned())
+            .preferences(caps, nord_visual);
+
+        assert_eq!(storm.session, nord.session);
+        assert_ne!(storm.theme, nord.theme);
+        assert_eq!(storm.visual.theme.as_str(), "storm");
+        assert_eq!(nord.visual.theme.as_str(), "nord");
     }
 
     /// One `generic` pane as the server would report it.
