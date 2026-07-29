@@ -132,6 +132,12 @@ runtime configuration, and versioned status/session projections. This refines RE
 RESOLVED-07, RESOLVED-08, RESOLVED-09, and RESOLVED-14 without changing their accessibility,
 ownership, or state-provenance constraints.
 
+The status vocabulary those projections need landed in M9-03; `PROTOCOL_VERSION` bumped to 11.
+`WorkspaceStatus`, `SessionSummary`, `ClientMessage::InspectSession`, and `ConfigReloaded` are the
+typed answer to "no status segment may display placeholder data": a client that cannot derive a
+field truthfully now has a message that carries it, and inspection is deliberately narrow enough —
+counts, no ids, no titles, no grid — that it can never become a second attach.
+
 ### RESOLVED-18 — A silently refused launch is reported by the client that asked
 
 **Resolved:** 2026-07-27

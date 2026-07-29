@@ -23,7 +23,7 @@ use crate::error::ProtoError;
 /// that presents as a rendering bug. Adapters share the number rather than
 /// carrying one of their own: both protocols are built from this one crate, so
 /// two versions could only ever disagree by accident.
-pub const PROTOCOL_VERSION: u16 = 10;
+pub const PROTOCOL_VERSION: u16 = 11;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -132,8 +132,8 @@ mod tests {
         Color, CopyModeState, CopyMotion, CopySelection, CursorShape, Direction, GraphicsEffect,
         LayoutSnapshot, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
         OuterTerminalEffect, PaneAttention, PaneInfo, PaneModes, PaneRect, Point, ProgressState,
-        RowUpdate, ScrollPoint, SearchDirection, SearchMatch, ServerMessage, Size, TabSummary,
-        TermCaps,
+        RowUpdate, ScrollPoint, SearchDirection, SearchMatch, ServerMessage, SessionSummary, Size,
+        TabSummary, TermCaps, WorkspaceStatus,
     };
 
     /// Encodes, decodes, and asserts the value survives unchanged.
@@ -179,6 +179,14 @@ mod tests {
                 size: Size::new(80, 24),
                 term_caps: TermCaps::default(),
                 session: None,
+            },
+            // The other first frame. It is a handshake of its own, so a stale
+            // version has to survive framing to be refused at all.
+            ClientMessage::InspectSession {
+                protocol_version: PROTOCOL_VERSION,
+            },
+            ClientMessage::InspectSession {
+                protocol_version: PROTOCOL_VERSION.wrapping_sub(1),
             },
             ClientMessage::Detach,
             ClientMessage::Input(vec![0x1b, b'[', b'A']),
@@ -299,6 +307,35 @@ mod tests {
             ServerMessage::Refused {
                 reason: "protocol version mismatch".into(),
             },
+            ServerMessage::WorkspaceStatus(WorkspaceStatus {
+                name: "default".into(),
+                clients: 2,
+                effective_size: Size::new(80, 24),
+            }),
+            // A workspace nobody else is watching, at the smallest size the
+            // layout still resolves in.
+            ServerMessage::WorkspaceStatus(WorkspaceStatus {
+                name: String::new(),
+                clients: 1,
+                effective_size: Size::new(1, 1),
+            }),
+            ServerMessage::SessionSummary(SessionSummary {
+                name: "agents".into(),
+                tabs: 3,
+                panes: 7,
+                clients: 1,
+                uptime_secs: 90_061,
+            }),
+            // A session nobody is attached to, freshly started.
+            ServerMessage::SessionSummary(SessionSummary {
+                name: "default".into(),
+                tabs: 1,
+                panes: 1,
+                clients: 0,
+                uptime_secs: 0,
+            }),
+            ServerMessage::ConfigReloaded { revision: 1 },
+            ServerMessage::ConfigReloaded { revision: u64::MAX },
             ServerMessage::Damage {
                 pane: PaneId::new(4),
                 rows: vec![sample_row()],
@@ -467,6 +504,48 @@ mod tests {
             query: None,
             matches: Vec::new(),
         });
+        round_trip(&WorkspaceStatus {
+            name: "default".into(),
+            clients: u16::MAX,
+            effective_size: Size::new(500, 200),
+        });
+        round_trip(&SessionSummary {
+            name: "default".into(),
+            tabs: u16::MAX,
+            panes: u16::MAX,
+            clients: u16::MAX,
+            uptime_secs: u64::MAX,
+        });
+    }
+
+    /// A summary is what an inspection can learn, and the whole of it.
+    ///
+    /// Asserted structurally rather than by reading the type: the risk this
+    /// guards is a later task widening the reply until inspection is an attach
+    /// with a different name, and a compile error is the only cheap moment to
+    /// notice that.
+    #[test]
+    fn an_inspection_reply_carries_counts_rather_than_workspace_contents() {
+        let summary = SessionSummary {
+            name: "agents".into(),
+            tabs: 2,
+            panes: 5,
+            clients: 1,
+            uptime_secs: 42,
+        };
+
+        let SessionSummary {
+            name,
+            tabs,
+            panes,
+            clients,
+            uptime_secs,
+        } = summary.clone();
+
+        assert_eq!(name, "agents");
+        assert_eq!((tabs, panes, clients), (2, 5, 1));
+        assert_eq!(uptime_secs, 42);
+        round_trip(&ServerMessage::SessionSummary(summary));
     }
 
     #[test]
@@ -614,5 +693,27 @@ mod tests {
             reason: err.to_string(),
         };
         round_trip(&refusal);
+    }
+
+    #[test]
+    fn an_inspection_from_a_stale_client_is_refused_the_same_way_an_attach_is() {
+        // An inspection is a first frame with its own version, so a session
+        // catalog probing an older or newer daemon must fail here rather than
+        // read a summary whose fields it cannot trust.
+        let stale = PROTOCOL_VERSION.wrapping_sub(1);
+        let wire = encode(&ClientMessage::InspectSession {
+            protocol_version: stale,
+        })
+        .expect("inspection encodes");
+
+        let (decoded, _) = decode::<ClientMessage>(&wire).expect("inspection decodes");
+        let ClientMessage::InspectSession { protocol_version } = decoded else {
+            panic!("expected an InspectSession");
+        };
+
+        let err = check_version(protocol_version).expect_err("a stale peer must be refused");
+        round_trip(&ServerMessage::Refused {
+            reason: err.to_string(),
+        });
     }
 }

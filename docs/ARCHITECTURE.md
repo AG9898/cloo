@@ -1069,8 +1069,8 @@ Client → Server:  Attach { protocol_version, size, term_caps, session }
                   Resize(Size)  Command(Action)
 
 Server → Client:  Hello { protocol_version, session, tabs, size }
-                  SessionSummary { name, tabs, panes, clients, uptime }
-                  WorkspaceStatus { name, clients, effective_size }
+                  SessionSummary(SessionSummary)
+                  WorkspaceStatus(WorkspaceStatus)
                   ConfigReloaded { revision }
                   Refused { reason }
                   Damage { pane, rows: Vec<RowUpdate> }
@@ -1086,15 +1086,22 @@ Server → Client:  Hello { protocol_version, session, tabs, size }
 ### Visual status projections
 
 M9 adds typed, versioned projections for handoff chrome that the client cannot truthfully derive
-from its visible grid:
+from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake v11):
 
-- `WorkspaceStatus` is the attached session's display name, attached-client count, and effective
-  minimum terminal size. The daemon publishes it when attachment or sizing changes.
-- `SessionSummary` is a read-only inspection response containing the session name, tab/pane counts,
-  attached-client count, and uptime. A client discovers candidate sockets only inside the same
-  resolved per-user runtime directory, opens each as an untrusted candidate, and includes a row
-  only after that socket answers the versioned inspection handshake. A socket filename or path
-  alone is never treated as a live session.
+- `WorkspaceStatus { name, clients: u16, effective_size: Size }` is the attached session's display
+  name, attached-client count, and effective minimum terminal size. The daemon publishes it when
+  attachment or sizing changes. It is separate from `Hello` because `Hello` happens once while
+  attachment and sizing keep moving underneath it.
+- `SessionSummary { name, tabs: u16, panes: u16, clients: u16, uptime_secs: u64 }` is a read-only
+  inspection response. `ClientMessage::InspectSession { protocol_version }` is the request: a first
+  frame in its own right, carrying its own version and neither a size nor capabilities, because the
+  peer sending it has no terminal to describe and never becomes an attached client. Uptime is whole
+  seconds off the daemon's monotonic clock, so it cannot run backwards over a wall-clock adjustment.
+  The reply is counts rather than collections — tab titles and pane names would leak a workspace's
+  contents to every process that can reach the socket. A client discovers candidate sockets only
+  inside the same resolved per-user runtime directory, opens each as an untrusted candidate, and
+  includes a row only after that socket answers the versioned inspection handshake. A socket
+  filename or path alone is never treated as a live session.
 
 There is still one daemon per session and no new global authority. The session switcher composes
 the independently verified summaries client-side and attaches through the selected session's
@@ -1112,9 +1119,10 @@ that receives the documented reload signal. On a successful daemon `SIGHUP` relo
 configuration revision and publishes `ConfigReloaded`; each attached client then atomically reloads
 the configuration file resolved from its own environment and applies only its validated client
 preferences. A rejected daemon reload publishes no revision, and a rejected client reload retains
-that client's previous valid preferences. The notification carries no palette or keymap data and
-therefore does not turn configuration into session state or require two clients to use the same
-theme.
+that client's previous valid preferences. `ConfigReloaded { revision: u64 }` carries a
+monotonically increasing number and nothing else: no palette and no keymap data, so configuration
+never becomes session state and two clients are never required to use the same theme. A client that
+sees no new revision correctly concludes nothing valid changed.
 
 `Panes` is who the panes are — profile, name, task label, working directory — as opposed to
 `Layout`, which is where they sit. The two are separate messages because they change on

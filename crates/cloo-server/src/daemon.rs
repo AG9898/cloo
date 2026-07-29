@@ -544,10 +544,14 @@ impl Daemon {
                     self.session()?.next_copy_match(direction.into()).await?;
                 }
                 // Detach is handled by the connection task so it can send the
-                // acknowledgement before it reports `Gone`. The remaining
-                // actions wait for their own layout milestones.
+                // acknowledgement before it reports `Gone`. An inspection never
+                // reaches here at all: it is a first frame answered by the
+                // connection task, and a peer that sent one is not an attached
+                // client. The remaining actions wait for their own layout
+                // milestones.
                 ClientMessage::Detach
                 | ClientMessage::Attach { .. }
+                | ClientMessage::InspectSession { .. }
                 | ClientMessage::Command(Action::DetachClient)
                 | ClientMessage::Command(_) => {}
             },

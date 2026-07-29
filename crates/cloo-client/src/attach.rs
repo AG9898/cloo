@@ -769,7 +769,15 @@ impl LiveState {
                 self.tabs = tabs;
                 Ok(true)
             }
-            ServerMessage::Hello { .. }
+            // The status projections and the reload revision are received but
+            // not yet drawn or applied: caching status is M9-07's half and
+            // reloading client preferences is M9-05's. A summary is not part of
+            // an attached stream at all — it answers an inspection on a
+            // connection that never became a client.
+            ServerMessage::WorkspaceStatus(_)
+            | ServerMessage::SessionSummary(_)
+            | ServerMessage::ConfigReloaded { .. }
+            | ServerMessage::Hello { .. }
             | ServerMessage::Refused { .. }
             | ServerMessage::Effect { .. }
             | ServerMessage::Bell(_)

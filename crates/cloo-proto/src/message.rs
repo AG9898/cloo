@@ -462,6 +462,57 @@ pub struct CopyModeState {
     pub matches: Vec<SearchMatch>,
 }
 
+/// What the attached session *is*, for chrome a client cannot derive.
+///
+/// Every field here is something the daemon alone knows: a client sees its own
+/// terminal and one visible grid, so a session's display name, how many other
+/// terminals are attached, and the size every one of them agreed to are not
+/// recoverable from anything it holds. Reading them out of pane cells would make
+/// the transcript an authority over session state, which is exactly the
+/// screen-scraping the status chrome must never do.
+///
+/// Travels on its own clock, like [`PaneAttention`]: attachment and sizing
+/// change when clients come and go, not when a child writes a row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceStatus {
+    /// The session's display name — the one its socket was created under.
+    pub name: String,
+    /// How many clients are attached right now, including the recipient.
+    pub clients: u16,
+    /// The session's effective size: the per-axis minimum across every
+    /// attached client, which is the geometry the layout actually resolves in.
+    pub effective_size: Size,
+}
+
+/// A read-only description of one session, answered without attaching to it.
+///
+/// The reply to [`ClientMessage::InspectSession`], and deliberately the *only*
+/// thing that request can learn. There is no pane content here, no layout, and
+/// no id to address the session by: a switcher needs to say what a session is
+/// and how busy it looks, and anything more would make inspection a second,
+/// quieter attach.
+///
+/// Counts rather than collections for the same reason. A summary that carried
+/// tab titles or pane names would leak a workspace's contents to every process
+/// that can reach the socket, and a switcher row has nowhere to put them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionSummary {
+    /// The session's display name — the one its socket was created under.
+    pub name: String,
+    /// How many tabs the session holds.
+    pub tabs: u16,
+    /// How many panes it holds across all of those tabs.
+    pub panes: u16,
+    /// How many clients are attached to it right now.
+    pub clients: u16,
+    /// How long the daemon has been running, in whole seconds.
+    ///
+    /// Measured by the daemon against a monotonic clock and truncated, so it
+    /// never runs backwards over a wall-clock adjustment and never churns a
+    /// switcher row on a sub-second boundary.
+    pub uptime_secs: u64,
+}
+
 /// Enough about a tab to draw the tab bar.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TabSummary {
@@ -753,6 +804,23 @@ pub enum ClientMessage {
         /// An existing session to reattach to, or `None` to take the default.
         session: Option<SessionId>,
     },
+    /// The other thing a first frame may be: ask this session to describe
+    /// itself, and nothing else.
+    ///
+    /// An inspection is not an attach. It registers no client, so it never
+    /// joins the minimum that decides the effective session size, and it is
+    /// answered with exactly one [`ServerMessage::SessionSummary`] before the
+    /// connection ends. It carries a size and no capabilities because it has no
+    /// terminal to describe: a session catalog is built by a client that is not
+    /// yet attached to anything.
+    ///
+    /// It carries its own version because it is a handshake in its own right —
+    /// a stale peer must be refused here for the same reason it is refused on
+    /// an attach.
+    InspectSession {
+        /// The protocol version this peer speaks.
+        protocol_version: u16,
+    },
     /// Leave the session running and disconnect.
     Detach,
     /// Keyboard bytes destined for the focused pane's PTY.
@@ -801,6 +869,34 @@ pub enum ServerMessage {
         /// The effective session size, already reduced to the minimum across
         /// all attached clients.
         size: Size,
+    },
+    /// The session's name, attached-client count, and effective size.
+    ///
+    /// Sent once the attach completes and again whenever one of those fields
+    /// actually changes, so a client that draws them is showing the daemon's
+    /// answer rather than its own guess. Separate from
+    /// [`Hello`](Self::Hello) because `Hello` happens once while attachment and
+    /// sizing keep moving underneath it.
+    WorkspaceStatus(WorkspaceStatus),
+    /// The whole reply to a [`ClientMessage::InspectSession`].
+    ///
+    /// One frame, then the connection is finished: nothing about an inspection
+    /// subscribes to anything. A peer that receives this was never an attached
+    /// client and has no pane, layout, or damage stream to expect.
+    SessionSummary(SessionSummary),
+    /// The daemon reloaded its configuration, and this is the revision now in
+    /// force.
+    ///
+    /// Carries a number and nothing else, deliberately. Visual preferences are
+    /// client-local: each client reloads the configuration resolved from its
+    /// own environment when it sees a new revision, so two clients may keep
+    /// different themes and no palette or keymap is ever turned into session
+    /// state by shipping it here. The revision only ever increases, and a
+    /// rejected daemon reload publishes none at all — a client that sees no new
+    /// number correctly concludes nothing valid changed.
+    ConfigReloaded {
+        /// The daemon's configuration revision, monotonically increasing.
+        revision: u64,
     },
     /// The attach was refused. The client should report `reason` and exit
     /// rather than continue reading a stream it cannot interpret.

@@ -190,6 +190,13 @@ Covered today in `cloo-proto`, all as unit tests:
   and tells the user to reattach — the acceptance criterion, asserted on the rendered string.
 - Every allowlisted outer-terminal effect, including unavailable graphics, round-tripping without
   any raw OSC/DCS payload type, and the `ServerMessage::Effect` envelope carrying one by pane.
+- The M9 status vocabulary in that same matrix: `WorkspaceStatus` and `SessionSummary` both as
+  standalone values and inside their messages, an empty name, a zero-client session, and saturated
+  counts and uptime; `ConfigReloaded` at its first and largest revision; and `InspectSession`
+  round-tripping at a stale version as well as the current one, since a version it cannot carry is
+  a version nobody can refuse. A stale inspection is then refused through `check_version` exactly
+  as a stale attach is. `SessionSummary` is additionally destructured field by field, so a later
+  task widening the inspection reply toward an attach has to change a test to do it.
 
 Covered today in `cloo-term`, all as unit tests, all by feeding known byte sequences and
 asserting grid or typed-effect state. This is the seam where an `alacritty_terminal` upgrade will
@@ -932,7 +939,7 @@ compatibility beyond the deterministic fixture suite is verified through the man
 
 | File | Domain | What It Covers |
 |---|---|---|
-| `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, including typed outer-terminal effects, unavailable graphics, and per-pane attention with its provenance, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch |
+| `crates/cloo-proto/src/frame.rs` | Wire protocol | Round-trip for every message and value type, including typed outer-terminal effects, unavailable graphics, and per-pane attention with its provenance, back-to-back framing, partial and oversized frames, corrupt payloads, handshake version match/mismatch, and the M9 status vocabulary — `WorkspaceStatus`, `SessionSummary` with its fields asserted one by one, `ConfigReloaded`, and an `InspectSession` refused at a stale version the way an attach is |
 | `crates/cloo-proto/src/adapter.rs` | Adapter control protocol | The four permitted states mapping one-to-one onto attention states with `quiet` and `unknown` unreachable from any of them, and every adapter message, reply, and rejection round-tripping with a rejection that explains itself |
 | `crates/cloo-proto/src/ids.rs` | Wire protocol | Newtype ID accessors, `Display` prefixes, transparent serialization |
 | `crates/cloo-proto/src/stream.rs` | Framed transport | Reassembly across reads, ordered queued frames, a clean close as `Ok(None)`, a mid-frame close as `Truncated`, and an oversized prefix refused |
