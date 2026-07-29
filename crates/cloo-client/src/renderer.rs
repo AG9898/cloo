@@ -1377,13 +1377,24 @@ mod tests {
         assert_eq!(spans[1].at, Point::new(0, 1));
         assert_eq!(text_of(&spans[1].cells), "> 1 one ?");
 
-        // Its focused body drops in undimmed, byte-for-byte the cached grid, at
-        // exactly the pane's rect origin — row by row.
+        // Its focused body drops in undimmed at exactly the pane's rect origin.
+        // Default child colours resolve on the copied span while the cached
+        // grid remains byte-for-byte unchanged.
+        let left_before = left_grid.clone();
         for (offset, span) in spans[2..5].iter().enumerate() {
             let row = u16::try_from(offset).expect("small");
             assert_eq!(span.at, Point::new(0, 2 + row));
-            assert_eq!(span.cells, left_grid.row(row).expect("row exists"));
+            let source = left_grid.row(row).expect("row exists");
+            assert_eq!(
+                span.cells,
+                source
+                    .iter()
+                    .copied()
+                    .map(|cell| crate::theme::Theme::storm().map_child_cell(cell))
+                    .collect::<Vec<_>>()
+            );
         }
+        assert_eq!(left_grid, left_before);
 
         // Pane two starts at its own left edge, header above grid.
         assert_eq!(spans[5].at, Point::new(11, 1));
@@ -1407,6 +1418,7 @@ mod tests {
     #[test]
     fn an_unfocused_pane_body_is_dimmed_and_a_focused_one_is_not() {
         let grid = filled_grid(Size::new(4, 1), 'x');
+        let before = grid.clone();
         let make = |focused: bool| {
             let panes = [FramePane::new(
                 PaneArea::new(PaneId::new(1), 0, 1, Size::new(4, 1)),
@@ -1426,21 +1438,21 @@ mod tests {
         // With no tabs the frame is header + body + status; the body is index 1.
         let focused = make(true);
         let unfocused = make(false);
-        assert_eq!(
-            focused[1].cells,
-            grid.row(0).expect("row exists"),
-            "a focused body is the grid untouched"
-        );
-        assert_ne!(
-            unfocused[1].cells,
-            grid.row(0).expect("row exists"),
-            "an unfocused body recedes"
-        );
+        let themed = grid
+            .row(0)
+            .expect("row exists")
+            .iter()
+            .copied()
+            .map(|cell| crate::theme::Theme::storm().map_child_cell(cell))
+            .collect::<Vec<_>>();
+        assert_eq!(focused[1].cells, themed, "a focused body is not dimmed");
+        assert_ne!(unfocused[1].cells, themed, "an unfocused body recedes");
         assert_eq!(
             text_of(&unfocused[1].cells),
             "xxxx",
             "dimming changes colour, never the text"
         );
+        assert_eq!(grid, before, "composition must not alter the cached grid");
     }
 
     #[test]
@@ -1489,9 +1501,13 @@ mod tests {
             .expect("output is valid utf-8");
         // The grid's row lands at column 2, row 1 (CUP is one-based): row 2,
         // column 3.
+        let (_, body) = frame
+            .split_once("\x1b[2;3H")
+            .expect("the grid row moves to its rect origin");
         assert!(
-            frame.contains("\x1b[2;3H\x1b[0mzzz"),
-            "the grid did not land at its rect origin: {frame:?}"
+            body.split_once('m')
+                .is_some_and(|(_, text)| text.starts_with("zzz")),
+            "the themed grid did not land at its rect origin: {frame:?}"
         );
     }
 

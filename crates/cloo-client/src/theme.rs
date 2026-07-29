@@ -196,6 +196,23 @@ impl Theme {
             .collect()
     }
 
+    /// Resolves one child-authored cell's default colours through this theme.
+    ///
+    /// Only `Color::Default` is a request to inherit cloo's pane palette.
+    /// Explicit RGB and indexed colours stay application-owned. The terminal
+    /// theme's corresponding roles are themselves `Color::Default`, making it
+    /// the deliberate opt-out without a separate rendering branch.
+    #[must_use]
+    pub fn map_child_cell(self, mut cell: Cell) -> Cell {
+        if cell.fg == Color::Default {
+            cell.fg = self.color(ThemeToken::DefaultText);
+        }
+        if cell.bg == Color::Default {
+            cell.bg = self.color(ThemeToken::Surface);
+        }
+        cell
+    }
+
     fn from_rgb(tokens: ThemeTokens, choice: ThemeChoice) -> Self {
         Self {
             choice,
@@ -305,5 +322,42 @@ mod tests {
             theme.color(ThemeToken::Warning),
             theme.color(ThemeToken::Error)
         );
+    }
+
+    #[test]
+    fn named_themes_map_only_child_default_colours() {
+        for name in ThemeName::ALL {
+            for caps in [truecolor(), TermCaps::default()] {
+                let theme = Theme::named(name, caps);
+                let original = Cell {
+                    ch: 'x',
+                    fg: Color::Default,
+                    bg: Color::Default,
+                    attrs: cloo_proto::CellAttrs::BOLD,
+                };
+                let mapped = theme.map_child_cell(original);
+                assert_eq!(mapped.fg, theme.color(ThemeToken::DefaultText));
+                assert_eq!(mapped.bg, theme.color(ThemeToken::Surface));
+                assert_eq!(mapped.ch, original.ch);
+                assert_eq!(mapped.attrs, original.attrs);
+
+                let explicit = Cell {
+                    fg: Color::Rgb(1, 2, 3),
+                    bg: Color::Indexed(4),
+                    ..original
+                };
+                assert_eq!(
+                    theme.map_child_cell(explicit),
+                    explicit,
+                    "{name} must preserve application colours"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_theme_leaves_child_defaults_to_the_outer_terminal() {
+        let cell = Cell::default();
+        assert_eq!(Theme::terminal().map_child_cell(cell), cell);
     }
 }

@@ -415,12 +415,18 @@ pub fn dim_cells(cells: &[Cell], focused: bool, options: ChromeOptions) -> Vec<C
 ///
 /// A pane's contents are the server's, arriving as whole grid rows; this is the
 /// one place they are turned into a positioned run so a multi-pane frame can
-/// drop each pane's grid into its own rect. Dimming stays the single-place
-/// [`dim_cells`] policy rather than being re-decided here, so a body row and a
-/// header row recede by the same rule.
+/// drop each pane's grid into its own rect. Child default colours are resolved
+/// on this copied row before dimming, so the cache stays application-owned and
+/// the dimming policy sees the pane's actual rendered colours. Dimming stays
+/// the single-place [`dim_cells`] policy rather than being re-decided here.
 #[must_use]
 pub fn body_span(at: Point, cells: &[Cell], focused: bool, options: ChromeOptions) -> Span {
-    Span::new(at, dim_cells(cells, focused, options))
+    let themed = cells
+        .iter()
+        .copied()
+        .map(|cell| options.theme.map_child_cell(cell))
+        .collect::<Vec<_>>();
+    Span::new(at, dim_cells(&themed, focused, options))
 }
 
 // ---------------------------------------------------------------------------
@@ -1620,6 +1626,51 @@ mod tests {
             "the no-dim fallback is untouched"
         );
         assert_ne!(dim_cells(&cells, false, options), cells);
+    }
+
+    #[test]
+    fn a_body_span_themes_defaults_without_rewriting_explicit_colours() {
+        let cells = [
+            Cell::default(),
+            Cell {
+                ch: 'x',
+                fg: Color::Rgb(1, 2, 3),
+                bg: Color::Indexed(4),
+                attrs: CellAttrs::BOLD,
+            },
+        ];
+        let original = cells;
+        let theme = Theme::named(
+            cloo_core::ThemeName::Nord,
+            cloo_proto::TermCaps {
+                truecolor: true,
+                ..cloo_proto::TermCaps::default()
+            },
+        );
+        let span = body_span(
+            Point::new(2, 3),
+            &cells,
+            true,
+            ChromeOptions::no_dim().with_theme(theme),
+        );
+
+        assert_eq!(span.at, Point::new(2, 3));
+        assert_eq!(span.cells[0].fg, theme.color(ThemeToken::DefaultText));
+        assert_eq!(span.cells[0].bg, theme.color(ThemeToken::Surface));
+        assert_eq!(span.cells[1], cells[1]);
+        assert_eq!(cells, original, "render-time mapping must not alter input");
+    }
+
+    #[test]
+    fn terminal_inheritance_keeps_body_defaults() {
+        let cells = [Cell::default()];
+        let span = body_span(
+            Point::new(0, 0),
+            &cells,
+            true,
+            ChromeOptions::no_dim().with_theme(Theme::terminal()),
+        );
+        assert_eq!(span.cells, cells);
     }
 
     #[test]

@@ -573,7 +573,9 @@ See [`STYLEGUIDE.md`](STYLEGUIDE.md) and `DECISIONS.md` RESOLVED-14.
 Named themes map child `Color::Default` cells to their pane surface and default text at render time,
 without mutating the client's grid cache. Explicit child colors pass through unchanged.
 Terminal-palette inheritance leaves those default cells to the outer terminal. Nothing in this
-module reaches session state, so two attached clients may make different visual choices.
+module reaches session state, so two attached clients may make different visual choices. The
+`body_span` boundary performs this mapping on a row copy before optional focus dimming; the renderer
+therefore paints themed cells while `Grid` remains a byte-for-byte cache of the server projection.
 
 #### Overlays
 

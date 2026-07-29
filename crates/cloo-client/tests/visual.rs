@@ -60,8 +60,8 @@ fn workspace() -> Scene {
 /// `A`/`.` are the tab row and `P`/`-`/`M`/`p` the status row; both are still
 /// authored against the reference palette, so they are expected as
 /// [`Paint::Reference`]. The pane header (`a`, `m`, `B`, `s`) already resolves
-/// through the client theme, and the pane body (`~`) is the child's own
-/// untouched default cell.
+/// through the client theme, and the pane body (`~`) maps the child's default
+/// colours to the selected pane text and surface roles at composition time.
 fn workspace_golden() -> ExpectedFrame {
     let reference = |token| Paint::Reference(token);
     let chrome_bg = Paint::Reference(ThemeToken::Surface);
@@ -102,7 +102,13 @@ fn workspace_golden() -> ExpectedFrame {
             SemanticStyle::new(Paint::Token(ThemeToken::Muted), pane_bg),
         )
         .style('s', SemanticStyle::new(Paint::Terminal, pane_bg))
-        .style('~', SemanticStyle::new(Paint::Terminal, Paint::Terminal))
+        .style(
+            '~',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::DefaultText),
+                Paint::Token(ThemeToken::Surface),
+            ),
+        )
         .row(
             ">1 main                                 ",
             "AAAAAAA.................................",

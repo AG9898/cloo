@@ -115,7 +115,8 @@ rendering to this fixed 16-color-safe table, rather than asking a 256-colour qua
 For a named theme, a child's `Color::Default` foreground and background resolve to that theme's
 default text and pane surface. Explicit child colors remain untouched. This gives otherwise blank
 shell cells the same pane ground as the chrome without writing themed cells back into the client
-cache or server grid.
+cache or server grid. Frame composition maps a copied pane-body row before applying unfocused-pane
+dimming, so dimming operates on the colours the user sees while the cached child cells remain exact.
 
 `terminal` palette inheritance instead leaves frame, surface, raised surface, primary, default
 text, and child default cells at the outer terminal's defaults while retaining the same ANSI
