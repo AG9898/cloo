@@ -51,6 +51,13 @@ default-workspace entry as of M8-01), and `XDG_CONFIG_HOME` and `CLOO_CONFIG` as
 hands it to the pure `cloo-core` parser; a missing file starts with defaults, an invalid startup file
 warns and does the same, and a failed `SIGHUP` reload retains the preceding valid configuration.
 
+`SIGHUP` goes to the **daemon** process, and as of M9-04 it re-reads exactly the file that
+`CLOO_CONFIG`, `XDG_CONFIG_HOME`, or `HOME` resolved when that daemon started — a variable changed
+in some other shell afterwards does not move it. An applied reload publishes a new configuration
+revision to attached clients; a refused one publishes nothing and reports why on the daemon's
+stderr, which is `/dev/null` for the background daemon a bare `cloo` starts and the terminal for
+`cloo server [session]`.
+
 ---
 
 ## Maintainer Release Credential

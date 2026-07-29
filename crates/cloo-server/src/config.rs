@@ -187,6 +187,14 @@ pub enum Reload {
         /// Why no new configuration was applied.
         error: ConfigLoadError,
     },
+    /// This configuration came from no file, so a reload had nothing to
+    /// re-read and the active value stands.
+    ///
+    /// Distinct from [`Self::Applied`] on purpose: a manager with no file is
+    /// not a manager whose file vanished. Re-reading nothing must never reset a
+    /// caller-supplied configuration to the built-ins, and it must never be
+    /// published as a new revision, because nothing changed.
+    Detached,
 }
 
 /// The configuration used when a process first starts.
@@ -198,9 +206,27 @@ pub enum Reload {
 pub struct InitialConfig {
     /// The complete validated configuration selected for startup.
     pub config: Config,
+    /// The file this configuration was resolved from, or `None` when no
+    /// configuration root could be determined. A rejected document still names
+    /// its file: fixing it and sending `SIGHUP` must be enough.
+    pub file: Option<ConfigFile>,
     /// User-visible diagnostics for a rejected document or for the individual
     /// profile or key entries that were dropped.
     pub diagnostics: Vec<String>,
+}
+
+impl InitialConfig {
+    /// Turns the startup result into the manager a daemon reloads from.
+    ///
+    /// The active configuration is carried across rather than re-read, and the
+    /// file — if there was one — is what a later `SIGHUP` re-reads.
+    #[must_use]
+    pub fn into_manager(self) -> ConfigManager {
+        match self.file {
+            Some(file) => ConfigManager::preloaded(file, self.config),
+            None => ConfigManager::detached(self.config),
+        }
+    }
 }
 
 impl Reload {
@@ -208,6 +234,23 @@ impl Reload {
     #[must_use]
     pub const fn applied(&self) -> bool {
         matches!(self, Self::Applied { .. })
+    }
+
+    /// The user-visible diagnostics this outcome should report, in order.
+    ///
+    /// A rejected reload renders one line saying which file was refused and
+    /// why; an applied one renders a line per entry it had to drop. Producing
+    /// them here rather than at each call site is what lets a daemon and the
+    /// startup path report a reload in the same words — and lets the process
+    /// that owns a terminal decide where those words go, since a library never
+    /// writes to one itself.
+    #[must_use]
+    pub fn diagnostics(&self) -> Vec<String> {
+        match self {
+            Self::Applied { warnings } => warnings.iter().map(ToString::to_string).collect(),
+            Self::Rejected { error } => vec![error.to_string()],
+            Self::Detached => Vec::new(),
+        }
     }
 }
 
@@ -218,7 +261,9 @@ impl Reload {
 /// only state transition and makes a partial apply impossible by construction.
 #[derive(Debug)]
 pub struct ConfigManager {
-    file: ConfigFile,
+    /// `None` for a configuration that came from no file — see
+    /// [`ConfigManager::detached`].
+    file: Option<ConfigFile>,
     config: Config,
 }
 
@@ -227,9 +272,33 @@ impl ConfigManager {
     #[must_use]
     pub fn new(file: ConfigFile) -> Self {
         Self {
-            file,
+            file: Some(file),
             config: Config::defaults(),
         }
+    }
+
+    /// Adopts an already validated configuration read from `file`.
+    ///
+    /// Startup loads the document before the socket is bound, so the daemon
+    /// that inherits it must not read the same file a second time — two reads
+    /// could disagree, and the second one would be the unreported answer.
+    #[must_use]
+    pub fn preloaded(file: ConfigFile, config: Config) -> Self {
+        Self {
+            file: Some(file),
+            config,
+        }
+    }
+
+    /// Adopts a configuration that came from no file at all.
+    ///
+    /// Used where a caller supplies a configuration directly — a test fixture,
+    /// or a host with no resolvable configuration root. A reload then has
+    /// nothing to re-read and answers [`Reload::Detached`], leaving the
+    /// supplied value in force rather than resetting it to the built-ins.
+    #[must_use]
+    pub const fn detached(config: Config) -> Self {
+        Self { file: None, config }
     }
 
     /// Resolves the configuration file from the current environment.
@@ -247,19 +316,23 @@ impl ConfigManager {
         &self.config
     }
 
-    /// The file this manager will read on reload.
+    /// The file this manager will read on reload, if it has one.
     #[must_use]
-    pub fn file(&self) -> &ConfigFile {
-        &self.file
+    pub fn file(&self) -> Option<&ConfigFile> {
+        self.file.as_ref()
     }
 
     /// Reads, validates, and atomically applies the configuration file.
     ///
     /// A missing file is a valid reset to built-ins. Any other read failure or
     /// document error returns [`Reload::Rejected`] and leaves [`Self::config`]
-    /// exactly as it was.
+    /// exactly as it was. A manager with no file answers [`Reload::Detached`]
+    /// and changes nothing.
     pub fn reload(&mut self) -> Reload {
-        match self.file.load() {
+        let Some(file) = self.file.as_ref() else {
+            return Reload::Detached;
+        };
+        match file.load() {
             Ok(loaded) => {
                 // `loaded` already holds a complete validated configuration;
                 // assignment is the one atomic state transition.
@@ -296,23 +369,24 @@ pub fn load_from_environment() -> InitialConfig {
         Err(error) => {
             return InitialConfig {
                 config: Config::defaults(),
+                file: None,
                 diagnostics: vec![error.to_string()],
             };
         }
     };
 
-    match manager.reload() {
-        Reload::Applied { warnings } => InitialConfig {
-            config: manager.config().clone(),
-            diagnostics: warnings
-                .into_iter()
-                .map(|warning| warning.to_string())
-                .collect(),
-        },
-        Reload::Rejected { error } => InitialConfig {
-            config: Config::defaults(),
-            diagnostics: vec![error.to_string()],
-        },
+    let reload = manager.reload();
+    let diagnostics = reload.diagnostics();
+    // A refused document starts on the built-ins, but keeps naming its file:
+    // the user fixes it and sends `SIGHUP` rather than restarting the daemon.
+    let config = match reload {
+        Reload::Applied { .. } => manager.config().clone(),
+        Reload::Rejected { .. } | Reload::Detached => Config::defaults(),
+    };
+    InitialConfig {
+        config,
+        file: manager.file().cloned(),
+        diagnostics,
     }
 }
 

@@ -232,9 +232,12 @@ fn server(request: cli::ServerRequest) -> ExitCode {
     // socket is bound so a bad document is reported by a process that has not
     // yet claimed a session path.
     let loaded = cloo_server::config::load_from_environment();
-    for diagnostic in loaded.diagnostics {
+    for diagnostic in &loaded.diagnostics {
         eprintln!("cloo: warning: {diagnostic}");
     }
+    // The same document, now as the value a later `SIGHUP` re-reads. It is not
+    // read twice: the daemon inherits what was just validated.
+    let config = loaded.into_manager();
     let launch = match cli::Request::default().into_launch() {
         Ok(launch) => launch,
         Err(err) => {
@@ -280,8 +283,12 @@ fn server(request: cli::ServerRequest) -> ExitCode {
     };
 
     let outcome = runtime.block_on(async {
-        let mut daemon =
-            cloo_server::daemon::Daemon::new(listener, &base, launch)?.with_config(loaded.config);
+        // A reload diagnostic goes to this process's stderr, which is exactly
+        // why `cloo server [session]` is the documented way to see one: the
+        // background daemon a bare `cloo` starts has none.
+        let mut daemon = cloo_server::daemon::Daemon::new(listener, &base, launch)?
+            .with_config_manager(config)
+            .with_diagnostics(|diagnostic| eprintln!("cloo: warning: {diagnostic}"));
         daemon.run().await
     });
     match outcome {

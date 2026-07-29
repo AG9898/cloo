@@ -25,6 +25,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::{JoinHandle, JoinSet};
 
+use crate::config::{ConfigManager, Reload, ReloadWatch};
 use crate::conn::{self, AttachRequest, Connection};
 use crate::damage::{DamageFrame, DamageTracker};
 use crate::launch::Launch;
@@ -41,6 +42,12 @@ const DAMAGE_QUEUE: usize = 8;
 /// Client-to-daemon requests waiting for the coordinator.
 const CLIENT_COMMAND_QUEUE: usize = 64;
 
+/// Where a daemon's configuration diagnostics go.
+///
+/// Owned by whichever process started the daemon, because only that process
+/// knows whether it has a terminal to write to.
+type DiagnosticSink = Box<dyn Fn(&str) + Send + Sync>;
+
 /// The single session and initial pane this daemon owns.
 const THE_SESSION: SessionId = SessionId::new(1);
 /// See [`THE_SESSION`].
@@ -55,6 +62,8 @@ pub enum DaemonError {
     Pty(PtyError),
     /// The listener could not be handed to the runtime, or accepting failed.
     Accept(io::Error),
+    /// The configuration reload signal could not be installed.
+    Reload(io::Error),
     /// The session task ended before the daemon was done with it.
     Session(SessionGone),
 }
@@ -65,6 +74,7 @@ impl fmt::Display for DaemonError {
             Self::Socket(e) => write!(f, "{e}"),
             Self::Pty(e) => write!(f, "{e}"),
             Self::Accept(e) => write!(f, "could not accept a client: {e}"),
+            Self::Reload(e) => write!(f, "could not listen for configuration reloads: {e}"),
             Self::Session(e) => write!(f, "{e}"),
         }
     }
@@ -76,6 +86,7 @@ impl std::error::Error for DaemonError {
             Self::Socket(e) => Some(e),
             Self::Pty(e) => Some(e),
             Self::Accept(e) => Some(e),
+            Self::Reload(e) => Some(e),
             Self::Session(e) => Some(e),
         }
     }
@@ -170,12 +181,31 @@ pub struct Daemon {
     /// The only way into the session. `None` once the daemon releases it so
     /// the session task can finish and report the child's status.
     session: Option<SessionHandle>,
-    /// The profile table a typed launch request is resolved against.
+    /// The profile table a typed launch request is resolved against, and the
+    /// file a `SIGHUP` re-reads.
     ///
     /// The daemon is the profile authority, which is what makes a launch
     /// request an *identifier* rather than a command: nothing a client sends
-    /// can add to this table.
-    config: Config,
+    /// can add to this table. The manager is the single owner of that value —
+    /// a reload parses a whole document before one assignment replaces it, so
+    /// no client can ever observe a half-applied configuration.
+    config: ConfigManager,
+    /// The configuration revision published as [`ServerMessage::ConfigReloaded`].
+    ///
+    /// Starts at zero — the configuration the daemon was given — and increases
+    /// once per *applied* reload. A refused reload leaves it alone, which is
+    /// how a client concludes that nothing valid changed.
+    revision: u64,
+    /// Where a configuration diagnostic goes, if anywhere.
+    ///
+    /// The daemon is a library and never writes to a terminal itself: a
+    /// background daemon's stderr is `/dev/null` by design, and the process
+    /// that owns a terminal is the one that decides where a warning is
+    /// printed. Absent by default, so a fixture reports nothing.
+    ///
+    /// `Sync` as well as `Send`: the daemon holds `&self` across awaits inside
+    /// its own loop, so every field it owns must be shareable.
+    report: Option<DiagnosticSink>,
     /// Where a pane launched from a profile starts.
     ///
     /// The workspace's own directory — the one its first pane was launched in —
@@ -251,7 +281,9 @@ impl Daemon {
             _control: control_listener,
             control,
             session: Some(spawned.handle),
-            config: Config::defaults(),
+            config: ConfigManager::detached(Config::defaults()),
+            revision: 0,
+            report: None,
             cwd,
             events: spawned.events,
             task: Some(spawned.task),
@@ -273,9 +305,36 @@ impl Daemon {
     /// `config.toml` still has the three documented profiles rather than none.
     /// The server owner supplies the user's configuration here; a client never
     /// can, which is the point.
+    ///
+    /// The value has no file behind it, so a `SIGHUP` finds nothing to re-read
+    /// and keeps it. Use [`Self::with_config_manager`] for a daemon whose
+    /// configuration must reload.
     #[must_use]
     pub fn with_config(mut self, config: Config) -> Self {
-        self.config = config;
+        self.config = ConfigManager::detached(config);
+        self
+    }
+
+    /// Uses `manager` as both the active configuration and the file a `SIGHUP`
+    /// re-reads.
+    ///
+    /// This is how the server owner hands over the document it already loaded
+    /// and validated: the daemon reads that file again only when it is asked
+    /// to reload, and never at a moment of its own choosing.
+    #[must_use]
+    pub fn with_config_manager(mut self, manager: ConfigManager) -> Self {
+        self.config = manager;
+        self
+    }
+
+    /// Sends configuration diagnostics to `report`.
+    ///
+    /// Called with one rendered line per refused document or dropped entry. The
+    /// daemon never prints: the process that owns a terminal decides whether
+    /// there is anywhere for a warning to go.
+    #[must_use]
+    pub fn with_diagnostics(mut self, report: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.report = Some(Box::new(report));
         self
     }
 
@@ -287,8 +346,8 @@ impl Daemon {
 
     /// The profile table this daemon resolves a launch request against.
     #[must_use]
-    pub const fn config(&self) -> &Config {
-        &self.config
+    pub fn config(&self) -> &Config {
+        self.config.config()
     }
 
     /// The child's process id.
@@ -310,9 +369,18 @@ impl Daemon {
     /// receiver. The select below is therefore the sole place that captures
     /// session state and sends a damage frame, so a lagging socket can never
     /// delay a PTY read or a session command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Reload`] when the `SIGHUP` listener cannot be
+    /// installed, and otherwise the socket, PTY, or session failure that ended
+    /// the daemon.
     pub async fn run(&mut self) -> Result<ExitStatus, DaemonError> {
         let mut frames = tokio::time::interval(FRAME_INTERVAL);
         frames.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Installed before the first client is served, so a reload requested
+        // during startup is queued by the signal handler rather than lost.
+        let mut reloads = ReloadWatch::new().map_err(DaemonError::Reload)?;
         let mut dirty = false;
 
         loop {
@@ -347,6 +415,12 @@ impl Daemon {
                     let (stream, _addr) = accepted.map_err(DaemonError::Accept)?;
                     self.spawn_adapter(stream);
                 }
+                // `Signal::recv` is cancel-safe, so a losing turn of this
+                // select has not consumed a reload request. The reload itself
+                // is a local file read and one assignment, followed by the same
+                // non-blocking broadcast damage uses: it touches neither the
+                // session actor nor a socket, so it cannot delay either.
+                () = reloads.changed() => self.reload_config(),
                 _ = frames.tick(), if dirty => {
                     self.publish_current().await?;
                     dirty = false;
@@ -607,7 +681,7 @@ impl Daemon {
     /// [`Direction::Horizontal`] to the layout tree — because a launched
     /// harness is a peer of what the user is already looking at.
     async fn launch_profile(&self, id: &str) -> Result<(), DaemonError> {
-        let Ok(launch) = Launch::from_profile_id(&self.config, id, self.cwd.clone()) else {
+        let Ok(launch) = Launch::from_profile_id(self.config.config(), id, self.cwd.clone()) else {
             return Ok(());
         };
         let _ = self
@@ -615,6 +689,35 @@ impl Daemon {
             .launch(Direction::Horizontal, EVEN_SPLIT, launch)
             .await;
         Ok(())
+    }
+
+    /// Re-reads the configuration file and publishes the resulting revision.
+    ///
+    /// The manager parses the whole document before its single assignment, so
+    /// the daemon either launches from the new profile, key, and visual tables
+    /// or from exactly the previous ones — never from a mixture. Only an
+    /// applied reload increments the revision and reaches a client; a refused
+    /// one keeps the last valid configuration and reports why.
+    fn reload_config(&mut self) {
+        let reload = self.config.reload();
+        for diagnostic in reload.diagnostics() {
+            if let Some(report) = self.report.as_ref() {
+                report(&diagnostic);
+            }
+        }
+        match reload {
+            Reload::Applied { .. } => {
+                self.revision = self.revision.saturating_add(1);
+                // With no clients this returns the frame back as an error, as
+                // every other publication does. A client attaching afterwards
+                // is a fresh client reading its own configuration, so it needs
+                // no revision it never had.
+                let _ = self
+                    .updates
+                    .send(DamageFrame::config_reloaded(self.revision));
+            }
+            Reload::Rejected { .. } | Reload::Detached => {}
+        }
     }
 
     /// Captures one authoritative snapshot and broadcasts only its delta.

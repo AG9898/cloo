@@ -170,6 +170,13 @@ crates/
   naming it, and its neighbours still load.
   Never coerce a rejected value into a nearby valid one — a clamped setting is a setting the user
   never wrote.
+- One component owns the live configuration. The daemon holds the `ConfigManager` itself rather
+  than a copy of the `Config` beside it, so "the whole document replaced or none of it" is a
+  property of the type and not of a call site. A configuration supplied directly, with no file
+  behind it, reloads to itself — re-reading nothing is never a reset to the built-ins.
+- A library crate never prints. Diagnostics leave through a value the caller supplied — a returned
+  string, or a sink handed to a long-running loop — because only the process that owns a terminal
+  knows whether there is anywhere for a warning to go.
 - A setting whose only fallback would leave cloo unusable keeps its default explicitly. An
   unspellable key `prefix` is the case that exists today: the binding is dropped, `C-b` stays, and
   the user is warned — a prefix nobody can press is a session with no way out.

@@ -960,7 +960,10 @@ override. M4-01 puts file I/O in `cloo-server::config`: `CLOO_CONFIG` wins over
 `XDG_CONFIG_HOME/cloo/config.toml` and the `$HOME/.config` fallback, a missing file means defaults,
 and a startup read failure warns before using defaults. Its `ConfigManager` loads and validates a
 whole replacement before one assignment changes the live value; a failed `SIGHUP` reload therefore
-keeps the prior valid configuration. M2-06 launches from profiles. M4-02 adds the `[keys]` table to
+keeps the prior valid configuration. A refused startup document still names its file, so fixing it
+and sending `SIGHUP` is enough — restarting the daemon is never required. M9-04 hands that manager
+to the daemon and drives it from the daemon's own event loop; see
+[Visual status projections](#visual-status-projections). M2-06 launches from profiles. M4-02 adds the `[keys]` table to
 the same document and the same warning rules — see [Keymap](#keymap) — so a `Config` now carries
 the prefix and its bindings alongside the profiles.
 
@@ -1149,6 +1152,21 @@ that client's previous valid preferences. `ConfigReloaded { revision: u64 }` car
 monotonically increasing number and nothing else: no palette and no keymap data, so configuration
 never becomes session state and two clients are never required to use the same theme. A client that
 sees no new revision correctly concludes nothing valid changed.
+
+M9-04 wires that half into the daemon. `Daemon` owns the `ConfigManager` outright — it is the
+single owner of the live `Config`, so the profile, key, and visual tables are replaced by the one
+assignment inside `ConfigManager::reload` or not at all — and installs a `ReloadWatch` as one more
+cancel-safe branch of the same select that pumps damage, accepts clients, and ticks frames. A
+reload is therefore a local file read plus that assignment plus the same non-blocking broadcast
+damage already uses: it never touches the session actor, a PTY, or a socket write, so it cannot
+delay any of them. The revision starts at zero — the configuration the daemon was handed at
+startup, which is never published, since a client that has just attached reads its own file anyway
+— and increases only on an applied reload. A `ConfigManager` may also hold *no* file, which is what
+a directly supplied configuration and a host with no resolvable configuration root both are;
+re-reading nothing answers `Reload::Detached`, keeps the supplied value rather than resetting it to
+the built-ins, and publishes nothing. Diagnostics leave the library through a caller-supplied sink
+rather than a print: a background daemon's stderr is `/dev/null` by design, so only the process
+that owns a terminal — `cloo server [session]` — decides where a refused document is reported.
 
 `Panes` is who the panes are — profile, name, task label, working directory — as opposed to
 `Layout`, which is where they sit. The two are separate messages because they change on

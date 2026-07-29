@@ -53,6 +53,20 @@ impl DamageFrame {
             messages: vec![ServerMessage::Effect { pane, effect }],
         }
     }
+
+    /// Announces the daemon's new configuration revision.
+    ///
+    /// A frame of its own, and deliberately not part of a snapshot: a reload is
+    /// not a change to any grid, and a client that resyncs later must not be
+    /// told a stale revision is news. It carries the number alone — every
+    /// preference the new document holds is read by each client from its own
+    /// environment, so configuration never becomes session state.
+    #[must_use]
+    pub fn config_reloaded(revision: u64) -> Self {
+        Self {
+            messages: vec![ServerMessage::ConfigReloaded { revision }],
+        }
+    }
 }
 
 /// Remembers the last frame published to clients.
@@ -418,6 +432,18 @@ mod tests {
     #[test]
     fn an_exit_frame_is_detectable_by_a_client_task() {
         assert!(DamageFrame::exit(0).ends_session());
+    }
+
+    #[test]
+    fn a_configuration_revision_travels_as_its_own_frame() {
+        // A reload changed no cell, so the frame carries the number alone and
+        // ends nobody's session.
+        let frame = DamageFrame::config_reloaded(7);
+        assert_eq!(
+            frame.messages(),
+            &[ServerMessage::ConfigReloaded { revision: 7 }]
+        );
+        assert!(!frame.ends_session());
     }
 
     #[test]
