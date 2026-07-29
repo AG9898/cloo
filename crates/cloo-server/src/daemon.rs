@@ -19,7 +19,7 @@ use cloo_core::{AdapterId, Config};
 use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, ClientId, ClientMessage,
     ClipboardTarget, Direction, OuterTerminalEffect, PaneId, ServerMessage, SessionId, Size,
-    StreamError,
+    StreamError, WorkspaceStatus,
 };
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -156,12 +156,14 @@ enum ClientCommand {
 /// State a newly attached client needs before it can enter its socket loop.
 struct ClientStart {
     size: Size,
+    status: WorkspaceStatus,
     snapshot: SessionSnapshot,
     updates: broadcast::Receiver<DamageFrame>,
 }
 
 /// The private reply to a lagged client's resync request.
 struct ClientResync {
+    status: WorkspaceStatus,
     snapshot: SessionSnapshot,
     updates: broadcast::Receiver<DamageFrame>,
 }
@@ -218,8 +220,19 @@ pub struct Daemon {
     /// What the daemon last told the session its area was. The session remains
     /// authoritative; this is the answer to put in the next hello.
     size: Size,
-    /// Current usable geometry of every attached client.
+    /// The session name supplied by the process that created this daemon.
+    name: String,
+    /// Current geometry reported by every attached client.
+    ///
+    /// Degenerate sizes remain in this map so the client count stays truthful,
+    /// but do not participate in the negotiated minimum.
     client_sizes: BTreeMap<ClientId, Size>,
+    /// The last status broadcast to attached clients.
+    ///
+    /// This is transport projection state, not session state: retaining it is
+    /// what prevents a resize that leaves the effective minimum unchanged from
+    /// producing a duplicate status frame.
+    published_status: Option<WorkspaceStatus>,
     next_client: u64,
     client_commands: mpsc::Receiver<ClientCommand>,
     client_tx: mpsc::Sender<ClientCommand>,
@@ -270,6 +283,13 @@ impl Daemon {
         let control = UnixListener::from_std(std_control).map_err(DaemonError::Accept)?;
 
         let cwd = launch.meta().cwd.clone();
+        let name = listener
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".sock"))
+            .unwrap_or("default")
+            .to_owned();
         let spawned = Session::spawn_framed(config, THE_PANE, launch)?;
         let size = cloo_core::grid::wire_size(config.term_size());
         let (client_tx, client_commands) = mpsc::channel(CLIENT_COMMAND_QUEUE);
@@ -289,7 +309,9 @@ impl Daemon {
             task: Some(spawned.task),
             child_id: spawned.child_id,
             size,
+            name,
             client_sizes: BTreeMap::new(),
+            published_status: None,
             next_client: 1,
             client_commands,
             client_tx,
@@ -335,6 +357,17 @@ impl Daemon {
     #[must_use]
     pub fn with_diagnostics(mut self, report: impl Fn(&str) + Send + Sync + 'static) -> Self {
         self.report = Some(Box::new(report));
+        self
+    }
+
+    /// Uses the session name resolved by the daemon's owner.
+    ///
+    /// The listener path is only a fallback for direct library callers:
+    /// `CLOO_SOCKET` may deliberately point at a file whose name differs from
+    /// the logical session, so the binary supplies the CLI-resolved name here.
+    #[must_use]
+    pub fn with_session_name(mut self, name: impl Into<String>) -> Self {
+        self.name = name.into();
         self
     }
 
@@ -493,11 +526,9 @@ impl Daemon {
                 // not affect server state, so dropping them here preserves the
                 // client-side policy boundary.
                 let _ = request.term_caps;
-                if usable(request.size) {
-                    self.client_sizes.insert(client, request.size);
-                    if self.resize_to_clients().await? {
-                        *dirty = true;
-                    }
+                self.client_sizes.insert(client, request.size);
+                if self.resize_to_clients().await? {
+                    *dirty = true;
                 }
 
                 // The snapshot and subscription have no await between them.
@@ -505,9 +536,12 @@ impl Daemon {
                 // receiver starts strictly after its full baseline.
                 let snapshot = self.snapshot().await?;
                 self.publish_snapshot(&snapshot);
+                let status = self.workspace_status();
+                self.publish_workspace_status(status.clone());
                 let updates = self.updates.subscribe();
                 let _ = reply.send(ClientStart {
                     size: self.size,
+                    status,
                     snapshot,
                     updates,
                 });
@@ -518,12 +552,11 @@ impl Daemon {
                 ClientMessage::Focus { focused } => self.session()?.focus(focused).await?,
                 ClientMessage::Mouse(event) => self.session()?.mouse(event).await?,
                 ClientMessage::Resize(size) => {
-                    if usable(size) {
-                        self.client_sizes.insert(client, size);
-                        if self.resize_to_clients().await? {
-                            *dirty = true;
-                        }
+                    self.client_sizes.insert(client, size);
+                    if self.resize_to_clients().await? {
+                        *dirty = true;
                     }
+                    self.publish_workspace_status(self.workspace_status());
                 }
                 // Focus, whether it arrived from the keyboard as a direction or
                 // from a click as a pane. Both land on the same actor, which is
@@ -635,8 +668,13 @@ impl Daemon {
                 // receiver cannot miss a newer frame between the two.
                 let snapshot = self.snapshot().await?;
                 self.publish_snapshot(&snapshot);
+                let status = self.workspace_status();
                 let updates = self.updates.subscribe();
-                let _ = reply.send(ClientResync { snapshot, updates });
+                let _ = reply.send(ClientResync {
+                    status,
+                    snapshot,
+                    updates,
+                });
             }
             ClientCommand::Copy { target, reply } => {
                 let effect = self.session()?.copy_selection(target).await?;
@@ -660,8 +698,11 @@ impl Daemon {
                 let _ = reply.send(outcome);
             }
             ClientCommand::Gone { client } => {
-                if self.client_sizes.remove(&client).is_some() && self.resize_to_clients().await? {
-                    *dirty = true;
+                if self.client_sizes.remove(&client).is_some() {
+                    if self.resize_to_clients().await? {
+                        *dirty = true;
+                    }
+                    self.publish_workspace_status(self.workspace_status());
                 }
             }
         }
@@ -746,9 +787,28 @@ impl Daemon {
         self.client_sizes
             .values()
             .copied()
+            .filter(|size| usable(*size))
             .reduce(|smallest, size| {
                 Size::new(smallest.cols.min(size.cols), smallest.rows.min(size.rows))
             })
+    }
+
+    /// Projects the attached workspace fields the client cannot derive.
+    fn workspace_status(&self) -> WorkspaceStatus {
+        WorkspaceStatus {
+            name: self.name.clone(),
+            clients: u16::try_from(self.client_sizes.len()).unwrap_or(u16::MAX),
+            effective_size: self.size,
+        }
+    }
+
+    /// Broadcasts a workspace status only when one of its fields changed.
+    fn publish_workspace_status(&mut self, status: WorkspaceStatus) {
+        if self.published_status.as_ref() == Some(&status) {
+            return;
+        }
+        self.published_status = Some(status.clone());
+        let _ = self.updates.send(DamageFrame::workspace_status(status));
     }
 
     /// Applies the currently negotiated minimum size, if any.
@@ -799,6 +859,7 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
     }
     let Ok(ClientStart {
         size,
+        status,
         snapshot,
         mut updates,
     }) = started.await
@@ -813,7 +874,7 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
         size,
     };
     if conn.send(&hello).await.is_err()
-        || send_all(&mut conn, &conn::session_snapshot(&snapshot))
+        || send_all(&mut conn, &conn::session_snapshot(&status, &snapshot))
             .await
             .is_err()
     {
@@ -839,10 +900,14 @@ async fn serve_client(stream: UnixStream, client: ClientId, commands: mpsc::Send
                     if commands.send(ClientCommand::Resync { reply }).await.is_err() {
                         break;
                     }
-                    let Ok(ClientResync { snapshot, updates: replacement }) = resynced.await else {
+                    let Ok(ClientResync {
+                        status,
+                        snapshot,
+                        updates: replacement,
+                    }) = resynced.await else {
                         break;
                     };
-                    if send_all(&mut conn, &conn::session_snapshot(&snapshot))
+                    if send_all(&mut conn, &conn::session_snapshot(&status, &snapshot))
                         .await
                         .is_err()
                     {

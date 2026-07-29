@@ -287,6 +287,7 @@ fn server(request: cli::ServerRequest) -> ExitCode {
         // why `cloo server [session]` is the documented way to see one: the
         // background daemon a bare `cloo` starts has none.
         let mut daemon = cloo_server::daemon::Daemon::new(listener, &base, launch)?
+            .with_session_name(request.session)
             .with_config_manager(config)
             .with_diagnostics(|diagnostic| eprintln!("cloo: warning: {diagnostic}"));
         daemon.run().await

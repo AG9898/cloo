@@ -279,10 +279,11 @@ was turned away can print something the user can act on, and a client that only 
 socket cannot. A peer that closes before saying anything is not a refusal — there is nobody left
 to report to.
 
-`conn::session_snapshot` is what an attach delivers. A client caches the visible grid and nothing
-else, so it needs the whole picture the moment it connects, and it arrives as the same message
-types an incremental update uses — `Layout`, then `Panes`, then `Attention`, then `Damage`, then
-`Modes`, then `CursorMoved` — so a resync and a
+`conn::session_snapshot` is what an attach delivers. A client caches the visible grid and the
+daemon's explicit projections, never a second session model, so it needs the whole picture the
+moment it connects. `WorkspaceStatus` arrives first, followed by the same message types an
+incremental update uses — `Layout`, then `Panes`, then `Attention`, then `Damage`, then `Modes`,
+then `CursorMoved` — so a resync and a
 damage frame stay one code path on the client. Geometry comes first so rows never arrive with
 nowhere to land, and identity and attention come before contents so a pane header has something to
 say before there is anything to draw it around.
@@ -309,6 +310,11 @@ snapshot; a slow terminal can therefore delay only its own resync, never the ses
 The session geometry is the component-wise minimum of usable attached-client sizes. When a client
 attaches, disconnects, or resizes, the coordinator relays that minimum through the session task;
 with no clients it keeps the last usable geometry so a detached child is not surprised by a resize.
+The daemon separately projects the logical session name, total attached-client count, and that
+effective minimum as `WorkspaceStatus`. Degenerate client sizes still count as attachments but do
+not participate in the minimum. A changed projection is broadcast immediately on the attachment
+clock; an unchanged private resize emits nothing, and a lagged client's private resync carries the
+current projection with its baseline.
 This is what keeps two clients visually consistent, and it is also the reconnect/resize race the
 M7-01 fixtures pin down: a narrower client that joins shrinks the survivor's grid, and when it
 *leaves* the survivor must be redrawn back at the full width — because a pane whose size changed
@@ -1129,9 +1135,12 @@ M9 adds typed, versioned projections for handoff chrome that the client cannot t
 from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake v11):
 
 - `WorkspaceStatus { name, clients: u16, effective_size: Size }` is the attached session's display
-  name, attached-client count, and effective minimum terminal size. The daemon publishes it when
-  attachment or sizing changes. It is separate from `Hello` because `Hello` happens once while
-  attachment and sizing keep moving underneath it.
+  name, attached-client count, and effective minimum terminal size. As of M9-07 every attach and
+  resync receives the current value, and the daemon broadcasts a replacement only when attachment
+  or sizing changes one of those fields. The client replaces this cache directly; reporting its
+  own resize does not change the cached effective size, and pane cells are never consulted. It is
+  separate from `Hello` because `Hello` happens once while attachment and sizing keep moving
+  underneath it.
 - `SessionSummary { name, tabs: u16, panes: u16, clients: u16, uptime_secs: u64 }` is a read-only
   inspection response. `ClientMessage::InspectSession { protocol_version }` is the request: a first
   frame in its own right, carrying its own version and neither a size nor capabilities, because the

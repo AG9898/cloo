@@ -26,7 +26,7 @@ use cloo_core::AdapterId;
 use cloo_core::error::MetadataError;
 use cloo_proto::{
     AdapterMessage, AdapterReply, ClientMessage, FrameStream, ProtoError, ServerMessage, SessionId,
-    Size, StreamError, TermCaps, check_version,
+    Size, StreamError, TermCaps, WorkspaceStatus, check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 
@@ -253,9 +253,13 @@ pub async fn refuse<T: AsyncRead + AsyncWrite + Unpin>(
 /// untouched. Recomputing it here would be a second answer to a question that
 /// already has one, and the two could disagree mid-resize.
 #[must_use]
-pub fn session_snapshot(snapshot: &SessionSnapshot) -> Vec<ServerMessage> {
+pub fn session_snapshot(
+    status: &WorkspaceStatus,
+    snapshot: &SessionSnapshot,
+) -> Vec<ServerMessage> {
     let pane = snapshot.focused;
     let mut messages = vec![
+        ServerMessage::WorkspaceStatus(status.clone()),
         ServerMessage::Tabs(snapshot.tabs.clone()),
         ServerMessage::Layout(cloo_proto::LayoutSnapshot {
             tab: snapshot.tab,
@@ -563,25 +567,35 @@ mod tests {
 
     #[test]
     fn a_snapshot_describes_geometry_before_contents() {
-        let messages = session_snapshot(&snapshot());
+        let status = WorkspaceStatus {
+            name: "agents".into(),
+            clients: 2,
+            effective_size: Size::new(2, 1),
+        };
+        let messages = session_snapshot(&status, &snapshot());
+        assert_eq!(
+            messages.first(),
+            Some(&ServerMessage::WorkspaceStatus(status)),
+            "the attached baseline must carry daemon-owned status"
+        );
         assert!(
-            matches!(messages.first(), Some(ServerMessage::Tabs(_))),
+            matches!(messages.get(1), Some(ServerMessage::Tabs(_))),
             "tabs must arrive before the active layout"
         );
-        assert!(matches!(messages.get(1), Some(ServerMessage::Layout(_))));
-        assert!(matches!(messages.get(2), Some(ServerMessage::Panes(_))));
-        assert!(matches!(messages.get(3), Some(ServerMessage::Attention(_))));
+        assert!(matches!(messages.get(2), Some(ServerMessage::Layout(_))));
+        assert!(matches!(messages.get(3), Some(ServerMessage::Panes(_))));
+        assert!(matches!(messages.get(4), Some(ServerMessage::Attention(_))));
         assert!(matches!(
-            messages.get(4),
+            messages.get(5),
             Some(ServerMessage::CopyMode(None))
         ));
         assert!(matches!(
-            messages.get(5),
+            messages.get(6),
             Some(ServerMessage::Damage { rows, .. }) if rows.len() == 1
         ));
-        assert!(matches!(messages.get(6), Some(ServerMessage::Modes { .. })));
+        assert!(matches!(messages.get(7), Some(ServerMessage::Modes { .. })));
         assert!(matches!(
-            messages.get(7),
+            messages.get(8),
             Some(ServerMessage::CursorMoved { visible: true, .. })
         ));
     }
@@ -591,8 +605,15 @@ mod tests {
         // A client caches the visible grid and nothing else, so identity has to
         // arrive with the resync or its chrome has nothing to write.
         let snapshot = snapshot();
-        let messages = session_snapshot(&snapshot);
-        let Some(ServerMessage::Panes(panes)) = messages.get(2) else {
+        let messages = session_snapshot(
+            &WorkspaceStatus {
+                name: "agents".into(),
+                clients: 1,
+                effective_size: snapshot.area,
+            },
+            &snapshot,
+        );
+        let Some(ServerMessage::Panes(panes)) = messages.get(3) else {
             panic!("the resync must carry pane identity");
         };
         assert_eq!(panes, &snapshot.metas);
@@ -605,8 +626,15 @@ mod tests {
         // Geometry the session resolved that a naive "one pane fills the area"
         // rebuild here would silently discard.
         snapshot.panes[0].x = 7;
-        let messages = session_snapshot(&snapshot);
-        let Some(ServerMessage::Layout(layout)) = messages.get(1) else {
+        let messages = session_snapshot(
+            &WorkspaceStatus {
+                name: "agents".into(),
+                clients: 1,
+                effective_size: snapshot.area,
+            },
+            &snapshot,
+        );
+        let Some(ServerMessage::Layout(layout)) = messages.get(2) else {
             panic!("layout must come first");
         };
         assert_eq!(layout.panes, snapshot.panes);
@@ -617,10 +645,17 @@ mod tests {
     fn a_hidden_cursor_is_still_reported() {
         let mut snapshot = snapshot();
         snapshot.pane.cursor = None;
-        let messages = session_snapshot(&snapshot);
+        let messages = session_snapshot(
+            &WorkspaceStatus {
+                name: "agents".into(),
+                clients: 1,
+                effective_size: snapshot.area,
+            },
+            &snapshot,
+        );
         assert!(
             matches!(
-                messages.get(7),
+                messages.get(8),
                 Some(ServerMessage::CursorMoved { visible: false, .. })
             ),
             "a client with a stale cursor must be told to stop drawing it"

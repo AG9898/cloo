@@ -38,7 +38,7 @@ use cloo_proto::{
     Action, AdapterMessage, AdapterRejection, AdapterReply, AdapterState, AttentionSource,
     AttentionState, ClientMessage, ClipboardTarget, CopyMotion, FrameStream, MouseButton,
     MouseEvent, MouseKind, MouseMods, MouseTracking, OuterTerminalEffect, PROTOCOL_VERSION, PaneId,
-    PaneModes, Point, RowUpdate, SearchDirection, ServerMessage, Size, TermCaps,
+    PaneModes, Point, RowUpdate, SearchDirection, ServerMessage, Size, TermCaps, WorkspaceStatus,
 };
 use cloo_server::daemon::Daemon;
 use cloo_server::launch::Launch;
@@ -322,6 +322,19 @@ fn spawn_daemon(
     (pid, handle)
 }
 
+/// Binds a daemon whose logical name is independent of its fixture socket.
+fn spawn_named_daemon(
+    socket: &Path,
+    name: &str,
+    script: &str,
+) -> tokio::task::JoinHandle<Result<std::process::ExitStatus, cloo_server::DaemonError>> {
+    let listener = Listener::bind(socket).expect("a fresh socket path must bind");
+    let mut daemon = Daemon::new(listener, &base(), scripted(script))
+        .expect("the daemon must start")
+        .with_session_name(name);
+    tokio::spawn(async move { daemon.run().await })
+}
+
 /// The same, for a daemon whose profile table came from a `config.toml`.
 ///
 /// Parsed rather than assembled, because that is the only way a profile reaches
@@ -544,6 +557,37 @@ async fn await_panes(attached: &mut Attached<UnixStream>) -> Vec<cloo_proto::Pan
     .expect("pane identity must reach an attached client")
 }
 
+/// Reads until the daemon publishes exactly the expected attached status.
+async fn await_workspace_status(
+    attached: &mut Attached<UnixStream>,
+    expected: WorkspaceStatus,
+) -> WorkspaceStatus {
+    let status = tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::WorkspaceStatus(status)) if status == expected => {
+                    return status;
+                }
+                Some(_) => {}
+                None => panic!("the server closed before reporting {expected:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the daemon never reported {expected:?}"));
+    assert_eq!(
+        attached.status(),
+        Some(&status),
+        "the attached client must replace its cached projection"
+    );
+    assert_eq!(
+        attached.size(),
+        status.effective_size,
+        "effective size comes from workspace status"
+    );
+    status
+}
+
 #[test]
 fn cli_attach_composes_the_frame_and_detaches_without_losing_the_session() {
     let dir = TempDir::new("cli-live-loop");
@@ -646,6 +690,90 @@ async fn attaching_delivers_a_hello_and_a_session_snapshot() {
         .expect("the daemon must not fail");
     assert!(status.success(), "the child exited with {status}");
     assert!(!alive(pid), "the child outlived its daemon");
+}
+
+#[tokio::test]
+async fn workspace_status_tracks_attach_resize_and_detach_without_duplicate_projections() {
+    let dir = TempDir::new("workspace-status");
+    let socket = dir.socket();
+    let daemon = spawn_named_daemon(&socket, "agents", "read _; exit 0");
+
+    let mut first = client_sized(&socket, Size::new(100, 30)).await;
+    await_workspace_status(
+        &mut first,
+        WorkspaceStatus {
+            name: "agents".into(),
+            clients: 1,
+            effective_size: Size::new(100, 30),
+        },
+    )
+    .await;
+
+    let mut second = client_sized(&socket, Size::new(120, 40)).await;
+    let joined = WorkspaceStatus {
+        name: "agents".into(),
+        clients: 2,
+        effective_size: Size::new(100, 30),
+    };
+    await_workspace_status(&mut first, joined.clone()).await;
+    await_workspace_status(&mut second, joined).await;
+
+    // This client changed, but neither the minimum nor any other projected
+    // field did. No status frame should be invented for a private size.
+    second
+        .send_resize(Size::new(140, 50))
+        .await
+        .expect("the larger resize reaches the daemon");
+    let duplicate = tokio::time::timeout(Duration::from_millis(100), async {
+        loop {
+            match second.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::WorkspaceStatus(status)) => return Some(status),
+                Some(_) => {}
+                None => return None,
+            }
+        }
+    })
+    .await;
+    assert!(
+        duplicate.is_err(),
+        "an unchanged projection must publish no status, got {duplicate:?}"
+    );
+
+    // Sending a resize is only a report. The client keeps the daemon's
+    // effective answer until the next status arrives.
+    second
+        .send_resize(Size::new(80, 20))
+        .await
+        .expect("the narrower resize reaches the daemon");
+    assert_eq!(second.size(), Size::new(100, 30));
+    let narrowed = WorkspaceStatus {
+        name: "agents".into(),
+        clients: 2,
+        effective_size: Size::new(80, 20),
+    };
+    await_workspace_status(&mut first, narrowed.clone()).await;
+    await_workspace_status(&mut second, narrowed).await;
+
+    second.detach().await.expect("the second client detaches");
+    await_workspace_status(
+        &mut first,
+        WorkspaceStatus {
+            name: "agents".into(),
+            clients: 1,
+            effective_size: Size::new(100, 30),
+        },
+    )
+    .await;
+
+    first
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
 }
 
 #[tokio::test]

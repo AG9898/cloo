@@ -202,6 +202,12 @@ explicit. Every value has the provenance documented in
 [`ARCHITECTURE.md`](ARCHITECTURE.md#visual-status-projections); unavailable optional values are
 omitted rather than fabricated.
 
+As of M9-07, the attached client caches the daemon's `WorkspaceStatus` projection for the logical
+session name, attached-client count, and effective minimum size. That cache is the only source for
+those fields in later status compositions: an outer-terminal resize is merely reported until the
+daemon answers, and neither pane geometry nor pane text may be used as a substitute. This task does
+not yet add those fields to the rendered minimal bar.
+
 Width yields in one fixed order: clock, client geometry, branch, inactive tab summaries, active tab
 title, full session name, per-state attention detail, and finally the help suffix. At the narrowest
 useful width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and

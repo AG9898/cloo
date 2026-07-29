@@ -29,7 +29,8 @@ use cloo_core::{Config, Profile, VisualConfig};
 use cloo_proto::{
     Action, AttentionState, ClientMessage, CopyModeState, CursorShape, FrameStream, LayoutSnapshot,
     MouseEvent, PROTOCOL_VERSION, PaneAttention, PaneId, PaneInfo, PaneModes, Point, ProtoError,
-    ServerMessage, SessionId, Size, StreamError, TabSummary, TermCaps, check_version,
+    ServerMessage, SessionId, Size, StreamError, TabSummary, TermCaps, WorkspaceStatus,
+    check_version,
 };
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
@@ -212,6 +213,7 @@ pub struct Attached<T> {
     session: SessionId,
     tabs: Vec<TabSummary>,
     size: Size,
+    status: Option<WorkspaceStatus>,
 }
 
 impl<T> Attached<T> {
@@ -233,6 +235,12 @@ impl<T> Attached<T> {
     pub fn size(&self) -> Size {
         self.size
     }
+
+    /// The newest daemon-owned attached workspace projection.
+    #[must_use]
+    pub fn status(&self) -> Option<&WorkspaceStatus> {
+        self.status.as_ref()
+    }
 }
 
 impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
@@ -246,8 +254,13 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
     /// Returns the transport or framing failure.
     pub async fn recv(&mut self) -> Result<Option<ServerMessage>, StreamError> {
         let message = self.conn.recv().await?;
-        if let Some(ServerMessage::Tabs(tabs)) = &message {
-            self.tabs = tabs.clone();
+        match &message {
+            Some(ServerMessage::Tabs(tabs)) => self.tabs = tabs.clone(),
+            Some(ServerMessage::WorkspaceStatus(status)) => {
+                self.size = status.effective_size;
+                self.status = Some(status.clone());
+            }
+            _ => {}
         }
         Ok(message)
     }
@@ -302,7 +315,6 @@ impl<T: AsyncRead + AsyncWrite + Unpin> Attached<T> {
     ///
     /// Returns the transport failure.
     pub async fn send_resize(&mut self, size: Size) -> Result<(), StreamError> {
-        self.size = size;
         self.conn.send(&ClientMessage::Resize(size)).await
     }
 
@@ -417,6 +429,7 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
                 session,
                 tabs,
                 size,
+                status: None,
             })
         }
         Some(ServerMessage::Refused { reason }) => Err(AttachError::Refused(reason)),
@@ -671,6 +684,7 @@ struct LiveState {
     outer_size: Size,
     session: SessionId,
     tabs: Vec<TabSummary>,
+    status: Option<WorkspaceStatus>,
     layout: Option<LayoutSnapshot>,
     areas: BTreeMap<PaneId, PaneArea>,
     panes: BTreeMap<PaneId, PaneInfo>,
@@ -707,6 +721,7 @@ impl LiveState {
             outer_size,
             session,
             tabs,
+            status: None,
             layout: None,
             areas: BTreeMap::new(),
             panes: BTreeMap::new(),
@@ -872,8 +887,14 @@ impl LiveState {
             // loop because only it owns the local reload callback. A summary is
             // not part of an attached stream at all — it answers an inspection
             // on a connection that never became a client.
-            ServerMessage::WorkspaceStatus(_)
-            | ServerMessage::SessionSummary(_)
+            ServerMessage::WorkspaceStatus(status) => {
+                if self.status.as_ref() == Some(&status) {
+                    return Ok(false);
+                }
+                self.status = Some(status);
+                Ok(true)
+            }
+            ServerMessage::SessionSummary(_)
             | ServerMessage::ConfigReloaded { .. }
             | ServerMessage::Hello { .. }
             | ServerMessage::Refused { .. }
@@ -1608,6 +1629,45 @@ mod tests {
             "the reason must survive into the message the user sees"
         );
         scripted.await.expect("the scripted server finishes");
+    }
+
+    #[test]
+    fn a_live_state_replaces_workspace_status_on_its_own_projection_clock() {
+        let mut state = LiveState::new(
+            Size::new(80, 24),
+            SessionId::new(7),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
+        let initial = WorkspaceStatus {
+            name: "agents".into(),
+            clients: 1,
+            effective_size: Size::new(80, 22),
+        };
+        assert!(
+            state
+                .apply(ServerMessage::WorkspaceStatus(initial.clone()))
+                .expect("status applies")
+        );
+        assert_eq!(state.status.as_ref(), Some(&initial));
+        assert!(
+            !state
+                .apply(ServerMessage::WorkspaceStatus(initial))
+                .expect("a repeated status is harmless"),
+            "an identical projection must not dirty the frame"
+        );
+
+        let replacement = WorkspaceStatus {
+            name: "agents".into(),
+            clients: 2,
+            effective_size: Size::new(72, 18),
+        };
+        assert!(
+            state
+                .apply(ServerMessage::WorkspaceStatus(replacement.clone()))
+                .expect("replacement status applies")
+        );
+        assert_eq!(state.status.as_ref(), Some(&replacement));
     }
 
     #[tokio::test]

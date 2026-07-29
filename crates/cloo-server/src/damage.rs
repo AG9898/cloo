@@ -6,7 +6,9 @@
 //! The daemon publishes that frame through a bounded `broadcast` channel; it
 //! never waits for an individual socket while the session task is running.
 
-use cloo_proto::{CursorShape, LayoutSnapshot, OuterTerminalEffect, PaneId, Point, ServerMessage};
+use cloo_proto::{
+    CursorShape, LayoutSnapshot, OuterTerminalEffect, PaneId, Point, ServerMessage, WorkspaceStatus,
+};
 
 use crate::session::SessionSnapshot;
 
@@ -65,6 +67,19 @@ impl DamageFrame {
     pub fn config_reloaded(revision: u64) -> Self {
         Self {
             messages: vec![ServerMessage::ConfigReloaded { revision }],
+        }
+    }
+
+    /// Publishes the daemon-owned workspace status projection.
+    ///
+    /// Attachment count and negotiated geometry move independently of PTY
+    /// damage, so this is a frame of its own rather than part of a session
+    /// snapshot delta. A lagged client receives the current value with its
+    /// private resync baseline.
+    #[must_use]
+    pub fn workspace_status(status: WorkspaceStatus) -> Self {
+        Self {
+            messages: vec![ServerMessage::WorkspaceStatus(status)],
         }
     }
 }
