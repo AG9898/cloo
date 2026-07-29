@@ -85,6 +85,29 @@ Required coverage:
 - Protocol fixtures for every new status/session projection, including version mismatch and an
   inspection request that creates no attachment or resize.
 
+M9-01 builds the harness that coverage is written in. `crates/cloo-client/tests/visual/harness.rs`
+holds three pieces: `FrameMatrix`, which paints already-composed spans onto a blank terminal of a
+known size and is a pure function of the spans it is given; `ExpectedFrame`, a golden authored as
+text — one line of characters and one parallel line of single-character style keys per row, over a
+legend of semantic styles; and `check_frame`, which reports the *first* differing cell by row,
+column, character, and semantic role, with the row drawn either side of it and a caret under the
+cell. `crates/cloo-client/tests/visual/scenes.rs` assembles the client-side state a frame needs —
+geometry, tabs, each pane's rectangle, cached grid and header, the attention queue, and the prefix
+hint — and runs the production `compose_frame` over it, so a fixture asserts the composed picture
+rather than one chrome helper's output. Nothing in the harness opens a pseudoterminal, connects to a
+daemon, or writes a byte to a descriptor.
+
+A golden names style-guide *roles*, never literal colors, which is what lets one expectation be
+checked against a truecolor theme and its 16-color resolution; `Paint::Reference` marks a role that
+chrome still draws from the reference Storm palette rather than resolving through the client theme,
+so the remaining gap is visible in the fixture instead of hidden inside an RGB triple. The
+`tests/visual.rs` fixtures today cover the one-pane workspace at both capability tiers against one
+shared golden, the scene's grids being byte-identical before and after a frame is captured, and the
+diff itself: a character difference naming its row, column, and both characters with the caret under
+the named cell; a style-only difference naming both semantic roles and both rendition sets; and a
+geometry difference refused before any cell is compared. The workspace goldens were confirmed
+non-vacuous by recoloring the focused pane header's title and watching both tiers fail.
+
 Golden updates require an intentional review against
 [`STYLEGUIDE.md`](STYLEGUIDE.md#acceptance-contract-and-delivery-state); regenerating expected
 frames until a failing implementation passes is not an acceptance process. Font rasterization,

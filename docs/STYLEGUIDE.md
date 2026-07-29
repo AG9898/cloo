@@ -54,6 +54,14 @@ handoff in composition, hierarchy, spacing, and semantic color. The child transc
 application-owned: cloo supplies the pane surface and chrome, while shells, editors, and harnesses
 choose the characters and explicit colors inside their grids.
 
+A card is asserted as a complete cell matrix in `crates/cloo-client/tests/visual/`, where a golden
+names the roles below rather than literal colors, so one expectation is checked against a truecolor
+theme and its 16-color resolution. Chrome that a card has not yet routed through the client theme is
+expected at its *reference* Storm value instead, which keeps the remaining gap visible in the
+fixture. The tab row and the status row are still authored that way at the start of M9: they draw
+the reference palette at every color depth, while pane headers already resolve through the client
+theme and pane bodies still carry the child's untouched default cell.
+
 ## Visual Decisions
 
 - **Focus:** the focused pane has an accent border; unfocused panes are dimmed. Dimming is a
