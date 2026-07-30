@@ -1555,6 +1555,92 @@ pub fn overlay_action(keys: &[u8]) -> Option<OverlayAction> {
     }
 }
 
+/// A keyboard action against the open command palette.
+///
+/// The palette is the one overlay where an ordinary printable key is *text*:
+/// `j` types a `j` here and moves the cursor everywhere else. That is why it
+/// has its own vocabulary rather than reusing [`OverlayAction`] — and why
+/// [`palette_actions`] turns a whole run of bytes into a sequence rather than
+/// one action, since a fast typist's keystrokes arrive in one chunk.
+///
+/// Like every overlay vocabulary these are cloo's own actions: none of it
+/// reaches a child, so a query can never be typed into a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteAction {
+    /// Append one character to the query.
+    Insert(char),
+    /// Drop the query's last character.
+    Backspace,
+    /// Drop the whole query, returning to the discoverable command list.
+    Clear,
+    /// Move the cursor one result down.
+    Next,
+    /// Move the cursor one result up.
+    Prev,
+    /// Jump to the first result.
+    First,
+    /// Jump to the last result.
+    Last,
+    /// Run the selected command.
+    Confirm,
+    /// Close the palette without running anything.
+    Dismiss,
+}
+
+/// Maps one decoded chord to a palette action, or `None` if it means nothing.
+///
+/// Navigation is the arrows and `C-n`/`C-p` rather than `j`/`k`, because those
+/// are query characters here. Escape dismisses — as it does in every overlay,
+/// without exception — and `q` deliberately does not, for the same reason.
+#[must_use]
+pub fn palette_action(keys: &[u8]) -> Option<PaletteAction> {
+    match keys {
+        b"\x1b[B" | b"\x0e" => Some(PaletteAction::Next),
+        b"\x1b[A" | b"\x10" => Some(PaletteAction::Prev),
+        b"\x1b[H" => Some(PaletteAction::First),
+        b"\x1b[F" => Some(PaletteAction::Last),
+        b"\r" | b"\n" => Some(PaletteAction::Confirm),
+        b"\x7f" | b"\x08" => Some(PaletteAction::Backspace),
+        b"\x15" => Some(PaletteAction::Clear),
+        b"\x1b" => Some(PaletteAction::Dismiss),
+        // Everything printable is query text, space included: a query is
+        // matched term by term, so a space is how a user narrows one.
+        [byte] if byte.is_ascii_graphic() || *byte == b' ' => {
+            Some(PaletteAction::Insert(char::from(*byte)))
+        }
+        _ => None,
+    }
+}
+
+/// Turns one run of key bytes into the palette actions it spells.
+///
+/// A run rather than a chord because typing arrives coalesced: a user who types
+/// `spl` quickly hands the client three bytes at once, and decoding only the
+/// whole run as one chord would drop two of them. Bytes that spell nothing the
+/// palette knows are skipped rather than passed on — an open overlay owns the
+/// keyboard, so nothing here can fall through to a pane.
+#[must_use]
+pub fn palette_actions(keys: &[u8]) -> Vec<PaletteAction> {
+    let mut actions = Vec::new();
+    let mut index = 0;
+    while index < keys.len() {
+        // Longest first, so `\x1b[B` is an arrow rather than an Escape followed
+        // by two characters of query.
+        let taken = [3usize, 1]
+            .into_iter()
+            .filter(|len| index + len <= keys.len())
+            .find_map(|len| palette_action(&keys[index..index + len]).map(|action| (action, len)));
+        match taken {
+            Some((action, len)) => {
+                actions.push(action);
+                index += len;
+            }
+            None => index += 1,
+        }
+    }
+    actions
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2810,5 +2896,61 @@ mod tests {
     fn an_unbound_key_is_not_an_overlay_action() {
         assert_eq!(overlay_action(b"x"), None);
         assert_eq!(overlay_action(b""), None);
+    }
+
+    // -- command palette actions --------------------------------------------
+
+    /// The palette's whole departure from the shared vocabulary: a printable
+    /// key is text, so navigation moves to the arrows and `C-n`/`C-p`, and `q`
+    /// types a `q` instead of closing the surface.
+    #[test]
+    fn command_palette_keys_separate_query_text_from_navigation() {
+        let cases: [(&[u8], PaletteAction); 13] = [
+            (b"\x1b[B", PaletteAction::Next),
+            (b"\x0e", PaletteAction::Next),
+            (b"\x1b[A", PaletteAction::Prev),
+            (b"\x10", PaletteAction::Prev),
+            (b"\x1b[H", PaletteAction::First),
+            (b"\x1b[F", PaletteAction::Last),
+            (b"\r", PaletteAction::Confirm),
+            (b"\n", PaletteAction::Confirm),
+            (b"\x7f", PaletteAction::Backspace),
+            (b"\x08", PaletteAction::Backspace),
+            (b"\x15", PaletteAction::Clear),
+            (b"\x1b", PaletteAction::Dismiss),
+            (b"q", PaletteAction::Insert('q')),
+        ];
+        for (keys, action) in cases {
+            assert_eq!(palette_action(keys), Some(action), "{keys:?}");
+        }
+        assert_eq!(palette_action(b" "), Some(PaletteAction::Insert(' ')));
+        assert_eq!(palette_action(b""), None);
+    }
+
+    /// Typing arrives coalesced, so a run is a sequence of edits — and the
+    /// three-byte arrow inside one has to win over the Escape it starts with.
+    #[test]
+    fn a_command_palette_run_decodes_every_byte_it_can_use() {
+        assert_eq!(
+            palette_actions(b"ab\x7f"),
+            [
+                PaletteAction::Insert('a'),
+                PaletteAction::Insert('b'),
+                PaletteAction::Backspace
+            ]
+        );
+        assert_eq!(
+            palette_actions(b"a\x1b[Bb"),
+            [
+                PaletteAction::Insert('a'),
+                PaletteAction::Next,
+                PaletteAction::Insert('b')
+            ],
+            "an arrow inside a run is never an escape plus two characters"
+        );
+        assert!(
+            palette_actions(&[0xc3, 0xa9]).is_empty(),
+            "a byte the palette cannot use is dropped, never passed to a pane"
+        );
     }
 }

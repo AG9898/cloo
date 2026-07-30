@@ -600,14 +600,44 @@ owns its local query and selection state; variants differ in their row data and 
 outcome. Like `chrome` it is a pure function into cells, so a complete fixed-size overlay is
 testable as a cell matrix.
 
-The help surface is built from the live `cloo_core::keymap::Keymap` and from nothing else:
-`Overlay::help` reads the effective prefix into the title and looks each listed action's chord up in
-the table, so a rebound prefix and a rebound chord are shown verbatim and an unbound action has no
+The command palette is built from the live `cloo_core::keymap::Keymap` and from nothing else:
+`Overlay::palette` reads the effective prefix into the title and looks each listed action's chord up
+in the table, so a rebound prefix and a rebound chord are shown verbatim and an unbound action has no
 row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`,
 `ADD_PANE_KEY`, and `ATTENTION_KEY`) shared with `attach`'s `open_overlay`, which is reached only for
-a chord the keymap left unbound — so a user who binds `?` keeps their binding, and the help surface
-drops the row it would otherwise have claimed. It is also why ordinary shell text opens nothing: a
-chord reaches `open_overlay` only after the prefix has already been resolved.
+a chord the keymap left unbound — so a user who binds `?` keeps their binding, and the palette drops
+the row it would otherwise have claimed. It is also why ordinary shell text opens nothing: a chord
+reaches `open_overlay` only after the prefix has already been resolved.
+
+##### The command palette (M9-17)
+
+M9-17 turns that surface into `OverlayKind::Palette`. A `CommandPalette` owns the query beside the
+result set, and `Overlay` owns the cursor into it, because filtering and selection have to move
+together: `Overlay::apply_palette` re-anchors the cursor on the *command* it was on rather than on
+the position it held, so a row that stops matching cannot hand the selection to a neighbour. A query
+is matched case-insensitively, term by term, against the chord, the label, and the `[keys]` name, so
+`spl r` and `split-vertical` both find `split right`.
+
+Its keyboard vocabulary is `input::PaletteAction`, decoded by `input::palette_actions` rather than by
+the single-chord `overlay_action`, because typing arrives coalesced and every byte of a burst is one
+edit. This is the one overlay where an ordinary printable key is *text*: `j` types a `j`, navigation
+moves to the arrows and `C-n`/`C-p`, and `q` no longer dismisses — Escape still does, as it does in
+every overlay without exception. `LiveState::overlay_outcome` answers for the palette even when the
+keys spell nothing it knows, so no query byte can fall through to a pane.
+
+Confirmation stays typed on both arms. `CommandOutcome::Run(Action)` leaves as
+`OverlayOutcome::RunAction` and is sent exactly as the bound chord would have been — including
+`Action::DetachClient`, which `route_keys` still has to treat as a detach — while
+`CommandOutcome::Open(ClientSurface)` never reaches the wire and is answered by
+`OverlayOutcome::OpenSurface`. `ClientSurface` exists because the overlay module cannot build a
+session list or a pane-details view out of state it deliberately cannot see; `LiveState::surface` is
+the one place a surface is constructed, so a chord and a confirmed palette row reach the same
+overlay. There is nowhere in either arm for a free-text command line to go.
+
+The palette also draws a third chrome row — the `/` query line between the title and the list — so
+`Overlay::preferred_rows` is its list plus three where every other overlay asks for two. That row
+yields before the title and the hints do, and a query matching nothing replaces the title's position
+counter with `no matches` rather than leaving a blank box.
 
 Two properties are types rather than rules. A `LaunchRequest` carries a `ProfileId` and has no
 constructor but confirming a launcher row, and a launcher row has no constructor but a validated

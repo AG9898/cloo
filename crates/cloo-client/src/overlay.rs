@@ -1,5 +1,5 @@
-//! Keyboard-first overlays: the help surface, the session switcher, the profile
-//! launcher, the attention queue, and pane details.
+//! Keyboard-first overlays: the command palette, the session switcher, the
+//! profile launcher, the attention queue, and pane details.
 //!
 //! `docs/STYLEGUIDE.md` gives every overlay one language — dim the background,
 //! keep a clear selected row, show keyboard hints, dismiss with Escape — so this
@@ -15,10 +15,14 @@
 //! - **Every overlay is dismissible from every state.** [`OverlayAction::Dismiss`]
 //!   answers [`OverlayOutcome::Dismissed`] whatever the list holds, including an
 //!   empty one, so an overlay can never trap the terminal.
-//! - **The help surface is read from the keymap, never from a list of what the
-//!   defaults used to be.** [`Overlay::help`] takes the [`Keymap`] the router is
-//!   actually resolving against, so a rebound chord and a rebound prefix are
-//!   shown verbatim and an unbound action has no row at all.
+//! - **The command palette is read from the keymap, never from a list of what
+//!   the defaults used to be.** [`Overlay::palette`] takes the [`Keymap`] the
+//!   router is actually resolving against, so a rebound chord and a rebound
+//!   prefix are shown verbatim and an unbound action has no row at all. Its
+//!   query is edited locally with [`Overlay::apply_palette`] and every listed
+//!   row confirms to a *typed* outcome — a wire [`Action`] or a client-local
+//!   [`ClientSurface`] — so a searchable surface never becomes a place to type
+//!   a command line into.
 //! - **A launch names a profile, and only a profile.** A launcher row is built
 //!   from a validated [`Profile`] and from nothing else, and confirming one
 //!   yields a [`LaunchRequest`] carrying that profile's ID. There is no
@@ -60,7 +64,7 @@ use cloo_core::{Profile, ProfileCommand, ProfileId};
 use cloo_proto::{Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionId, Size};
 
 use crate::chrome::{Attention, QueueEntry, dim_cell_with_theme};
-use crate::input::{OverlayAction, QueueAction};
+use crate::input::{OverlayAction, PaletteAction, QueueAction};
 use crate::renderer::Span;
 use crate::theme::{Theme, ThemeToken};
 
@@ -265,10 +269,10 @@ impl AttentionEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Help
+// The command palette
 // ---------------------------------------------------------------------------
 
-/// The chord that opens the help surface, when the keymap leaves it free.
+/// The chord that opens the command palette, when the keymap leaves it free.
 pub const HELP_KEY: char = '?';
 /// The chord that opens the focused pane's details.
 pub const DETAILS_KEY: char = 'i';
@@ -283,14 +287,14 @@ pub const ADD_PANE_KEY: char = 'a';
 /// is something in it.
 pub const ATTENTION_KEY: char = '!';
 
-/// The bound actions the help surface lists, in the order it lists them.
+/// The bound actions the palette lists, in the order an empty query lists them.
 ///
-/// Deliberately a *curated* list rather than every binding in the table: the
-/// surface exists so a first-time user can act, and twenty-odd copy motions
+/// Deliberately a *curated* list rather than every binding in the table: an
+/// empty query is the discoverable command list, and twenty-odd copy motions
 /// between `split` and `detach` would bury the controls it is there to teach.
 /// Each row's chord is still looked up in the live keymap, so nothing here
 /// claims a key the user did not configure.
-const HELP_ACTIONS: [(Action, &str); 14] = [
+const PALETTE_ACTIONS: [(Action, &str); 14] = [
     (Action::SplitVertical, "split right"),
     (Action::SplitHorizontal, "split down"),
     (Action::ClosePane, "close pane"),
@@ -307,35 +311,111 @@ const HELP_ACTIONS: [(Action, &str); 14] = [
     (Action::DetachClient, "detach"),
 ];
 
-/// The client-local surfaces, in the order the help surface lists them.
+/// A surface the client owns outright, which the palette can open.
 ///
-/// `(key, label, note)`. These never cross the wire, so they are not in the
-/// keymap — but a user who binds one of these keys to a real action takes it
-/// from the client, and the row disappears with it rather than lying.
-const HELP_CLIENT_KEYS: [(char, &str, &str); 5] = [
-    (ADD_PANE_KEY, "add pane", "client"),
-    (SESSIONS_KEY, "sessions", "client"),
-    (ATTENTION_KEY, "attention queue", "client"),
-    (DETAILS_KEY, "pane details", "client"),
-    (HELP_KEY, "this help", "client"),
+/// These never cross the wire, so they are not in the keymap and they are not
+/// [`Action`]s — but the palette still has to *name* one without knowing how to
+/// build it, because assembling a session list or a pane-details view needs the
+/// live client state the overlay module deliberately cannot see. This enum is
+/// that name: confirming a client row answers
+/// [`OverlayOutcome::OpenSurface`], and the attached client is the one place
+/// that turns it into the next overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientSurface {
+    /// The profile launcher.
+    Launcher,
+    /// The session switcher.
+    Sessions,
+    /// The attention queue.
+    Attention,
+    /// The focused pane's details.
+    Details,
+}
+
+/// The client-local surfaces, in the order an empty query lists them.
+const PALETTE_SURFACES: [ClientSurface; 4] = [
+    ClientSurface::Launcher,
+    ClientSurface::Sessions,
+    ClientSurface::Attention,
+    ClientSurface::Details,
 ];
 
-/// One line of the help surface: a chord, what it does, and where it comes from.
+impl ClientSurface {
+    /// The chord that opens it directly, when the keymap leaves that key free.
+    #[must_use]
+    pub const fn key(self) -> char {
+        match self {
+            Self::Launcher => ADD_PANE_KEY,
+            Self::Sessions => SESSIONS_KEY,
+            Self::Attention => ATTENTION_KEY,
+            Self::Details => DETAILS_KEY,
+        }
+    }
+
+    /// The surface a client-local chord opens, if it opens one.
+    #[must_use]
+    pub fn from_key(key: char) -> Option<Self> {
+        PALETTE_SURFACES
+            .into_iter()
+            .find(|surface| surface.key() == key)
+    }
+
+    /// What the palette calls it, in the user's words.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Launcher => "add pane",
+            Self::Sessions => "sessions",
+            Self::Attention => "attention queue",
+            Self::Details => "pane details",
+        }
+    }
+}
+
+/// What confirming one palette row means.
+///
+/// Typed on both arms, and deliberately so: a searchable surface is the obvious
+/// place for someone to add a free-text command field, and there is nowhere in
+/// this type for one to go. A row either names a keymap [`Action`] the daemon
+/// already understands or a [`ClientSurface`] that never leaves the client.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HelpEntry {
+pub enum CommandOutcome {
+    /// Send this action, exactly as the bound chord would have.
+    Run(Action),
+    /// Open this client-local surface instead.
+    Open(ClientSurface),
+}
+
+/// One line of the palette: a chord, what it does, and where it comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaletteCommand {
     key: String,
     label: String,
     note: String,
+    outcome: CommandOutcome,
+    /// Everything the query is matched against, folded to lower case once when
+    /// the row is built rather than on every keystroke.
+    haystack: String,
 }
 
-impl HelpEntry {
+impl PaletteCommand {
+    fn new(key: String, label: &str, note: &str, outcome: CommandOutcome) -> Self {
+        Self {
+            haystack: format!("{key} {label} {note}").to_lowercase(),
+            key,
+            label: label.to_owned(),
+            note: note.to_owned(),
+            outcome,
+        }
+    }
+
     /// The chord to press *after* the prefix, spelled as the keymap spells it.
     #[must_use]
     pub fn key(&self) -> &str {
         &self.key
     }
 
-    /// What pressing it does, in the user's words rather than the wire's.
+    /// What running it does, in the user's words rather than the wire's.
     #[must_use]
     pub fn label(&self) -> &str {
         &self.label
@@ -347,52 +427,86 @@ impl HelpEntry {
     pub fn note(&self) -> &str {
         &self.note
     }
+
+    /// What confirming this row means.
+    #[must_use]
+    pub const fn outcome(&self) -> &CommandOutcome {
+        &self.outcome
+    }
+
+    /// Whether every whitespace-separated term of `query` appears in the row.
+    ///
+    /// Case-insensitive and term-wise rather than one substring, so `spl r`
+    /// finds `split right` — and matched against the `[keys]` name as well as
+    /// the label, because a user who knows the configuration name is exactly
+    /// the user searching for it.
+    fn matches(&self, query: &str) -> bool {
+        query
+            .split_whitespace()
+            .all(|term| self.haystack.contains(&term.to_lowercase()))
+    }
 }
 
-/// The effective key bindings, as one readable surface.
+/// The effective key bindings and client surfaces, as one searchable list.
 ///
 /// Built from a [`Keymap`] and from nothing else — there is no constructor
-/// taking a hand-written table — which is what makes "the help surface cannot
+/// taking a hand-written table — which is what makes "the palette cannot
 /// disagree with the router" a fact about the type rather than a rule someone
 /// has to remember when they rebind a key.
+///
+/// The query lives here rather than in the caller because filtering and the
+/// keyboard cursor have to move together: a row that stops matching must not
+/// leave the selection pointing at a command the user can no longer see.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HelpKeys {
+pub struct CommandPalette {
     prefix: String,
     title: String,
-    entries: Vec<HelpEntry>,
+    commands: Vec<PaletteCommand>,
+    query: String,
+    /// Indices into `commands`, in display order.
+    matches: Vec<usize>,
 }
 
-impl HelpKeys {
+impl CommandPalette {
     /// Reads the effective bindings out of `keymap`.
     #[must_use]
     pub fn new(keymap: &Keymap) -> Self {
         let prefix = keymap.prefix().to_string();
-        let mut entries = Vec::with_capacity(HELP_ACTIONS.len() + HELP_CLIENT_KEYS.len());
-        for (action, label) in HELP_ACTIONS {
+        let mut commands = Vec::with_capacity(PALETTE_ACTIONS.len() + PALETTE_SURFACES.len());
+        for (action, label) in PALETTE_ACTIONS {
             // An action the user unbound has no chord to show, and inventing
             // one would send them pressing a key that does nothing.
             let Some(key) = bound_key(keymap, &action) else {
                 continue;
             };
-            entries.push(HelpEntry {
+            let note = action_name(&action).unwrap_or_default();
+            commands.push(PaletteCommand::new(
                 key,
-                label: label.to_owned(),
-                note: action_name(&action).unwrap_or_default().to_owned(),
-            });
+                label,
+                note,
+                CommandOutcome::Run(action),
+            ));
         }
-        for (key, label, note) in HELP_CLIENT_KEYS {
-            if keymap.action(Key::char(key)).is_none() {
-                entries.push(HelpEntry {
-                    key: key.to_string(),
-                    label: label.to_owned(),
-                    note: note.to_owned(),
-                });
+        // A user who binds one of the client's chords to a real action takes it
+        // from the client, and the row goes with it rather than lying: that
+        // chord will never reach `open_overlay` again.
+        for surface in PALETTE_SURFACES {
+            if keymap.action(Key::char(surface.key())).is_none() {
+                commands.push(PaletteCommand::new(
+                    surface.key().to_string(),
+                    surface.label(),
+                    "client",
+                    CommandOutcome::Open(surface),
+                ));
             }
         }
+        let matches = (0..commands.len()).collect();
         Self {
-            title: format!("keys - prefix {prefix}"),
+            title: format!("commands - prefix {prefix}"),
             prefix,
-            entries,
+            commands,
+            query: String::new(),
+            matches,
         }
     }
 
@@ -402,10 +516,41 @@ impl HelpKeys {
         &self.prefix
     }
 
-    /// Every listed binding, in display order.
+    /// What the user has typed so far.
     #[must_use]
-    pub fn entries(&self) -> &[HelpEntry] {
-        &self.entries
+    pub fn query(&self) -> &str {
+        &self.query
+    }
+
+    /// Every command the palette knows, filtered or not.
+    #[must_use]
+    pub fn commands(&self) -> &[PaletteCommand] {
+        &self.commands
+    }
+
+    /// The commands the current query matches, in display order.
+    #[must_use]
+    pub fn results(&self) -> Vec<&PaletteCommand> {
+        self.matches
+            .iter()
+            .map(|index| &self.commands[*index])
+            .collect()
+    }
+
+    /// The command at one display position, if the query still matches one.
+    fn result(&self, index: usize) -> Option<&PaletteCommand> {
+        self.matches.get(index).map(|index| &self.commands[*index])
+    }
+
+    /// Recomputes the result set after the query changed.
+    fn refilter(&mut self) {
+        self.matches = self
+            .commands
+            .iter()
+            .enumerate()
+            .filter(|(_, command)| command.matches(&self.query))
+            .map(|(index, _)| index)
+            .collect();
     }
 }
 
@@ -429,8 +574,8 @@ fn bound_key(keymap: &Keymap, action: &Action) -> Option<String> {
 /// Which overlay is open, and what it holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OverlayKind {
-    /// The effective key bindings.
-    Help(HelpKeys),
+    /// The searchable command palette over the effective key bindings.
+    Palette(CommandPalette),
     /// The session switcher.
     Sessions(Vec<SessionEntry>),
     /// The profile launcher.
@@ -449,16 +594,18 @@ pub struct Overlay {
 }
 
 impl Overlay {
-    /// Opens the help surface over the keymap the client is resolving against.
+    /// Opens the command palette over the keymap the client is resolving
+    /// against.
     ///
     /// The one surface a user reaches before they know any other key, so it is
     /// read from the live keymap rather than from a written-down copy of the
     /// defaults: a rebound prefix, a rebound chord, and an unbound action are
-    /// all shown as they actually are.
+    /// all shown as they actually are. It opens with an empty query, which is
+    /// the discoverable command list.
     #[must_use]
-    pub fn help(keymap: &Keymap) -> Self {
+    pub fn palette(keymap: &Keymap) -> Self {
         Self {
-            kind: OverlayKind::Help(HelpKeys::new(keymap)),
+            kind: OverlayKind::Palette(CommandPalette::new(keymap)),
             selected: 0,
         }
     }
@@ -543,7 +690,7 @@ impl Overlay {
     #[must_use]
     pub fn title(&self) -> &str {
         match &self.kind {
-            OverlayKind::Help(help) => &help.title,
+            OverlayKind::Palette(palette) => &palette.title,
             OverlayKind::Sessions(_) => "sessions",
             OverlayKind::Launcher(_) => "launch profile",
             OverlayKind::Attention(_) => "attention",
@@ -552,14 +699,36 @@ impl Overlay {
     }
 
     /// How many rows the overlay lists.
+    ///
+    /// The palette counts its *results*, not its commands: a query that matches
+    /// nothing is an empty list, and the position the title reports has to be a
+    /// position in what the user can actually see.
     #[must_use]
     pub fn len(&self) -> usize {
         match &self.kind {
-            OverlayKind::Help(help) => help.entries.len(),
+            OverlayKind::Palette(palette) => palette.matches.len(),
             OverlayKind::Sessions(entries) => entries.len(),
             OverlayKind::Launcher(entries) => entries.len(),
             OverlayKind::Attention(entries) => entries.len(),
             OverlayKind::Details(details) => details.fields().len(),
+        }
+    }
+
+    /// How many rows the overlay would like to be drawn in.
+    ///
+    /// Its list plus its chrome rows: a title and a hint row for every surface,
+    /// and the query line the palette also owns.
+    #[must_use]
+    pub fn preferred_rows(&self) -> usize {
+        self.len().saturating_add(self.chrome_rows())
+    }
+
+    /// How many rows of this overlay are chrome rather than list.
+    fn chrome_rows(&self) -> usize {
+        if matches!(self.kind, OverlayKind::Palette(_)) {
+            3
+        } else {
+            2
         }
     }
 
@@ -614,6 +783,71 @@ impl Overlay {
         }
     }
 
+    /// Applies one command-palette keyboard action.
+    ///
+    /// The palette keeps its own vocabulary — [`PaletteAction`], decoded by
+    /// [`crate::input::palette_actions`] — because it is the one overlay where
+    /// an ordinary printable key is *text* rather than a command: `j` types a
+    /// `j` here and moves the cursor everywhere else. Editing the query keeps
+    /// the cursor on the command it was on, by identity and not by position, so
+    /// a row that stops matching cannot silently hand the selection to a
+    /// neighbour the user was not looking at.
+    ///
+    /// A stray call against another overlay does nothing, exactly as
+    /// [`Self::refresh_attention`] does.
+    pub fn apply_palette(&mut self, action: PaletteAction) -> OverlayOutcome {
+        if !matches!(self.kind, OverlayKind::Palette(_)) {
+            return OverlayOutcome::Open;
+        }
+        match action {
+            PaletteAction::Next => {
+                self.select_next();
+                OverlayOutcome::Open
+            }
+            PaletteAction::Prev => {
+                self.select_prev();
+                OverlayOutcome::Open
+            }
+            PaletteAction::First => {
+                self.selected = 0;
+                OverlayOutcome::Open
+            }
+            PaletteAction::Last => {
+                self.selected = self.len().saturating_sub(1);
+                OverlayOutcome::Open
+            }
+            PaletteAction::Insert(ch) => {
+                self.edit_query(|query| query.push(ch));
+                OverlayOutcome::Open
+            }
+            PaletteAction::Backspace => {
+                self.edit_query(|query| {
+                    query.pop();
+                });
+                OverlayOutcome::Open
+            }
+            PaletteAction::Clear => {
+                self.edit_query(String::clear);
+                OverlayOutcome::Open
+            }
+            PaletteAction::Confirm => self.confirm(),
+            PaletteAction::Dismiss => OverlayOutcome::Dismissed,
+        }
+    }
+
+    /// Edits the palette's query and re-anchors the cursor on its command.
+    fn edit_query(&mut self, edit: impl FnOnce(&mut String)) {
+        let OverlayKind::Palette(palette) = &mut self.kind else {
+            return;
+        };
+        let selected = palette.matches.get(self.selected).copied();
+        edit(&mut palette.query);
+        palette.refilter();
+        self.selected = selected
+            .and_then(|command| palette.matches.iter().position(|index| *index == command))
+            .unwrap_or(0);
+    }
+
     /// Applies one attention-queue keyboard action.
     ///
     /// The queue keeps its own vocabulary — [`QueueAction`], decoded by
@@ -654,6 +888,16 @@ impl Overlay {
     #[must_use]
     pub fn confirm(&self) -> OverlayOutcome {
         match &self.kind {
+            // Both palette outcomes are typed, and a query that matches nothing
+            // confirms to nothing: there is no row, so there is no command.
+            OverlayKind::Palette(palette) => {
+                palette
+                    .result(self.selected)
+                    .map_or(OverlayOutcome::Open, |command| match command.outcome() {
+                        CommandOutcome::Run(action) => OverlayOutcome::RunAction(action.clone()),
+                        CommandOutcome::Open(surface) => OverlayOutcome::OpenSurface(*surface),
+                    })
+            }
             OverlayKind::Sessions(entries) => entries
                 .get(self.selected)
                 .map_or(OverlayOutcome::Open, |entry| {
@@ -676,9 +920,9 @@ impl Overlay {
                 .map_or(OverlayOutcome::Open, |entry| {
                     OverlayOutcome::FocusPane(entry.pane)
                 }),
-            // Details and help are reading surfaces: there is nothing to act
-            // on, so Enter does the only other thing a user could mean by it.
-            OverlayKind::Help(_) | OverlayKind::Details(_) => OverlayOutcome::Dismissed,
+            // Details is a reading surface: there is nothing to act on, so
+            // Enter does the only other thing a user could mean by it.
+            OverlayKind::Details(_) => OverlayOutcome::Dismissed,
         }
     }
 
@@ -699,17 +943,17 @@ impl Overlay {
         };
         let muted = theme.color(ThemeToken::Muted);
         match &self.kind {
-            OverlayKind::Help(help) => {
-                let entry = &help.entries[index];
+            OverlayKind::Palette(palette) => {
+                let command = &palette.commands[palette.matches[index]];
                 RowSpec {
                     selected,
                     lead: Field::new(
-                        entry.key.clone(),
+                        command.key.clone(),
                         theme.color(ThemeToken::Accent),
                         CellAttrs::BOLD,
                     ),
-                    title: Field::new(entry.label.clone(), primary, CellAttrs::NONE),
-                    extras: vec![Field::new(entry.note.clone(), muted, CellAttrs::NONE)],
+                    title: Field::new(command.label.clone(), primary, CellAttrs::NONE),
+                    extras: vec![Field::new(command.note.clone(), muted, CellAttrs::NONE)],
                 }
             }
             OverlayKind::Sessions(entries) => {
@@ -777,7 +1021,10 @@ impl Overlay {
     /// row that has run out of width still tells the user how to get out.
     fn hints(&self) -> [&'static str; 3] {
         match self.kind {
-            OverlayKind::Help(_) => ["esc close", "enter close", "j/k move"],
+            // The palette spends its middle slot on the verb and its last on
+            // navigation, because a printable key is query text here: a user
+            // who reaches for `j` types a `j`, so the arrows have to be said.
+            OverlayKind::Palette(_) => ["esc close", "enter run", "up/down move"],
             OverlayKind::Sessions(_) => ["esc close", "enter switch", "j/k move"],
             OverlayKind::Launcher(_) => ["esc close", "enter launch", "j/k move"],
             // `a` earns the middle slot over navigation: acknowledging is the
@@ -785,6 +1032,19 @@ impl Overlay {
             // cannot find it will never clear the queue.
             OverlayKind::Attention(_) => ["esc close", "enter focus", "a ack"],
             OverlayKind::Details(_) => ["esc close", "enter close", "j/k move"],
+        }
+    }
+
+    /// What an empty list says in place of a position, if it says anything.
+    ///
+    /// A surface that is empty because it *is* empty says nothing — an empty
+    /// attention queue is already the answer. A palette is empty because the
+    /// user narrowed it to nothing, and a blank box would read as a broken
+    /// surface rather than as a query that matched no command.
+    fn empty_note(&self) -> Option<&'static str> {
+        match &self.kind {
+            OverlayKind::Palette(palette) if !palette.query.is_empty() => Some("no matches"),
+            _ => None,
         }
     }
 }
@@ -967,6 +1227,18 @@ pub enum OverlayOutcome {
     Launch(LaunchRequest),
     /// Move focus to the pane this row names.
     FocusPane(PaneId),
+    /// Send this keymap action, exactly as its bound chord would have.
+    ///
+    /// The palette's wire arm. It carries an [`Action`] the daemon already
+    /// understands rather than anything the user typed, so a searchable surface
+    /// adds no new way for a client to ask a session for something.
+    RunAction(Action),
+    /// Open this client-local surface in place of the palette.
+    ///
+    /// Never crosses the wire. The overlay module cannot build these itself —
+    /// a session list and a pane-details view are made of live client state —
+    /// so it names the surface and the attached client opens it.
+    OpenSurface(ClientSurface),
     /// Mark this pane's attention state as seen.
     ///
     /// Distinct from every other outcome in that the overlay *stays open*: the
@@ -1076,9 +1348,19 @@ fn row_cells(row: &RowSpec, width: u16, theme: Theme) -> Vec<Cell> {
 #[must_use]
 pub fn title_cells(overlay: &Overlay, width: u16, theme: Theme) -> Vec<Cell> {
     // An empty overlay has no position to report, and a lone `0/0` would be a
-    // claim about a list that does not exist.
+    // claim about a list that does not exist — but a list the user emptied with
+    // a query says so, in words, where the position would have gone.
     let extras = if overlay.is_empty() {
-        Vec::new()
+        overlay
+            .empty_note()
+            .map(|note| {
+                vec![Field::new(
+                    note,
+                    theme.color(ThemeToken::Warning),
+                    CellAttrs::NONE,
+                )]
+            })
+            .unwrap_or_default()
     } else {
         vec![Field::new(
             format!("{}/{}", overlay.selection() + 1, overlay.len()),
@@ -1100,6 +1382,35 @@ pub fn title_cells(overlay: &Overlay, width: u16, theme: Theme) -> Vec<Cell> {
         width,
         theme,
     )
+}
+
+/// The palette's query row, exactly `width` cells wide, or `None` for an
+/// overlay that has no query.
+///
+/// The row is the same three parts as every other — a marker column, the `/`
+/// lead that says this line is a search, and the query itself — so the palette's
+/// list still lines up under it. The trailing `_` is the text cursor: ASCII,
+/// like the rest of the chrome, and present even on an empty query, because a
+/// surface that accepts typing has to look like it does.
+#[must_use]
+pub fn query_cells(overlay: &Overlay, width: u16, theme: Theme) -> Option<Vec<Cell>> {
+    let OverlayKind::Palette(palette) = overlay.kind() else {
+        return None;
+    };
+    Some(row_cells(
+        &RowSpec {
+            selected: false,
+            lead: Field::new("/", theme.color(ThemeToken::Muted), CellAttrs::NONE),
+            title: Field::new(
+                format!("{}_", palette.query()),
+                theme.color(ThemeToken::Primary),
+                CellAttrs::NONE,
+            ),
+            extras: Vec::new(),
+        },
+        width,
+        theme,
+    ))
 }
 
 /// The overlay's keyboard-hint row, exactly `width` cells wide.
@@ -1144,7 +1455,17 @@ pub fn overlay_cells(overlay: &Overlay, size: Size, theme: Theme) -> Vec<Vec<Cel
     if rows == 1 {
         return out;
     }
-    let list = rows - 2;
+    // The query line is the palette's third chrome row, and it yields before
+    // the title and the hints do: a box with room for neither a query nor a
+    // list still says what the surface is and how to leave it.
+    let mut list = rows - 2;
+    let query = (rows > 2)
+        .then(|| query_cells(overlay, size.cols, theme))
+        .flatten();
+    if let Some(query) = query {
+        out.push(query);
+        list -= 1;
+    }
     for row in overlay.visible_rows(list, theme) {
         out.push(row_cells(&row, size.cols, theme));
     }
@@ -1268,33 +1589,62 @@ mod tests {
     use cloo_core::{ProfileCommand, ThemeChoice, ThemeName};
     use cloo_proto::TermCaps;
 
-    fn help() -> Overlay {
-        Overlay::help(&Keymap::defaults())
+    fn palette() -> Overlay {
+        Overlay::palette(&Keymap::defaults())
     }
 
-    /// The labels of every row the help surface lists, in order.
-    fn help_rows(overlay: &Overlay) -> Vec<(String, String, String)> {
-        let OverlayKind::Help(keys) = overlay.kind() else {
-            panic!("expected the help overlay");
+    /// The palette's live query, which only a palette has.
+    fn query(overlay: &Overlay) -> &str {
+        let OverlayKind::Palette(palette) = overlay.kind() else {
+            panic!("expected the command palette");
         };
-        keys.entries()
-            .iter()
-            .map(|entry| {
+        palette.query()
+    }
+
+    /// Every row the current query matches, in display order.
+    fn palette_rows(overlay: &Overlay) -> Vec<(String, String, String)> {
+        let OverlayKind::Palette(palette) = overlay.kind() else {
+            panic!("expected the command palette");
+        };
+        palette
+            .results()
+            .into_iter()
+            .map(|command| {
                 (
-                    entry.key().to_owned(),
-                    entry.label().to_owned(),
-                    entry.note().to_owned(),
+                    command.key().to_owned(),
+                    command.label().to_owned(),
+                    command.note().to_owned(),
                 )
             })
             .collect()
     }
 
-    /// The chord the help surface shows for `label`, if it shows one at all.
-    fn help_key(overlay: &Overlay, label: &str) -> Option<String> {
-        help_rows(overlay)
+    /// The labels the current query matches, in display order.
+    fn palette_labels(overlay: &Overlay) -> Vec<String> {
+        palette_rows(overlay)
+            .into_iter()
+            .map(|(_, label, _)| label)
+            .collect()
+    }
+
+    /// The chord the palette shows for `label`, if it shows one at all.
+    fn palette_key(overlay: &Overlay, label: &str) -> Option<String> {
+        palette_rows(overlay)
             .into_iter()
             .find(|(_, shown, _)| shown == label)
             .map(|(key, _, _)| key)
+    }
+
+    /// Types one run of bytes at the palette, as the attached client would.
+    fn type_at(overlay: &mut Overlay, keys: &[u8]) -> OverlayOutcome {
+        let mut outcome = OverlayOutcome::Open;
+        for action in crate::input::palette_actions(keys) {
+            outcome = overlay.apply_palette(action);
+            if !matches!(outcome, OverlayOutcome::Open) {
+                break;
+            }
+        }
+        outcome
     }
 
     fn sessions() -> Overlay {
@@ -1355,7 +1705,7 @@ mod tests {
     #[test]
     fn every_overlay_is_dismissible_including_an_empty_one() {
         let cases: [(&str, Overlay); 8] = [
-            ("help", help()),
+            ("command palette", palette()),
             ("sessions", sessions()),
             ("launcher", launcher()),
             ("attention queue", attention_queue()),
@@ -1556,14 +1906,16 @@ mod tests {
         assert_eq!(details().confirm(), OverlayOutcome::Dismissed);
     }
 
-    // -- help ---------------------------------------------------------------
+    // -- the command palette -------------------------------------------------
 
     /// The surface's whole job: a user who knows nothing but `?` can read the
-    /// effective prefix and every control the milestone promises off one box.
+    /// effective prefix and every control the milestone promises off one box,
+    /// before typing anything at all.
     #[test]
-    fn the_help_surface_names_the_prefix_and_every_promised_control() {
-        let overlay = help();
-        assert_eq!(overlay.title(), "keys - prefix C-b");
+    fn the_command_palette_opens_with_the_prefix_and_every_promised_control() {
+        let overlay = palette();
+        assert_eq!(overlay.title(), "commands - prefix C-b");
+        assert_eq!(query(&overlay), "", "it opens on the whole command list");
         for (label, key) in [
             ("split right", "%"),
             ("split down", "\""),
@@ -1580,9 +1932,9 @@ mod tests {
             ("add pane", "a"),
         ] {
             assert_eq!(
-                help_key(&overlay, label).as_deref(),
+                palette_key(&overlay, label).as_deref(),
                 Some(key),
-                "{label} must be reachable from the help surface"
+                "{label} must be reachable from the command palette"
             );
         }
     }
@@ -1591,42 +1943,53 @@ mod tests {
     /// answer to "how do I change this" — and cloo's own surfaces, which have no
     /// `[keys]` name to give, say where they come from instead.
     #[test]
-    fn a_help_row_says_where_its_binding_comes_from() {
-        let rows = help_rows(&help());
+    fn a_command_palette_row_says_where_its_binding_comes_from() {
+        let rows = palette_rows(&palette());
         assert!(rows.contains(&(
             "%".to_owned(),
             "split right".to_owned(),
             "split-vertical".to_owned()
         )));
         assert!(rows.contains(&("a".to_owned(), "add pane".to_owned(), "client".to_owned())));
-        assert!(rows.contains(&("?".to_owned(), "this help".to_owned(), "client".to_owned())));
+        assert!(rows.contains(&(
+            "!".to_owned(),
+            "attention queue".to_owned(),
+            "client".to_owned()
+        )));
     }
 
     /// The property that makes the surface worth reading from the keymap: a
     /// hand-written table would keep showing `C-b %` here.
     #[test]
-    fn a_rebound_prefix_and_chord_are_shown_verbatim() {
+    fn a_command_palette_shows_a_rebound_prefix_and_chord_verbatim() {
         let mut keys = Keymap::defaults();
         keys.set_prefix(Key::parse("M-Space").expect("a spelling"));
         keys.unbind(Key::char('%'));
         keys.bind(Key::char('v'), Action::SplitVertical);
-        let overlay = Overlay::help(&keys);
+        let overlay = Overlay::palette(&keys);
         assert_eq!(
             overlay.title(),
-            "keys - prefix M-space",
+            "commands - prefix M-space",
             "the keymap's own canonical spelling, not the test's"
         );
-        assert_eq!(help_key(&overlay, "split right").as_deref(), Some("v"));
+        assert_eq!(palette_key(&overlay, "split right").as_deref(), Some("v"));
     }
 
     #[test]
-    fn an_unbound_action_has_no_help_row_at_all() {
+    fn an_unbound_action_has_no_command_palette_row_at_all() {
         let mut keys = Keymap::defaults();
         keys.unbind(Key::char('d'));
+        let overlay = Overlay::palette(&keys);
         assert_eq!(
-            help_key(&Overlay::help(&keys), "detach"),
+            palette_key(&overlay, "detach"),
             None,
             "a row for a chord that does nothing sends the user pressing it"
+        );
+        let mut searching = overlay;
+        type_at(&mut searching, b"detach");
+        assert!(
+            palette_labels(&searching).is_empty(),
+            "an unbound action must not come back through the search either"
         );
     }
 
@@ -1634,48 +1997,270 @@ mod tests {
     /// that a user who binds one of those keys takes it — and the row goes with
     /// it, because the chord will never reach `open_overlay` again.
     #[test]
-    fn a_keymap_that_claims_a_client_key_takes_its_help_row_too() {
+    fn a_keymap_that_claims_a_client_key_takes_its_command_palette_row_too() {
         let mut keys = Keymap::defaults();
-        keys.bind(Key::char('?'), Action::ToggleZoom);
-        let overlay = Overlay::help(&keys);
-        assert_eq!(help_key(&overlay, "this help"), None);
+        keys.bind(Key::char(ADD_PANE_KEY), Action::ToggleZoom);
+        let overlay = Overlay::palette(&keys);
+        assert_eq!(palette_key(&overlay, "add pane"), None);
         assert_eq!(
-            help_key(&overlay, "sessions").as_deref(),
+            palette_key(&overlay, "sessions").as_deref(),
             Some("s"),
             "the neighbouring surfaces are untouched"
         );
     }
 
+    /// Both confirmation arms are typed, and neither carries anything the user
+    /// wrote: a keymap row leaves as the very `Action` its chord would have
+    /// sent, and a client row names a surface that never reaches the wire.
     #[test]
-    fn the_help_surface_is_a_reading_surface_and_confirms_to_a_close() {
-        assert_eq!(help().confirm(), OverlayOutcome::Dismissed);
+    fn confirming_a_command_palette_row_yields_a_typed_outcome_and_never_text() {
+        let mut overlay = palette();
+        type_at(&mut overlay, b"zoom");
+        assert_eq!(palette_labels(&overlay), ["zoom pane"]);
+        assert_eq!(
+            overlay.confirm(),
+            OverlayOutcome::RunAction(Action::ToggleZoom)
+        );
+
+        let mut overlay = palette();
+        type_at(&mut overlay, b"sessions");
+        assert_eq!(
+            overlay.confirm(),
+            OverlayOutcome::OpenSurface(ClientSurface::Sessions)
+        );
+        assert_eq!(
+            ClientSurface::from_key(SESSIONS_KEY),
+            Some(ClientSurface::Sessions)
+        );
+    }
+
+    /// Typing narrows the list, the title reports the position in *results*,
+    /// and backspacing widens it again — the whole search loop, in one test.
+    #[test]
+    fn a_command_palette_filters_as_text_is_typed_and_reports_its_position() {
+        let theme = Theme::storm();
+        let mut overlay = palette();
+        let all = overlay.len();
+        assert!(all > 2, "the fixture must have something to narrow");
+
+        assert_eq!(type_at(&mut overlay, b"split"), OverlayOutcome::Open);
+        assert_eq!(query(&overlay), "split");
+        assert_eq!(palette_labels(&overlay), ["split right", "split down"]);
+        assert_eq!(
+            text(&title_cells(&overlay, 40, theme)).trim_end(),
+            "  commands - prefix C-b 1/2"
+        );
+
+        overlay.apply_palette(PaletteAction::Next);
+        assert_eq!(
+            text(&title_cells(&overlay, 40, theme)).trim_end(),
+            "  commands - prefix C-b 2/2"
+        );
+
+        // Backspacing to nothing restores the discoverable list.
+        for _ in 0..5 {
+            overlay.apply_palette(PaletteAction::Backspace);
+        }
+        assert_eq!(query(&overlay), "");
+        assert_eq!(overlay.len(), all);
+        assert_eq!(
+            overlay.apply_palette(PaletteAction::Backspace),
+            OverlayOutcome::Open,
+            "backspacing an empty query is not a dismissal"
+        );
+        assert_eq!(query(&overlay), "");
+    }
+
+    /// A query is matched term by term against the label *and* the `[keys]`
+    /// name, because a user who knows the configuration name is exactly the
+    /// user searching for it.
+    #[test]
+    fn a_command_palette_query_matches_terms_in_any_order_and_either_column() {
+        let mut overlay = palette();
+        type_at(&mut overlay, b"right spl");
+        assert_eq!(palette_labels(&overlay), ["split right"]);
+
+        let mut overlay = palette();
+        type_at(&mut overlay, b"SPLIT-HORIZ");
+        assert_eq!(
+            palette_labels(&overlay),
+            ["split down"],
+            "the `[keys]` name matches, and case is not a filter"
+        );
+    }
+
+    /// The reason the query lives beside the cursor: a row that stops matching
+    /// must not hand the selection to whatever slid into its position.
+    #[test]
+    fn a_command_palette_keeps_its_selection_on_the_command_it_was_on() {
+        let mut overlay = palette();
+        type_at(&mut overlay, b"split");
+        overlay.apply_palette(PaletteAction::Next);
+        assert_eq!(palette_labels(&overlay)[overlay.selection()], "split down");
+
+        // Narrowing away the row *above* the cursor keeps the cursor's command.
+        type_at(&mut overlay, b" down");
+        assert_eq!(palette_labels(&overlay), ["split down"]);
+        assert_eq!(overlay.selection(), 0);
+        assert_eq!(
+            overlay.confirm(),
+            OverlayOutcome::RunAction(Action::SplitHorizontal)
+        );
+    }
+
+    /// A query that matches nothing is a legible answer rather than a blank
+    /// box, and it confirms to nothing at all — there is no row, so there is no
+    /// command.
+    #[test]
+    fn an_empty_command_palette_result_says_so_and_confirms_to_nothing() {
+        let theme = Theme::storm();
+        let mut overlay = palette();
+        type_at(&mut overlay, b"zzz");
+        assert!(overlay.is_empty());
+        assert_eq!(overlay.confirm(), OverlayOutcome::Open);
+
+        let box_cells = overlay_cells(&overlay, Size::new(36, 5), theme);
+        assert_eq!(
+            text(&box_cells[0]).trim_end(),
+            "  commands - prefix C-b no matches"
+        );
+        assert_eq!(text(&box_cells[1]).trim_end(), "  / zzz_");
+        assert!(text(&box_cells[2]).trim().is_empty());
+        assert!(text(&box_cells[4]).contains("esc close"));
+    }
+
+    /// Escape closes from any state, and `q` deliberately does not: it is a
+    /// query character here, which is the one place cloo's shared overlay
+    /// vocabulary had to give way.
+    #[test]
+    fn escape_closes_a_command_palette_and_q_types_a_q() {
+        let mut overlay = palette();
+        assert_eq!(type_at(&mut overlay, b"q"), OverlayOutcome::Open);
+        assert_eq!(query(&overlay), "q");
+        assert_eq!(type_at(&mut overlay, b"\x1b"), OverlayOutcome::Dismissed);
+
+        let mut typed = palette();
+        type_at(&mut typed, b"split");
+        assert_eq!(
+            typed.apply_palette(PaletteAction::Clear),
+            OverlayOutcome::Open
+        );
+        assert_eq!(query(&typed), "", "C-u drops the whole query");
+    }
+
+    /// Navigation is the arrows, because `j` and `k` are query text — and Enter
+    /// still runs whatever the cursor is on.
+    #[test]
+    fn a_command_palette_navigates_with_arrows_and_runs_with_enter() {
+        let mut overlay = palette();
+        assert_eq!(type_at(&mut overlay, b"j"), OverlayOutcome::Open);
+        assert_eq!(query(&overlay), "j", "j is a character, not a motion");
+        assert_eq!(palette_labels(&overlay), ["focus down"]);
+        overlay.apply_palette(PaletteAction::Backspace);
+        overlay.apply_palette(PaletteAction::First);
+
+        assert_eq!(type_at(&mut overlay, b"\x1b[B"), OverlayOutcome::Open);
+        assert_eq!(overlay.selection(), 1);
+        assert_eq!(query(&overlay), "", "an arrow is never query text");
+        assert_eq!(type_at(&mut overlay, b"\x1b[A"), OverlayOutcome::Open);
+        assert_eq!(overlay.selection(), 0);
+        assert_eq!(
+            type_at(&mut overlay, b"\r"),
+            OverlayOutcome::RunAction(Action::SplitVertical)
+        );
+    }
+
+    /// A fast typist's keystrokes arrive coalesced, and the run has to survive
+    /// intact: decoding only the whole chunk as one chord would drop all but
+    /// one character of every burst.
+    #[test]
+    fn a_command_palette_takes_a_whole_typed_run_at_once() {
+        let mut overlay = palette();
+        type_at(&mut overlay, b"spl\x7fit");
+        assert_eq!(
+            query(&overlay),
+            "spit",
+            "each byte of the run is one edit, backspace included"
+        );
     }
 
     /// The 16-colour contract: the surface has to be legible where colour and
     /// non-ASCII glyphs are both unavailable, so every character is ASCII and
     /// the key column carries the accent as bold as well.
     #[test]
-    fn the_help_surface_is_ascii_and_marks_its_keys_without_colour() {
-        let theme = Theme::storm();
-        let overlay = help();
-        for row in overlay_cells(&overlay, Size::new(48, 20), theme) {
+    fn a_command_palette_is_ascii_and_marks_its_keys_without_colour() {
+        let overlay = palette();
+        for (name, theme) in [
+            ("truecolor", Theme::storm()),
+            (
+                "16-colour",
+                Theme::new(ThemeChoice::Named(ThemeName::Storm), TermCaps::default()),
+            ),
+        ] {
+            for row in overlay_cells(&overlay, Size::new(48, 20), theme) {
+                assert!(
+                    row.iter().all(|cell| cell.ch.is_ascii()),
+                    "{name}: {:?} must survive a terminal with no glyph support",
+                    text(&row)
+                );
+            }
+            let row = row_cells(&overlay.row(0, false, theme), 48, theme);
             assert!(
-                row.iter().all(|cell| cell.ch.is_ascii()),
-                "{:?} must survive a terminal with no glyph support",
-                text(&row)
+                row[2].attrs.contains(CellAttrs::BOLD),
+                "{name}: the chord is the one thing on the row a user has to find"
             );
         }
-        let row = row_cells(&overlay.row(0, false, theme), 48, theme);
+    }
+
+    /// The query line is the palette's own chrome row and spends its width in
+    /// the shared order, so the list still lines up beneath it.
+    #[test]
+    fn a_command_palette_query_row_is_exactly_the_width_asked_for() {
+        let theme = Theme::storm();
+        let mut overlay = palette();
+        type_at(&mut overlay, b"focus");
+        for width in 0..=60_u16 {
+            assert_eq!(
+                query_cells(&overlay, width, theme)
+                    .expect("a palette has a query row")
+                    .len(),
+                usize::from(width),
+                "the query row must be exactly {width} cells"
+            );
+        }
+        assert_eq!(
+            text(&query_cells(&overlay, 20, theme).expect("a palette has a query row")),
+            "  / focus_          "
+        );
         assert!(
-            row[2].attrs.contains(CellAttrs::BOLD),
-            "the chord is the one thing on the row a user has to find"
+            query_cells(&sessions(), 20, theme).is_none(),
+            "an overlay with no query has no query row to draw"
         );
     }
 
+    /// A palette narrow enough to lose its list still says what it is, what the
+    /// user typed, and how to leave — in that order of importance.
     #[test]
-    fn a_help_row_spends_width_in_the_documented_order() {
+    fn a_narrow_command_palette_keeps_its_title_query_and_dismissal_hint() {
         let theme = Theme::storm();
-        let overlay = help();
+        let mut overlay = palette();
+        type_at(&mut overlay, b"detach");
+        let box_cells = overlay_cells(&overlay, Size::new(24, 3), theme);
+        assert_eq!(box_cells.len(), 3);
+        assert_eq!(text(&box_cells[0]).trim_end(), "  commands - prefix C-b");
+        assert_eq!(text(&box_cells[1]).trim_end(), "  / detach_");
+        assert_eq!(text(&box_cells[2]).trim_end(), "  esc close enter run");
+
+        // With no room for a query line, the title and the hints are what stay.
+        let squeezed = overlay_cells(&overlay, Size::new(24, 2), theme);
+        assert_eq!(text(&squeezed[0]).trim_end(), "  commands - prefix C-b");
+        assert!(text(&squeezed[1]).contains("esc close"));
+    }
+
+    #[test]
+    fn a_command_palette_row_spends_width_in_the_documented_order() {
+        let theme = Theme::storm();
+        let overlay = palette();
         for (width, expected) in [
             (32_u16, "  % split right split-vertical  "),
             (20, "  % split right     "),
@@ -1688,6 +2273,24 @@ mod tests {
                 "at width {width}"
             );
         }
+        assert_eq!(
+            text(&hint_cells(&overlay, 36, theme)).trim_end(),
+            "  esc close enter run up/down move"
+        );
+        assert_eq!(
+            text(&hint_cells(&overlay, 12, theme)).trim_end(),
+            "  esc close",
+            "the last hint standing is the one that says how to get out"
+        );
+    }
+
+    /// The box asks for one more row than every other overlay, because it has
+    /// one more chrome row to draw.
+    #[test]
+    fn a_command_palette_asks_for_a_row_its_query_line_can_use() {
+        let overlay = palette();
+        assert_eq!(overlay.preferred_rows(), overlay.len() + 3);
+        assert_eq!(sessions().preferred_rows(), sessions().len() + 2);
     }
 
     // -- details ------------------------------------------------------------
@@ -1731,13 +2334,16 @@ mod tests {
     #[test]
     fn the_attention_queue_key_is_offered_only_while_the_keymap_leaves_it_free() {
         assert_eq!(
-            help_key(&help(), "attention queue").as_deref(),
+            palette_key(&palette(), "attention queue").as_deref(),
             Some("!"),
             "a surface a user cannot discover is one they do not have"
         );
         let mut keys = Keymap::defaults();
         keys.bind(Key::char(ATTENTION_KEY), Action::ToggleZoom);
-        assert_eq!(help_key(&Overlay::help(&keys), "attention queue"), None);
+        assert_eq!(
+            palette_key(&Overlay::palette(&keys), "attention queue"),
+            None
+        );
     }
 
     /// The queue's two verbs, and the difference between them: focusing names
@@ -1943,7 +2549,7 @@ mod tests {
     fn every_overlay_row_is_exactly_the_width_asked_for() {
         let theme = Theme::storm();
         for (name, overlay) in [
-            ("help", help()),
+            ("command palette", palette()),
             ("sessions", sessions()),
             ("launcher", launcher()),
             ("attention queue", attention_queue()),

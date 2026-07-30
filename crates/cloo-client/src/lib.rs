@@ -88,8 +88,8 @@ pub use effects::{EffectPolicy, apply_effect, effect_bytes};
 pub use input::{
     ChromeAction, ChromeMouse, ChromeTarget, Divider, InputDecoder, InputEvent, KeyRoute,
     KeyRouter, MouseOwner, MouseReport, MouseRoute, MouseTarget, OuterModes, OverlayAction,
-    PaneArea, QueueAction, ScreenLayout, WHEEL_LINES, decode_key, mouse_owner, overlay_action,
-    queue_action, route_mouse,
+    PaletteAction, PaneArea, QueueAction, ScreenLayout, WHEEL_LINES, decode_key, mouse_owner,
+    overlay_action, palette_action, palette_actions, queue_action, route_mouse,
 };
 pub use motion::{
     FRAME_BUDGET, MOTION_DURATION, MOTION_STEPS, Motion, MotionKind, MotionSettings, Phase,
@@ -97,10 +97,11 @@ pub use motion::{
 };
 pub use outer::{current_size, window_size};
 pub use overlay::{
-    ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, HelpEntry, HelpKeys, LAUNCH_DEADLINE, LaunchNotice,
-    LaunchRequest, NOTICE_LINGER, Overlay, OverlayKind, OverlayOutcome, PaneDetails, ProfileEntry,
-    SESSIONS_KEY, SessionEntry, backdrop_cells, backdrop_span, hint_cells, launch_notice_cells,
-    launch_notice_span, overlay_cells, overlay_spans, title_cells,
+    ADD_PANE_KEY, ATTENTION_KEY, ClientSurface, CommandOutcome, CommandPalette, DETAILS_KEY,
+    HELP_KEY, LAUNCH_DEADLINE, LaunchNotice, LaunchRequest, NOTICE_LINGER, Overlay, OverlayKind,
+    OverlayOutcome, PaletteCommand, PaneDetails, ProfileEntry, SESSIONS_KEY, SessionEntry,
+    backdrop_cells, backdrop_span, hint_cells, launch_notice_cells, launch_notice_span,
+    overlay_cells, overlay_spans, query_cells, title_cells,
 };
 pub use raw_mode::{RawMode, RawModeError};
 pub use renderer::{Cursor, FramePane, Grid, RenderError, Renderer, Span, compose_frame};

@@ -33,8 +33,10 @@ named here.
 The live renderer is still short of the complete M9 handoff, but pane geometry is no longer the
 header-only scaffold: every attached pane has a complete one-cell top, side, and bottom frame, and
 adjacent framed allocations do not overlap. The top row is likewise no longer a bare list of tab
-titles — it is the session-aware composition described under [Tab row](#tab-row). The remaining
-overlays and status variants still need their card-specific passes. A helper being byte-tested does not by itself establish that the
+titles — it is the session-aware composition described under [Tab row](#tab-row). The prefix surface
+is no longer a static help list either: it is the searchable command palette card 04 asks for, though
+that card's golden frames are still M9-21's. The remaining overlays and status variants still need
+their card-specific passes. A helper being byte-tested does not by itself establish that the
 attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
@@ -279,12 +281,13 @@ decides where the next key goes is legible on a terminal with no colour at all; 
 the clues on whatever the pane count is, because the moment the next chord matters is the moment to
 say what it can be.
 
-`<prefix> ?` opens a client-owned help overlay rather than pane details, as of M8-04. Its title names
-the currently effective prefix — `keys - prefix C-b`, or whatever `[keys] prefix` says — and its rows
-are the short controls for split, focus, zoom, tabs, copy, and detach, plus the client's own
-surfaces — the launcher among them. Every row is read from the live keymap, so a rebound
-chord appears verbatim and an action the user unbound has no row at all rather than a key that does
-nothing. Pane details stay on `<prefix> i`. `<prefix> a` opens the profile launcher, live as of
+`<prefix> ?` opens a client-owned overlay rather than pane details, as of M8-04, and that overlay is
+the searchable command palette as of M9-17. Its title names the currently effective prefix —
+`commands - prefix C-b`, or whatever `[keys] prefix` says — and an empty query lists the short
+controls for split, focus, zoom, tabs, copy, and detach, plus the client's own surfaces — the
+launcher among them. Every row is read from the live keymap, so a rebound chord appears verbatim and
+an action the user unbound has no row at all rather than a key that does nothing, and no query can
+bring one back. Pane details stay on `<prefix> i`. `<prefix> a` opens the profile launcher, live as of
 M8-06: it lists the profiles the client resolved, confirming one asks the server to add its pane,
 and no shell text is parsed as a cloo command. All of these retain the existing dimmed backdrop,
 Escape dismissal, exact width ladder, and 16-colour-safe text hints.
@@ -369,7 +372,8 @@ can supply it. Confirming a row attaches or switches through a typed client acti
 never kills or detaches another session.
 
 The session switcher, profile launcher, pane-details view, attention queue, and command palette use
-one rendering model. An overlay is a title row, a list, and a hint row, each exactly the overlay's
+one rendering model. An overlay is a title row, a list, and a hint row — plus the palette's own query
+line, which is the only extra chrome row any surface has — each exactly the overlay's
 width, drawn over the raised surface with the screen beneath dimmed by the same contrast reduction
 an unfocused pane takes:
 
@@ -391,21 +395,35 @@ that says how to close. Escape is bound in every overlay without exception.
 A launcher row is built from a configured profile and from nothing else: there is no free-text
 command field, and a profile that fails validation is not offered rather than offered and refused
 at launch. The pane-details view shows only what the server reported — profile, name, task, working
-directory, and state — and a task the user never set is absent rather than blank. A help row is the
-same three parts spent in the same order — the chord, then what it does, then the `[keys]` name to
-write when rebinding it, which is the field that yields first:
+directory, and state — and a task the user never set is absent rather than blank. A command-palette
+row is the same three parts spent in the same order — the chord, then what it does, then the `[keys]`
+name to write when rebinding it, which is the field that yields first. The palette adds one chrome
+row the other overlays do not have: a `/` query line between the title and the list, carrying what
+the user has typed and an ASCII `_` text cursor.
 
 ```
-  keys - prefix C-b 1/18
+  commands - prefix C-b 1/2
+  / spl_
 > % split right split-vertical
   " split down split-horizontal
-  esc close enter close j/k move
+  esc close enter run up/down move
 ```
 
 The chord column is accented *and* bold, because the one thing a user opened this surface to find
 may not rest on colour; the whole surface is ASCII for the same reason. The rows that name no
 `[keys]` action say `client` instead — they are cloo's own surfaces, reached without the wire — so
 the surface never presents a key that does nothing as though it were bound.
+
+Typing is the palette's own departure from the shared overlay vocabulary, and it is the only one. A
+printable key is query text here, so `j` types a `j`: navigation moves to the arrows and `C-n`/`C-p`,
+the hint row says so in place of `j/k move`, and `q` no longer closes the surface. Escape still does,
+without exception. Backspace narrows the query back, `C-u` clears it to the discoverable command
+list, and the title reports the cursor's position among the *results* rather than among the commands.
+A query that matches nothing says `no matches` where that position would have gone, because a blank
+box reads as a broken surface rather than as a search that found nothing. The query line yields
+before the title and the hint row do, so a palette too short for one still says what it is and how to
+leave it. Confirming a row runs the command the cursor is on; a row naming one of cloo's own surfaces
+opens that surface in place of the palette rather than sending anything.
 
 A confirmed launch leaves one transient line on the status row, because a daemon that refuses an
 identifier its own table does not name refuses it in silence, and a launcher row that appeared to do
@@ -421,8 +439,10 @@ overlay box above it. Its keys are consumed locally — they never become pane i
 entries remain `<prefix> ?` for commands/help, `<prefix> s` for sessions, `<prefix> i` for focused
 pane details, `<prefix> a` for the profile launcher, and `<prefix> !` for the attention queue —
 the queue's chord is the glyph the status row's attention count already wears. Each is claimed only
-while the keymap leaves that chord unbound, and all use the same Escape dismissal and keyboard
-vocabulary.
+while the keymap leaves that chord unbound, and all use the same Escape dismissal; all but the
+command palette also use the same keyboard vocabulary, and its query is the documented exception.
+A palette row naming one of these surfaces opens it in place, so a chord and a search reach the same
+overlay.
 
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:

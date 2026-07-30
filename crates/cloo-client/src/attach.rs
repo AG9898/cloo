@@ -44,14 +44,13 @@ use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
     ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
-    OuterModes, PaneArea, ScreenLayout, overlay_action, queue_action, route_mouse,
+    OuterModes, PaneArea, ScreenLayout, overlay_action, palette_actions, queue_action, route_mouse,
 };
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase, phase_span};
 use crate::outer::current_size;
 use crate::overlay::{
-    ADD_PANE_KEY, ATTENTION_KEY, AttentionEntry, DETAILS_KEY, HELP_KEY, LaunchNotice,
-    LaunchRequest, Overlay, OverlayKind, OverlayOutcome, PaneDetails, SESSIONS_KEY, SessionEntry,
-    backdrop_span, launch_notice_span, overlay_spans,
+    AttentionEntry, ClientSurface, HELP_KEY, LaunchNotice, LaunchRequest, Overlay, OverlayKind,
+    OverlayOutcome, PaneDetails, SessionEntry, backdrop_span, launch_notice_span, overlay_spans,
 };
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
@@ -1381,13 +1380,37 @@ impl LiveState {
     fn open_overlay(&mut self, chord: &[u8], keymap: &Keymap) -> bool {
         let key = (chord.len() == 1).then(|| char::from(chord[0]));
         let next = match key {
-            Some(HELP_KEY) => Some(Overlay::help(keymap)),
-            Some(ADD_PANE_KEY) => Some(Overlay::launcher(&self.profiles)),
-            Some(SESSIONS_KEY) => Some(Overlay::sessions(vec![
+            Some(HELP_KEY) => Some(Overlay::palette(keymap)),
+            Some(key) => ClientSurface::from_key(key).and_then(|surface| self.surface(surface)),
+            None => None,
+        };
+        if let Some(next) = next {
+            self.overlay = Some(next);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Builds one client-local surface out of the state this client has cached.
+    ///
+    /// The one place a [`ClientSurface`] becomes an overlay, so a chord and a
+    /// confirmed palette row reach exactly the same surface: the session
+    /// switcher can honestly list only the session this daemon exposed, pane
+    /// details are built solely from server metadata and attention already
+    /// cached locally, and the launcher offers only the configured profiles
+    /// this client resolved.
+    fn surface(&self, surface: ClientSurface) -> Option<Overlay> {
+        match surface {
+            ClientSurface::Launcher => Some(Overlay::launcher(&self.profiles)),
+            ClientSurface::Sessions => Some(Overlay::sessions(vec![
                 SessionEntry::new(self.session, "current", self.areas.len()).attached(true),
             ])),
-            Some(ATTENTION_KEY) => Some(Overlay::attention(self.attention_entries())),
-            Some(DETAILS_KEY) => self
+            ClientSurface::Attention => Some(Overlay::attention(self.attention_entries())),
+            // The only surface that can fail to open: with no focused pane
+            // there is nothing to describe, and a blank details box would be a
+            // claim about a pane that is not there.
+            ClientSurface::Details => self
                 .layout
                 .as_ref()
                 .and_then(|layout| layout.focused)
@@ -1401,39 +1424,23 @@ impl LiveState {
                         ))
                     })
                 }),
-            _ => None,
-        };
-        if let Some(next) = next {
-            self.overlay = Some(next);
-            true
-        } else {
-            false
         }
     }
 
     /// Applies an open overlay's own keyboard vocabulary.
     ///
     /// Every key an open overlay understands is consumed here and never reaches
-    /// a pane, including the confirmation that closes it. The queue is decoded
-    /// with [`queue_action`] because it is the one surface with a verb the
-    /// shared vocabulary has no word for — acknowledging a row is not confirming
-    /// it — and everything else with [`overlay_action`]. A launch and the two
-    /// session actions a queue row produces are handed back rather than
+    /// a pane, including the confirmation that closes it. Three vocabularies
+    /// meet here because three surfaces genuinely differ: the queue is decoded
+    /// with [`queue_action`] for the verb the shared vocabulary has no word for
+    /// — acknowledging a row is not confirming it — the palette with
+    /// [`palette_actions`] because a printable key there is query text rather
+    /// than a command, and everything else with [`overlay_action`]. A launch
+    /// and the session actions a row produces are handed back rather than
     /// swallowed, because only the caller holds the connection.
     fn apply_overlay_keys(&mut self, keys: &[u8]) -> OverlayKeys {
-        let Some(overlay) = self.overlay.as_mut() else {
+        let Some(outcome) = self.overlay_outcome(keys) else {
             return OverlayKeys::Ignored;
-        };
-        let outcome = if matches!(overlay.kind(), OverlayKind::Attention(_)) {
-            let Some(action) = queue_action(keys) else {
-                return OverlayKeys::Ignored;
-            };
-            overlay.apply_queue(action)
-        } else {
-            let Some(action) = overlay_action(keys) else {
-                return OverlayKeys::Ignored;
-            };
-            overlay.apply(action)
         };
         match outcome {
             OverlayOutcome::Open => OverlayKeys::Consumed,
@@ -1444,6 +1451,22 @@ impl LiveState {
             OverlayOutcome::Launch(request) => {
                 self.overlay = None;
                 OverlayKeys::Launch(request)
+            }
+            // A palette row that named a keymap action is the bound chord by
+            // another route, so it leaves exactly as that chord would have.
+            OverlayOutcome::RunAction(action) => {
+                self.overlay = None;
+                OverlayKeys::Command(action)
+            }
+            // A palette row that named a client surface never reaches the wire
+            // at all: it replaces the palette with the surface it named, and a
+            // surface this client cannot build leaves the palette up rather
+            // than closing onto nothing.
+            OverlayOutcome::OpenSurface(surface) => {
+                if let Some(next) = self.surface(surface) {
+                    self.overlay = Some(next);
+                }
+                OverlayKeys::Consumed
             }
             // Focusing the pane a row names is the queue's whole purpose, so it
             // closes; acknowledging leaves the surface up, because the row goes
@@ -1457,6 +1480,33 @@ impl LiveState {
                 OverlayKeys::Command(Action::AcknowledgeAttention(pane))
             }
         }
+    }
+
+    /// What one chunk of keyboard bytes did to the open overlay, if anything.
+    ///
+    /// `None` only when there is no overlay or the keys spell nothing that
+    /// surface knows. The palette answers even to keys it cannot use, because
+    /// its query owns every printable byte and a fall-through would be the one
+    /// path by which a search term could reach a child.
+    fn overlay_outcome(&mut self, keys: &[u8]) -> Option<OverlayOutcome> {
+        let overlay = self.overlay.as_mut()?;
+        if matches!(overlay.kind(), OverlayKind::Attention(_)) {
+            return Some(overlay.apply_queue(queue_action(keys)?));
+        }
+        if matches!(overlay.kind(), OverlayKind::Palette(_)) {
+            // A run of typed bytes is a run of edits, and the first one that is
+            // not `Open` ends the palette — nothing after a confirmation
+            // belongs to a surface that has closed.
+            let mut outcome = OverlayOutcome::Open;
+            for action in palette_actions(keys) {
+                outcome = overlay.apply_palette(action);
+                if !matches!(outcome, OverlayOutcome::Open) {
+                    break;
+                }
+            }
+            return Some(outcome);
+        }
+        Some(overlay.apply(overlay_action(keys)?))
     }
 
     /// Records a launch this client has just put on the wire.
@@ -1501,14 +1551,15 @@ impl LiveState {
         })
     }
 
-    /// The box an overlay is drawn in: as tall as its list, within bounds.
+    /// The box an overlay is drawn in: as tall as its list plus its chrome,
+    /// within bounds.
     ///
-    /// The cap is generous enough for the whole help surface on an ordinary
+    /// The cap is generous enough for the whole command list on an ordinary
     /// terminal — a user who pressed `?` because they do not know the keys is
     /// the last person who should have to scroll to find `detach` — and the
     /// window still follows the cursor on a short one.
     fn overlay_size(&self, overlay: &Overlay) -> Size {
-        let rows = u16::try_from(overlay.len().saturating_add(2))
+        let rows = u16::try_from(overlay.preferred_rows())
             .unwrap_or(u16::MAX)
             .clamp(2, 20)
             .min(self.outer_size.rows);
@@ -1658,10 +1709,11 @@ async fn route_keys(
 ) -> Result<bool, AttachRunError> {
     if state.overlay.is_some() {
         keys.reset();
-        // Three overlay outcomes leave the client, and all three are typed: a
-        // profile *identifier* the daemon resolves against its own table, and
-        // the focus and acknowledgment a queue row names by pane. Nothing else
-        // here reaches the wire at all, and no keystroke ever does.
+        // Everything that leaves the client from an overlay is typed: a profile
+        // *identifier* the daemon resolves against its own table, a keymap
+        // action the palette named, and the focus or acknowledgment a queue row
+        // names by pane. Nothing a user typed reaches the wire, and no
+        // keystroke ever does.
         match state.apply_overlay_keys(&bytes) {
             OverlayKeys::Launch(request) => {
                 attached
@@ -1671,10 +1723,15 @@ async fn route_keys(
                 state.sent_launch(&request, Instant::now());
             }
             OverlayKeys::Command(action) => {
+                // Detaching from the palette is still detaching: the caller has
+                // to leave the loop, or the client would send the command and
+                // then keep rendering a session it has left.
+                let detach = action == Action::DetachClient;
                 attached
                     .send_command(action)
                     .await
                     .map_err(AttachError::from)?;
+                return Ok(detach);
             }
             OverlayKeys::Ignored | OverlayKeys::Consumed => {}
         }
@@ -2513,10 +2570,10 @@ mod tests {
         state
     }
 
-    /// The milestone's routing change: `?` is the help surface and `i` is still
-    /// pane details, rather than both landing on details.
+    /// The milestone's routing change: `?` is the command palette and `i` is
+    /// still pane details, rather than both landing on details.
     #[test]
-    fn the_help_key_opens_help_and_details_keeps_its_own_key() {
+    fn the_prefix_key_opens_the_command_palette_and_details_keeps_its_own_key() {
         let keymap = Keymap::defaults();
         let mut state = overlay_state(8, "C-b");
 
@@ -2524,9 +2581,9 @@ mod tests {
         assert!(
             matches!(
                 state.overlay.as_ref().map(Overlay::kind),
-                Some(OverlayKind::Help(_))
+                Some(OverlayKind::Palette(_))
             ),
-            "the help key must no longer land on pane details"
+            "the palette key must no longer land on pane details"
         );
         assert!(
             state.apply_overlay_keys(b"\x1b").consumed(),
@@ -2541,10 +2598,10 @@ mod tests {
         ));
     }
 
-    /// The help surface is read from the client's live keymap, so the frame a
-    /// user actually sees names the chord they actually configured.
+    /// The palette is read from the client's live keymap, so the frame a user
+    /// actually sees names the chord they actually configured.
     #[test]
-    fn the_open_help_surface_draws_the_configured_prefix_and_its_controls() {
+    fn the_open_command_palette_draws_the_configured_prefix_and_its_controls() {
         let mut keymap = Keymap::defaults();
         keymap.set_prefix(cloo_core::keymap::Key::parse("M-a").expect("a spelling"));
         let mut state = overlay_state(24, "M-a");
@@ -2556,28 +2613,58 @@ mod tests {
             .iter()
             .map(|span| span.cells.iter().map(|cell| cell.ch).collect())
             .collect();
-        for expected in ["keys - prefix M-a", "split right", "detach", "add pane"] {
+        for expected in ["commands - prefix M-a", "split right", "detach", "add pane"] {
             assert!(
                 drawn.iter().any(|row| row.contains(expected)),
-                "the help frame must show {expected:?}: {drawn:?}"
+                "the palette frame must show {expected:?}: {drawn:?}"
             );
         }
     }
 
-    /// An open overlay owns the keyboard: nothing it consumes may reach a pane,
-    /// which is why the router is reset and the bytes never become input.
+    /// An open palette owns the keyboard *including ordinary text*: a query is
+    /// the one thing a user types into an overlay, and the byte that would have
+    /// reached a shell must become a filter instead.
     #[test]
-    fn an_open_help_surface_consumes_its_keys_locally() {
+    fn an_open_command_palette_consumes_typed_query_bytes_locally() {
         let keymap = Keymap::defaults();
-        let mut state = overlay_state(8, "C-b");
+        let mut state = overlay_state(12, "C-b");
         assert!(state.open_overlay(b"?", &keymap));
-        for key in [b"j".as_slice(), b"k", b"g", b"\r"] {
-            let consumed = state.apply_overlay_keys(key);
-            assert!(consumed.consumed(), "the overlay owns {key:?}");
+        for key in [b"s".as_slice(), b"plit", b"\x1b[B", b"\x7f"] {
+            assert!(
+                state.apply_overlay_keys(key).consumed(),
+                "the palette owns {key:?}"
+            );
         }
+        let Some(OverlayKind::Palette(palette)) = state.overlay.as_ref().map(Overlay::kind) else {
+            panic!("a typed query leaves the palette open");
+        };
+        assert_eq!(palette.query(), "spli");
+
+        // Enter runs the selected command, which leaves as a typed action —
+        // and the row the arrow moved to is still the row the backspace left
+        // the cursor on, because the selection follows the command.
+        assert_eq!(
+            state.apply_overlay_keys(b"\r"),
+            OverlayKeys::Command(Action::SplitHorizontal)
+        );
+        assert!(state.overlay.is_none());
+    }
+
+    /// A palette row naming a client surface opens it in place rather than
+    /// crossing the wire, so both routes to the launcher end up in one surface.
+    #[test]
+    fn confirming_a_client_row_swaps_the_command_palette_for_that_surface() {
+        let keymap = Keymap::defaults();
+        let mut state = overlay_state(16, "C-b").profiles(Profile::built_ins());
+        assert!(state.open_overlay(b"?", &keymap));
+        assert!(state.apply_overlay_keys(b"add pane").consumed());
+        assert_eq!(state.apply_overlay_keys(b"\r"), OverlayKeys::Consumed);
         assert!(
-            state.overlay.is_none(),
-            "enter closes a reading surface rather than acting"
+            matches!(
+                state.overlay.as_ref().map(Overlay::kind),
+                Some(OverlayKind::Launcher(_))
+            ),
+            "a client surface never reaches the wire"
         );
     }
 
