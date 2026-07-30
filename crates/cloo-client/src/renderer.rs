@@ -25,13 +25,11 @@
 
 use std::fmt;
 
-use cloo_proto::{
-    Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, SessionId, Size, TermCaps,
-};
+use cloo_proto::{Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, Size, TermCaps};
 
 use crate::chrome::{
-    AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TabBar, body_span, bottom_frame_cells,
-    side_frame_cell, status_bar_span, tab_row_span, top_frame_cells,
+    ChromeOptions, PaneChrome, StatusBar, TabBar, body_span, bottom_frame_cells, side_frame_cell,
+    status_bar_span, tab_row_span, top_frame_cells,
 };
 use crate::input::PaneArea;
 use crate::motion::{MotionKind, Phase, phase_cell};
@@ -255,18 +253,14 @@ impl<'a> FramePane<'a> {
 /// the session name and client count keep their daemon provenance and the pane
 /// count keeps the client's own.
 ///
-/// `hint` is passed through to the status row verbatim rather than derived here:
-/// the configured prefix and whether one is pending are the attached client's to
-/// know, and a frame that recomputed either would be a second answer to a
-/// question the keyboard router already answered.
+/// `status` keeps each status field attached to its actual projection rather
+/// than asking the frame composer to derive session or client-local values.
 #[must_use]
 pub fn compose_frame(
     size: Size,
     bar: TabBar<'_>,
-    session: SessionId,
     panes: &[FramePane<'_>],
-    queue: &AttentionQueue,
-    hint: &PrefixHint,
+    status: StatusBar<'_>,
     options: ChromeOptions,
 ) -> Vec<Span> {
     let mut spans = Vec::new();
@@ -325,11 +319,9 @@ pub fn compose_frame(
 
     spans.push(status_bar_span(
         Point::new(0, size.rows - 1),
-        session,
-        bar.tabs(),
-        queue,
-        hint,
+        status,
         size.cols,
+        options,
     ));
 
     spans
@@ -1125,13 +1117,15 @@ mod tests {
             title: "build".into(),
             active: true,
         }];
+        let hint = crate::chrome::PrefixHint::default();
         let span = crate::chrome::status_bar_span(
             Point::new(0, 23),
-            cloo_proto::SessionId::new(1),
-            &tabs,
-            &queue,
-            &crate::chrome::PrefixHint::default(),
+            crate::chrome::StatusBar::new(&tabs, &queue, &hint).session("main"),
             40,
+            ChromeOptions::default().with_theme(crate::theme::Theme::named(
+                cloo_core::ThemeName::Storm,
+                TermCaps::default(),
+            )),
         );
 
         let mut renderer = Renderer::new(TermCaps::default());
@@ -1141,7 +1135,7 @@ mod tests {
             "a terminal without truecolor must not receive 24-bit SGR"
         );
         let text = visible(&frame);
-        for token in ["session:1", ">1 build", "!", "C-b ?"] {
+        for token in ["s main", ">1 build", "!", "C-b"] {
             assert!(
                 text.contains(token),
                 "missing ASCII status token {token:?} in {text:?}"
@@ -1156,13 +1150,16 @@ mod tests {
             title: "build".into(),
             active: true,
         }];
+        let queue = crate::chrome::AttentionQueue::new();
+        let hint = crate::chrome::PrefixHint::for_panes("M-a", 1).pending(true);
         let span = crate::chrome::status_bar_span(
             Point::new(0, 23),
-            cloo_proto::SessionId::new(1),
-            &tabs,
-            &crate::chrome::AttentionQueue::new(),
-            &crate::chrome::PrefixHint::for_panes("M-a", 1).pending(true),
+            crate::chrome::StatusBar::new(&tabs, &queue, &hint).session("main"),
             60,
+            ChromeOptions::default().with_theme(crate::theme::Theme::named(
+                cloo_core::ThemeName::Storm,
+                TermCaps::default(),
+            )),
         );
 
         let mut renderer = Renderer::new(TermCaps::default());
@@ -1328,7 +1325,7 @@ mod tests {
 
     // -- Frame composition ------------------------------------------------
 
-    use cloo_proto::{PaneId, SessionId, TabId, TabSummary};
+    use cloo_proto::{PaneId, TabId, TabSummary};
 
     use crate::chrome::Attention;
 
@@ -1362,6 +1359,18 @@ mod tests {
         }]
     }
 
+    fn compose_test_frame(
+        size: Size,
+        bar: TabBar<'_>,
+        panes: &[FramePane<'_>],
+        queue: &crate::chrome::AttentionQueue,
+        hint: &crate::chrome::PrefixHint,
+        options: ChromeOptions,
+    ) -> Vec<Span> {
+        let status = StatusBar::new(bar.tabs(), queue, hint).session("main");
+        compose_frame(size, bar, panes, status, options)
+    }
+
     #[test]
     fn compose_lays_every_pane_grid_into_its_rect_with_chrome_around_it() {
         let size = Size::new(20, 6);
@@ -1382,13 +1391,13 @@ mod tests {
         ];
         let queue = crate::chrome::AttentionQueue::new();
 
-        let spans = compose_frame(
+        let hint = crate::chrome::PrefixHint::default();
+        let spans = compose_test_frame(
             size,
             TabBar::new(&tabs),
-            SessionId::new(1),
             &panes,
             &queue,
-            &crate::chrome::PrefixHint::default(),
+            &hint,
             ChromeOptions::default(),
         );
 
@@ -1439,16 +1448,13 @@ mod tests {
             "the unfocused frame follows the dimming preference"
         );
 
-        // The status row owns the last row, full width, and carries the session
-        // (in its width-20 short form) and the prefix hint.
+        // The status row owns the last row, full width, and keeps the session
+        // marker and prefix hint when the logical name cannot fit.
         let status = spans.last().expect("a status span");
         assert_eq!(status.at, Point::new(0, 5));
         assert_eq!(status.cells.len(), 20);
         let status_text = text_of(&status.cells);
-        assert!(
-            status_text.contains("s1"),
-            "session marker: {status_text:?}"
-        );
+        assert!(status_text.contains('s'), "session marker: {status_text:?}");
         assert!(status_text.contains("C-b"), "prefix hint: {status_text:?}");
     }
 
@@ -1475,13 +1481,14 @@ mod tests {
             ),
         ];
         let tabs = one_tab();
-        let spans = compose_frame(
+        let queue = crate::chrome::AttentionQueue::new();
+        let hint = crate::chrome::PrefixHint::default();
+        let spans = compose_test_frame(
             Size::new(20, 10),
             TabBar::new(&tabs),
-            SessionId::new(1),
             &panes,
-            &crate::chrome::AttentionQueue::new(),
-            &crate::chrome::PrefixHint::default(),
+            &queue,
+            &hint,
             ChromeOptions::default(),
         );
 
@@ -1516,10 +1523,9 @@ mod tests {
                 &grid,
                 PaneChrome::new(1, "p").focused(focused),
             )];
-            compose_frame(
+            compose_test_frame(
                 Size::new(6, 4),
                 TabBar::default(),
-                SessionId::new(1),
                 &panes,
                 &crate::chrome::AttentionQueue::new(),
                 &crate::chrome::PrefixHint::default(),
@@ -1561,10 +1567,9 @@ mod tests {
             &grid,
             PaneChrome::new(1, "p"),
         )];
-        let spans = compose_frame(
+        let spans = compose_test_frame(
             Size::new(4, 3),
             TabBar::default(),
-            SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
             &crate::chrome::PrefixHint::default(),
@@ -1585,10 +1590,9 @@ mod tests {
             &grid,
             PaneChrome::new(1, "p").focused(true),
         )];
-        let spans = compose_frame(
+        let spans = compose_test_frame(
             size,
             TabBar::default(),
-            SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
             &crate::chrome::PrefixHint::default(),
@@ -1618,10 +1622,9 @@ mod tests {
             PaneChrome::new(1, "p"),
         )];
         assert!(
-            compose_frame(
+            compose_test_frame(
                 Size::new(0, 0),
                 TabBar::new(&one_tab()),
-                SessionId::new(1),
                 &panes,
                 &crate::chrome::AttentionQueue::new(),
                 &crate::chrome::PrefixHint::default(),

@@ -38,8 +38,8 @@ use tokio::net::UnixStream;
 
 use crate::capabilities::{CapsError, detect_attach_caps};
 use crate::chrome::{
-    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TOAST_CAPACITY, TabBar,
-    ToastDeck, resize_affordance_spans, toast_rows, toast_stack_span,
+    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, StatusBar, TOAST_CAPACITY,
+    TabBar, ToastDeck, resize_affordance_spans, toast_rows, toast_stack_span,
 };
 use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
@@ -987,7 +987,6 @@ fn start_repository_refresh(
 /// that one terminal frame needs.
 struct LiveState {
     outer_size: Size,
-    session: SessionId,
     tabs: Vec<TabSummary>,
     status: Option<WorkspaceStatus>,
     layout: Option<LayoutSnapshot>,
@@ -1049,10 +1048,9 @@ struct ResizeActivity {
 }
 
 impl LiveState {
-    fn new(outer_size: Size, session: SessionId, tabs: Vec<TabSummary>, prefix: String) -> Self {
+    fn new(outer_size: Size, _session: SessionId, tabs: Vec<TabSummary>, prefix: String) -> Self {
         Self {
             outer_size,
-            session,
             tabs,
             status: None,
             layout: None,
@@ -1303,11 +1301,10 @@ impl LiveState {
                 self.tabs = tabs;
                 Ok(true)
             }
-            // The status projections are received but not yet drawn: caching
-            // status is M9-07's half. Reload revisions are handled by the live
-            // loop because only it owns the local reload callback. A summary is
-            // not part of an attached stream at all — it answers an inspection
-            // on a connection that never became a client.
+            // Reload revisions are handled by the live loop because only it
+            // owns the local reload callback. A summary is not part of an
+            // attached stream at all — it answers an inspection on a connection
+            // that never became a client.
             ServerMessage::WorkspaceStatus(status) => {
                 if self.status.as_ref() == Some(&status) {
                     return Ok(false);
@@ -1643,13 +1640,25 @@ impl LiveState {
                 bar = bar.session(&status.name);
             }
         }
+        let hint = self.prefix_hint();
+        let mut status_bar = StatusBar::new(&self.tabs, &self.queue, &hint);
+        if let Some(status) = &self.status {
+            status_bar = status_bar.clients(status.clients);
+            if !status.name.is_empty() {
+                status_bar = status_bar.session(&status.name);
+            }
+        }
+        if let Some(repository) = self.local_status.repository() {
+            status_bar = status_bar.repository(repository);
+        }
+        if let Some(clock) = self.local_status.clock() {
+            status_bar = status_bar.clock(clock);
+        }
         let mut spans = compose_frame(
             self.outer_size,
             bar,
-            self.session,
             &panes,
-            &self.queue,
-            &self.prefix_hint(),
+            status_bar,
             self.chrome_options(),
         );
         if let Some(copy_mode) = &self.copy_mode {
@@ -2580,6 +2589,48 @@ mod tests {
         );
     }
 
+    #[test]
+    fn live_status_bar_draws_projected_and_client_local_values_without_placeholders() {
+        struct FixedClock;
+
+        impl crate::status::LocalClock for FixedClock {
+            fn now(&self) -> Option<crate::status::LocalTime> {
+                crate::status::LocalTime::new(14, 38)
+            }
+        }
+
+        let mut state = hinted_state(96, 2, "C-b");
+        state
+            .apply(ServerMessage::WorkspaceStatus(WorkspaceStatus {
+                name: "agents".to_owned(),
+                clients: 2,
+                effective_size: Size::new(96, 6),
+            }))
+            .expect("workspace status applies");
+        state.local_status.refresh_clock(&FixedClock);
+        state.local_status.set_repository(Some(RepositoryStatus {
+            branch: Some("feature/status".to_owned()),
+            changes: 2,
+        }));
+
+        let row = status_text(&state);
+        for field in [
+            "s agents",
+            ">1 shell",
+            "0!",
+            "git feature/status +2",
+            "2 clients",
+            "C-b",
+            "14:38",
+        ] {
+            assert!(row.contains(field), "missing {field:?} in {row:?}");
+        }
+        assert!(
+            !row.contains("session:"),
+            "numeric placeholders are gone: {row:?}"
+        );
+    }
+
     #[tokio::test]
     async fn a_hello_from_a_future_server_is_caught_client_side() {
         let (client, server) = duplex(4096);
@@ -2866,7 +2917,7 @@ mod tests {
     fn a_second_pane_returns_the_status_row_to_its_ordinary_summary() {
         let row = status_text(&hinted_state(60, 2, "C-b"));
         assert!(
-            row.contains("C-b ?") && !row.contains("split %"),
+            row.contains("C-b") && !row.contains("split %"),
             "past the first pane the clues yield their width back: {row:?}"
         );
     }
@@ -4198,7 +4249,7 @@ mod tests {
         let nord = LiveState::new(Size::new(40, 8), session, hello_tabs(), "C-b".to_owned())
             .preferences(caps, nord_visual);
 
-        assert_eq!(storm.session, nord.session);
+        assert_eq!(storm.tabs, nord.tabs);
         assert_ne!(storm.theme, nord.theme);
         assert_eq!(storm.visual.theme.as_str(), "storm");
         assert_eq!(nord.visual.theme.as_str(), "nord");

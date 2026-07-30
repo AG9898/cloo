@@ -570,6 +570,8 @@ the bottom edge remain visible, and the complete focused frame uses accent while
 and body follow the client's dimming preference. Tabs, status, attention, and transient visual
 layers also come from chrome helpers. The result is a pure `Vec<Span>` the render loop draws, so
 composition never touches a descriptor and the renderer stays the only place bytes are produced.
+The minimal row receives one `StatusBar` joining already-cached server and local projections; it
+does not infer a display name from `SessionId` or launch repository work while composing.
 
 #### Chrome
 
@@ -1235,7 +1237,9 @@ from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake
   the projected session name and client count alongside the tab ordering and the client's own
   visible pane count, and `compose_frame` takes that one value rather than reassembling the fields,
   so each keeps its provenance. A field the daemon has not published is absent from the bar and
-  therefore omitted from the row.
+  therefore omitted from the row. M9-13 makes the minimal status row a second consumer: the
+  logical name and client count enter `chrome::StatusBar` directly, and the internal numeric
+  `SessionId` is no longer presented as though it were the display name.
 - `SessionSummary { name, tabs: u16, panes: u16, clients: u16, uptime_secs: u64 }` is a read-only
   inspection response. `ClientMessage::InspectSession { protocol_version }` is the request: a first
   frame in its own right, carrying its own version and neither a size nor capabilities, because the
@@ -1278,7 +1282,10 @@ working directory. The attached loop runs each Git query on a blocking task, kil
 and refreshes a stable focus once per second; a missing repository, command failure, or detached
 head omits the unavailable field. A focus change clears the old answer before starting the new
 lookup, and a late result is accepted only if its directory is still focused. No lookup reads a
-grid or transcript, and neither value crosses the wire or enters session state.
+grid or transcript, and neither value crosses the wire or enters session state. M9-13 passes those
+cached values into the pure frame composer, which formats no value it was not handed and performs
+no I/O. The resulting minimal row resolves every semantic segment through this client's theme and
+yields clock, client/repository detail, inactive tabs, and titles before its required markers.
 Tabs, pane metadata, attention, client counts, and effective sizing remain server projections.
 No status segment may display placeholder data as though it were authoritative.
 

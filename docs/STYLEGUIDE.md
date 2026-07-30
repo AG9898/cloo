@@ -37,9 +37,10 @@ titles — it is the session-aware composition described under [Tab row](#tab-ro
 is no longer a static help list either: it is the searchable command palette card 04 asks for, though
 that card's golden frames are still M9-21's. The session switcher now uses the verified local daemon
 catalog and can move the live client between those sockets. Keyboard and mouse resizing now light
-the changed divider and show its visible ratio as card 08 requires. The remaining configuration and
-status variants still need their card-specific passes. A helper being byte-tested does not by
-itself establish that the attached frame matches the handoff.
+the changed divider and show its visible ratio as card 08 requires. The default status row is now
+the flat segmented minimal composition from cards 01 and 07, with live local repository and clock
+data; the powerline variant and configuration preview still need their card-specific passes. A
+helper being byte-tested does not by itself establish that the attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
 
@@ -63,9 +64,8 @@ A card is asserted as a complete cell matrix in `crates/cloo-client/tests/visual
 names the roles below rather than literal colors, so one expectation is checked against a truecolor
 theme and its 16-color resolution. Chrome that a card has not yet routed through the client theme is
 expected at its *reference* Storm value instead, which keeps the remaining gap visible in the
-fixture. The status row is still authored that way: it draws the reference palette at every color
-depth. Pane headers, pane bodies, and — as of M9-11 — the tab row all resolve through the client
-theme instead. A tab-row golden is one complete row of a live composed frame, which is what lets the
+fixture. Pane headers, pane bodies, the tab row, and the minimal status row all resolve through the
+client theme. A tab-row golden is one complete row of a live composed frame, which is what lets the
 whole width ladder be asserted without re-authoring the pane and status rows beneath it at each
 width.
 
@@ -140,7 +140,7 @@ session state.
   color and text markers continue to carry focus.
 - A pane header is one framed row: pane index, profile/name, optional task label, and concise state.
 - The always-on status bar is one row. It prioritizes session, active tab, attention count, and
-  prefix hint; git/client/clock segments yield when width is limited.
+  prefix hint; clock, client/repository detail, inactive tabs, and titles yield in that order.
 - The focused pane uses the accent border. Unfocused panes use a neutral border and reduced
   contrast. In compact mode, preserve the title and state glyph even if the task label truncates.
 - Use terminal-safe glyphs with ASCII fallbacks: `>` for selection, `!` for attention, `x` for
@@ -226,11 +226,12 @@ never read as a broken template.
 
 ### Status bar
 
-The always-on bottom row has two reference compositions:
+The always-on bottom row has two reference compositions. The minimal form is live as of M9-13;
+powerline remains the following status-variant stage:
 
-- **Minimal:** accent session segment, active and inactive tab summaries, branch/attention and
-  prefix hints, then a right-aligned clock. Flat separators keep it usable without a powerline
-  font.
+- **Minimal:** accent logical-session segment, active and inactive tab summaries, explicit
+  attention, then right-aligned repository/client detail, prefix, and clock. Segment backgrounds
+  and cell spacing provide flat boundaries without requiring a powerline font.
 - **Powerline:** mode, session, active tab, branch/attention, client count and effective minimum
   size, then the clock, joined by powerline separators when supported.
 
@@ -240,24 +241,26 @@ explicit. Every value has the provenance documented in
 [`ARCHITECTURE.md`](ARCHITECTURE.md#visual-status-projections); unavailable optional values are
 omitted rather than fabricated.
 
-As of M9-07, the attached client caches the daemon's `WorkspaceStatus` projection for the logical
-session name, attached-client count, and effective minimum size. That cache is the only source for
-those fields in later status compositions: an outer-terminal resize is merely reported until the
-daemon answers, and neither pane geometry nor pane text may be used as a substitute. This task does
-not yet add those fields to the rendered minimal bar.
+The attached client caches the daemon's `WorkspaceStatus` projection for the logical session name,
+attached-client count, and effective minimum size. That cache is the only source for those fields:
+an outer-terminal resize is merely reported until the daemon answers, and neither pane geometry nor
+pane text may be used as a substitute. M9-13 uses the logical name and client count in the minimal
+bar; an unpublished or empty name is not replaced with the internal numeric session ID.
 
-As of M9-12, clock and repository values have a client-local model but are not yet rendered. Clock
-text comes from the client's local wall clock. Repository branch and change count come only from a
-bounded asynchronous Git query against the focused pane's reported working directory; a detached
+Clock text comes from the client's local wall clock. Repository branch and change count come only
+from a bounded asynchronous Git query against the focused pane's reported working directory; a detached
 head omits the branch, and a missing repository, failed or slow query, or changed focus leaves the
-repository segment absent. Pane text is never a source for either value.
+repository segment absent. Pane text is never a source for either value. M9-13 reads those already
+cached values while composing; frame rendering still starts no process and reads no filesystem.
 
-Width yields in one fixed order: clock, client geometry, branch, inactive tab summaries, active tab
-title, full session name, per-state attention detail, and finally the help suffix. At the narrowest
-useful width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and
-the configured prefix's own final character. The prefix is client configuration, so two clients
-attached to one session may legitimately show different hints. Below four cells the row truncates
-that compact form rather than inventing a different layout.
+Width yields in one fixed order: clock, attached-client and repository detail, inactive tabs from
+the far right and then far left, active-tab title, full session name, per-state attention detail,
+and finally the full prefix spelling. At the narrowest useful width the row becomes `s>!b`, retaining
+one ASCII marker for session, tab, attention, and the configured prefix's own final character. The
+prefix is client configuration, so two clients attached to one session may legitimately show
+different hints. Below four cells the row truncates that compact form rather than inventing a
+different layout. The same characters and attributes are used after semantic colors resolve to the
+16-color table, so active selection and pending-prefix brackets never depend on RGB.
 
 ### First attachment and command discovery
 
@@ -265,20 +268,20 @@ The first attached frame must explain enough to act without turning chrome into 
 the default workspace has one pane, the status row spends available trailing width on the configured
 prefix followed by `split %`, `stack "`, and `help ?`; it yields those clues from the end using the
 same width ladder as every other status segment. Once there is more than one pane, the ordinary
-session, tab, attention, and prefix/help summary wins that space back. A pending prefix is visibly
+session, tab, attention, and prefix summary wins that space back. A pending prefix is visibly
 distinct from its settled hint and never lets the next key reach the child.
 
 `cloo-client`'s `PrefixHint` is that field as of M8-03, and it is what the status row is handed
 rather than something the row derives:
 
 ```
-session:7 >2 build 0! C-b split % stack " help ?
-                      ^   ^        ^        ^
-                      |   |        |        the clues yield from the end:
-                      |   |        |        help, then stack, then split
-                      |   the configured chord's own bindings, keyed
-                      the prefix, drawn verbatim — `M-a` if that is what
-                      `[keys] prefix` says, never a hard-coded `C-b`
+ s main  >2 build  0!                 C-b split % stack " help ?
+                                      ^   ^        ^        ^
+                                      |   |        |        the clues yield from the end:
+                                      |   |        |        help, then stack, then split
+                                      |   the configured chord's own bindings, keyed
+                                      the prefix, drawn verbatim — `M-a` if that is what
+                                      `[keys] prefix` says, never a hard-coded `C-b`
 ```
 
 Two rules keep this honest. The clues are spent **before any core field yields**, so a narrowing

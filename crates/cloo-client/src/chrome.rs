@@ -34,10 +34,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use cloo_proto::{Cell, CellAttrs, Color, Direction, Point, SessionId, Size, TabSummary};
+use cloo_proto::{Cell, CellAttrs, Color, Direction, Point, Size, TabSummary};
 
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
 use crate::renderer::Span;
+use crate::status::RepositoryStatus;
 use crate::theme::{Theme, ThemeToken};
 
 // ---------------------------------------------------------------------------
@@ -1159,7 +1160,7 @@ pub fn summary_span(at: Point, queue: &AttentionQueue) -> Span {
 /// The default spelling, kept as a constant because it is what an unconfigured
 /// client shows and what the style guide documents. The row itself renders
 /// whatever [`PrefixHint`] it is handed, so a rebound prefix appears verbatim.
-pub const DEFAULT_PREFIX_HINT: &str = "C-b ?";
+pub const DEFAULT_PREFIX_HINT: &str = "C-b";
 
 /// The clue keys the first-attach guide offers, in the order they are spent.
 ///
@@ -1255,14 +1256,6 @@ impl PrefixHint {
         }
     }
 
-    /// The ordinary settled field: the prefix plus its help key.
-    fn help_cells(&self) -> Vec<Cell> {
-        let mut cells = self.prefix_cells();
-        push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
-        push_str(&mut cells, "?", ACCENT, CellAttrs::BOLD);
-        cells
-    }
-
     /// The guide forms, widest first, or nothing when the clues are withheld.
     fn guide_forms(&self) -> Vec<Vec<Cell>> {
         if !self.is_guided() {
@@ -1300,134 +1293,179 @@ impl Default for PrefixHint {
     }
 }
 
-/// Builds the always-on minimal status row, exactly `width` cells wide.
+/// The truthful values available to the minimal status row.
 ///
-/// The flat row carries the session, active tab, attention summary, and prefix
-/// hint without depending on colour or non-ASCII glyphs. Its fixed degradation
-/// ladder spends the *hint* first: the first-attach clues yield from the end —
-/// `help ?`, then `stack "`, then `split %` — before the session, tab, or
-/// attention fields give up anything at all. Only then does the row drop the
-/// active tab title, shorten the session and attention summary, and finally
-/// drop the help suffix from the prefix. At very narrow widths it condenses to
-/// `s>!b`: session, tab, attention, and the configured prefix's own last
-/// character, in that order. A terminal narrower than four cells is the
-/// unavoidable physical limit and receives the leading part of that form.
+/// Server projections (`session`, `tabs`, `clients`, and `queue`) stay distinct
+/// from client-local values (`repository`, `clock`, and `hint`) until the final
+/// composition. Optional values are absent rather than represented by
+/// placeholders.
+#[derive(Debug, Clone, Copy)]
+pub struct StatusBar<'a> {
+    tabs: &'a [TabSummary],
+    queue: &'a AttentionQueue,
+    hint: &'a PrefixHint,
+    session: Option<&'a str>,
+    clients: Option<u16>,
+    repository: Option<&'a RepositoryStatus>,
+    clock: Option<&'a str>,
+}
+
+impl<'a> StatusBar<'a> {
+    /// Starts a bar with its required tab, attention, and prefix projections.
+    #[must_use]
+    pub const fn new(
+        tabs: &'a [TabSummary],
+        queue: &'a AttentionQueue,
+        hint: &'a PrefixHint,
+    ) -> Self {
+        Self {
+            tabs,
+            queue,
+            hint,
+            session: None,
+            clients: None,
+            repository: None,
+            clock: None,
+        }
+    }
+
+    /// Supplies the daemon-projected logical session name.
+    #[must_use]
+    pub const fn session(mut self, session: &'a str) -> Self {
+        self.session = Some(session);
+        self
+    }
+
+    /// Supplies the daemon-projected attached-client count.
+    #[must_use]
+    pub const fn clients(mut self, clients: u16) -> Self {
+        self.clients = Some(clients);
+        self
+    }
+
+    /// Supplies the focused pane's bounded client-local repository answer.
+    #[must_use]
+    pub const fn repository(mut self, repository: &'a RepositoryStatus) -> Self {
+        self.repository = Some(repository);
+        self
+    }
+
+    /// Supplies the client-local wall-clock text.
+    #[must_use]
+    pub const fn clock(mut self, clock: &'a str) -> Self {
+        self.clock = Some(clock);
+        self
+    }
+}
+
+/// Builds the always-on high-fidelity minimal status row, exactly `width` cells
+/// wide.
+///
+/// The reference form is a flat sequence of styled segments: logical session,
+/// ordered tabs, attention, then right-aligned repository/client detail,
+/// prefix, and clock. Width first spends first-attach guidance, then removes
+/// clock, client and repository detail, inactive tabs, and tab/session titles.
+/// Required session, active-tab, attention, and prefix markers remain as the
+/// compact ASCII `s>!b` form at the physical limit.
 #[must_use]
-pub fn status_bar_cells(
-    session: SessionId,
-    tabs: &[TabSummary],
-    queue: &AttentionQueue,
-    hint: &PrefixHint,
-    width: u16,
-) -> Vec<Cell> {
+pub fn status_bar_cells(bar: StatusBar<'_>, width: u16, options: ChromeOptions) -> Vec<Cell> {
     let width = usize::from(width);
     if width == 0 {
         return Vec::new();
     }
 
-    let session_full = text_cells(
-        &format!("session:{}", session.get()),
-        PRIMARY,
-        CellAttrs::BOLD,
+    let session_full = bar.session.filter(|name| !name.is_empty()).map_or_else(
+        || status_segment("s", PRIMARY, SURFACE, CellAttrs::BOLD),
+        |name| status_segment(&format!("s {name}"), SURFACE, ACCENT, CellAttrs::BOLD),
     );
-    let session_short = text_cells(&format!("s{}", session.get()), PRIMARY, CellAttrs::BOLD);
     let session_mark = text_cells("s", PRIMARY, CellAttrs::BOLD);
 
-    let (tab_index, tab_title) = tabs
-        .iter()
-        .enumerate()
-        .find(|(_, tab)| tab.active)
-        .map(|(index, tab)| (index + 1, tab.title.as_str()))
-        .unwrap_or((0, ""));
-    let tab_short_text = if tab_index == 0 {
-        ">?".to_owned()
-    } else {
-        format!(">{tab_index}")
-    };
-    let tab_full_text = if tab_title.is_empty() {
-        tab_short_text.clone()
-    } else {
-        format!("{tab_short_text} {tab_title}")
-    };
-    let tab_full = text_cells(&tab_full_text, ACCENT, CellAttrs::BOLD);
-    let tab_short = text_cells(&tab_short_text, ACCENT, CellAttrs::BOLD);
+    let active = bar.tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let tab_short = status_tab_cells(bar.tabs.get(active), active + 1, false);
     let tab_mark = text_cells(">", ACCENT, CellAttrs::BOLD);
 
-    let attention_full = status_attention_cells(queue);
+    let attention_full = status_segment_cells(status_attention_cells(bar.queue));
     let attention_count = text_cells(
-        &format!("{}!", queue.count()),
-        if queue.is_empty() { MUTED } else { WARNING },
+        &format!("{}!", bar.queue.count()),
+        if bar.queue.is_empty() { MUTED } else { WARNING },
         CellAttrs::BOLD,
     );
     let attention_mark = text_cells("!", WARNING, CellAttrs::BOLD);
 
-    let prefix_full = hint.help_cells();
-    let prefix_short = hint.prefix_cells();
+    let prefix_full = status_segment_cells(bar.hint.prefix_cells());
+    let prefix_short = bar.hint.prefix_cells();
+    let repository = bar.repository.map(repository_cells);
+    let clients = bar.clients.map(client_cells);
+    let clock = bar.clock.filter(|clock| !clock.is_empty()).map(clock_cells);
 
-    // The guide clues are the first thing width buys and the first thing it
-    // loses: every core field is still at its widest form here, so the hint
-    // yields ahead of the session, tab, and attention information.
-    for guide in hint.guide_forms() {
-        let parts = [
+    let mut window = (0usize, bar.tabs.len());
+    let widest_tabs = status_tabs_cells(bar.tabs, window, true);
+
+    // Guidance owns the optional right side while it is useful, and yields from
+    // the end before any core field is shortened.
+    for guide in bar.hint.guide_forms() {
+        let guide = status_segment_cells(guide);
+        let left = [
             session_full.as_slice(),
-            tab_full.as_slice(),
+            widest_tabs.as_slice(),
             attention_full.as_slice(),
-            guide.as_slice(),
         ];
-        if status_row_len(&parts) <= width {
-            return status_row(&parts, width);
+        if let Some(cells) = fit_status_row(&left, &[guide.as_slice()], width) {
+            return options.theme.map_storm_cells(cells);
         }
     }
 
-    // The order here is the documented yield order. Keeping the complete
-    // candidate rows explicit makes a narrow status bar deterministic and
-    // byte-for-byte testable, like pane headers and tab rows.
-    for parts in [
-        [
+    let optional_forms = [
+        (repository.as_deref(), clients.as_deref(), clock.as_deref()),
+        (repository.as_deref(), clients.as_deref(), None),
+        (repository.as_deref(), None, None),
+        (None, None, None),
+    ];
+    for (repository, clients, clock) in optional_forms {
+        let left = [
             session_full.as_slice(),
-            tab_full.as_slice(),
+            widest_tabs.as_slice(),
             attention_full.as_slice(),
+        ];
+        let right = [
+            repository.unwrap_or_default(),
+            clients.unwrap_or_default(),
             prefix_full.as_slice(),
-        ],
-        [
+            clock.unwrap_or_default(),
+        ];
+        if let Some(cells) = fit_status_row(&left, &right, width) {
+            return options.theme.map_storm_cells(cells);
+        }
+    }
+
+    // Inactive tabs yield around the active one only after optional local and
+    // client detail has gone.
+    loop {
+        let tabs = status_tabs_cells(bar.tabs, window, true);
+        let left = [
             session_full.as_slice(),
-            tab_short.as_slice(),
+            tabs.as_slice(),
             attention_full.as_slice(),
-            prefix_full.as_slice(),
-        ],
-        [
-            session_short.as_slice(),
-            tab_short.as_slice(),
-            attention_full.as_slice(),
-            prefix_full.as_slice(),
-        ],
-        [
-            session_short.as_slice(),
-            tab_short.as_slice(),
-            attention_count.as_slice(),
-            prefix_full.as_slice(),
-        ],
-        [
-            session_short.as_slice(),
-            tab_short.as_slice(),
-            attention_count.as_slice(),
-            prefix_short.as_slice(),
-        ],
-        [
-            session_short.as_slice(),
-            tab_mark.as_slice(),
-            attention_count.as_slice(),
-            prefix_short.as_slice(),
-        ],
-        [
-            session_mark.as_slice(),
-            tab_mark.as_slice(),
-            attention_mark.as_slice(),
-            prefix_short.as_slice(),
-        ],
+        ];
+        if let Some(cells) = fit_status_row(&left, &[prefix_full.as_slice()], width) {
+            return options.theme.map_storm_cells(cells);
+        }
+        match narrower_window(window, active) {
+            Some(next) => window = next,
+            None => break,
+        }
+    }
+
+    for (session, tab, attention, prefix) in [
+        (&session_full, &tab_short, &attention_full, &prefix_full),
+        (&session_mark, &tab_short, &attention_full, &prefix_full),
+        (&session_mark, &tab_short, &attention_count, &prefix_full),
+        (&session_mark, &tab_short, &attention_count, &prefix_short),
+        (&session_mark, &tab_mark, &attention_mark, &prefix_short),
     ] {
-        if status_row_len(&parts) <= width {
-            return status_row(&parts, width);
+        let left = [session.as_slice(), tab.as_slice(), attention.as_slice()];
+        if let Some(cells) = fit_status_row(&left, &[prefix.as_slice()], width) {
+            return options.theme.map_storm_cells(cells);
         }
     }
 
@@ -1439,26 +1477,131 @@ pub fn status_bar_cells(
     cells.extend_from_slice(&attention_mark);
     push_str(
         &mut cells,
-        &hint.mark().to_string(),
+        &bar.hint.mark().to_string(),
         PRIMARY,
         CellAttrs::NONE,
     );
     cells.truncate(width);
     pad_status_row(&mut cells, width);
-    cells
+    options.theme.map_storm_cells(cells)
 }
 
 /// Positions the always-on status row for the chrome renderer.
 #[must_use]
-pub fn status_bar_span(
-    at: Point,
-    session: SessionId,
-    tabs: &[TabSummary],
-    queue: &AttentionQueue,
-    hint: &PrefixHint,
-    width: u16,
-) -> Span {
-    Span::new(at, status_bar_cells(session, tabs, queue, hint, width))
+pub fn status_bar_span(at: Point, bar: StatusBar<'_>, width: u16, options: ChromeOptions) -> Span {
+    Span::new(at, status_bar_cells(bar, width, options))
+}
+
+fn status_segment(text: &str, fg: Color, bg: Color, attrs: CellAttrs) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(len(text) + 2);
+    push_styled(&mut cells, " ", fg, bg, attrs);
+    push_styled(&mut cells, text, fg, bg, attrs);
+    push_styled(&mut cells, " ", fg, bg, attrs);
+    cells
+}
+
+fn status_segment_cells(mut cells: Vec<Cell>) -> Vec<Cell> {
+    cells.insert(
+        0,
+        Cell {
+            ch: ' ',
+            fg: Color::Default,
+            bg: SURFACE,
+            attrs: CellAttrs::NONE,
+        },
+    );
+    cells.push(Cell {
+        ch: ' ',
+        fg: Color::Default,
+        bg: SURFACE,
+        attrs: CellAttrs::NONE,
+    });
+    cells
+}
+
+fn status_tab_cells(tab: Option<&TabSummary>, index: usize, title: bool) -> Vec<Cell> {
+    let Some(tab) = tab else {
+        return text_cells(">", ACCENT, CellAttrs::BOLD);
+    };
+    let marker = if tab.active { '>' } else { ' ' };
+    let bg = if tab.active { RAISED_SURFACE } else { SURFACE };
+    let attrs = if tab.active {
+        CellAttrs::BOLD.union(CellAttrs::UNDERLINE)
+    } else {
+        CellAttrs::NONE
+    };
+    let mut cells = Vec::new();
+    push_styled(&mut cells, " ", MUTED, bg, attrs);
+    push_styled(
+        &mut cells,
+        &marker.to_string(),
+        if tab.active { ACCENT } else { MUTED },
+        bg,
+        attrs,
+    );
+    push_styled(
+        &mut cells,
+        &index.to_string(),
+        if tab.active { INFO } else { MUTED },
+        bg,
+        attrs,
+    );
+    if title && !tab.title.is_empty() {
+        push_styled(&mut cells, " ", MUTED, bg, attrs);
+        push_styled(
+            &mut cells,
+            &tab.title,
+            if tab.active { PRIMARY } else { MUTED },
+            bg,
+            attrs,
+        );
+    }
+    push_styled(&mut cells, " ", MUTED, bg, attrs);
+    cells
+}
+
+fn status_tabs_cells(tabs: &[TabSummary], window: (usize, usize), titles: bool) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for (index, tab) in tabs.iter().enumerate().take(window.1).skip(window.0) {
+        cells.extend(status_tab_cells(Some(tab), index + 1, titles));
+    }
+    cells
+}
+
+fn repository_cells(repository: &RepositoryStatus) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    push_str(&mut cells, "git", SUCCESS, CellAttrs::BOLD);
+    if let Some(branch) = repository
+        .branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty())
+    {
+        push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+        push_str(&mut cells, branch, PRIMARY, CellAttrs::NONE);
+    }
+    if repository.changes > 0 {
+        push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
+        push_str(
+            &mut cells,
+            &format!("+{}", repository.changes),
+            WARNING,
+            CellAttrs::NONE,
+        );
+    }
+    status_segment_cells(cells)
+}
+
+fn client_cells(clients: u16) -> Vec<Cell> {
+    status_segment(
+        &plural(usize::from(clients), "client"),
+        MUTED,
+        SURFACE,
+        CellAttrs::NONE,
+    )
+}
+
+fn clock_cells(clock: &str) -> Vec<Cell> {
+    status_segment(clock, PRIMARY, SURFACE, CellAttrs::BOLD)
 }
 
 /// Turns text into cells for one flat status-bar field.
@@ -1482,22 +1625,24 @@ fn status_attention_cells(queue: &AttentionQueue) -> Vec<Cell> {
     }
 }
 
-/// The number of cells in a status row, including field gaps.
-fn status_row_len(parts: &[&[Cell]; 4]) -> usize {
-    parts.iter().map(|part| part.len()).sum::<usize>() + parts.len().saturating_sub(1)
-}
-
-/// Joins already-fitted fields into one padded status row.
-fn status_row(parts: &[&[Cell]; 4], width: usize) -> Vec<Cell> {
+/// Joins fitted left and right fields into one padded status row.
+fn fit_status_row(left: &[&[Cell]], right: &[&[Cell]], width: usize) -> Option<Vec<Cell>> {
+    let left_len = left.iter().map(|part| part.len()).sum::<usize>();
+    let right_len = right.iter().map(|part| part.len()).sum::<usize>();
+    if left_len + right_len > width {
+        return None;
+    }
     let mut cells = Vec::with_capacity(width);
-    for (index, part) in parts.iter().enumerate() {
-        if index > 0 {
-            push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
-        }
+    for part in left {
         cells.extend_from_slice(part);
     }
-    pad_status_row(&mut cells, width);
-    cells
+    while cells.len() + right_len < width {
+        push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
+    }
+    for part in right {
+        cells.extend_from_slice(part);
+    }
+    Some(cells)
 }
 
 /// Pads a status row with chrome-surface cells.
@@ -2641,57 +2786,99 @@ mod tests {
         queue
     }
 
+    fn status_text(
+        tabs: &[TabSummary],
+        queue: &AttentionQueue,
+        hint: &PrefixHint,
+        width: u16,
+    ) -> String {
+        text_of(&status_bar_cells(
+            StatusBar::new(tabs, queue, hint).session("main"),
+            width,
+            ChromeOptions::default(),
+        ))
+    }
+
     #[test]
-    fn a_wide_status_bar_has_every_required_field() {
+    fn status_bar_reference_width_has_truthful_segmented_fields() {
+        let tabs = status_tabs();
         let queue = status_queue();
+        let hint = PrefixHint::default();
+        let repository = RepositoryStatus {
+            branch: Some("feature/status".to_owned()),
+            changes: 2,
+        };
         let row = status_bar_cells(
-            SessionId::new(7),
-            &status_tabs(),
-            &queue,
-            &PrefixHint::default(),
-            30,
+            StatusBar::new(&tabs, &queue, &hint)
+                .session("main")
+                .clients(2)
+                .repository(&repository)
+                .clock("14:38"),
+            96,
+            ChromeOptions::default(),
         );
-        assert_eq!(text_of(&row), "session:7 >2 build 2! 1x C-b ?");
+        let text = text_of(&row);
+        for field in [
+            "s main",
+            " 1 shell ",
+            ">2 build",
+            "2! 1x",
+            "git feature/status +2",
+            "2 clients",
+            "C-b",
+            "14:38",
+        ] {
+            assert!(text.contains(field), "missing {field:?} in {text:?}");
+        }
+        assert_eq!(
+            bg_of(&row, 's'),
+            ACCENT,
+            "the session is the accent segment"
+        );
         assert_eq!(fg_of(&row, '>'), ACCENT, "the active tab stays visible");
         assert_eq!(fg_of(&row, '!'), Attention::NeedsInput.color());
     }
 
     #[test]
-    fn a_narrow_status_bar_yields_detail_before_required_fields() {
+    fn status_bar_yields_optional_detail_before_required_markers() {
+        let tabs = status_tabs();
         let queue = status_queue();
+        let hint = PrefixHint::default();
+        let repository = RepositoryStatus {
+            branch: Some("main".to_owned()),
+            changes: 2,
+        };
+        let bar = StatusBar::new(&tabs, &queue, &hint)
+            .session("main")
+            .clients(2)
+            .repository(&repository)
+            .clock("14:38");
+        let wide = text_of(&status_bar_cells(bar, 80, ChromeOptions::default()));
+        let narrow = text_of(&status_bar_cells(bar, 30, ChromeOptions::default()));
+        assert!(wide.contains("14:38") && wide.contains("git main +2"));
+        assert!(!narrow.contains("14:38") && !narrow.contains("git"));
+        for marker in ['s', '>', '!', 'b'] {
+            assert!(
+                narrow.contains(marker),
+                "required marker {marker:?}: {narrow:?}"
+            );
+        }
         assert_eq!(
-            text_of(&status_bar_cells(
-                SessionId::new(7),
-                &status_tabs(),
-                &queue,
-                &PrefixHint::default(),
-                12
-            )),
-            "s7 >2 3! C-b",
-            "the tab title, state split, and help suffix yield first"
-        );
-        assert_eq!(
-            text_of(&status_bar_cells(
-                SessionId::new(7),
-                &status_tabs(),
-                &queue,
-                &PrefixHint::default(),
-                6
-            )),
-            "s>!b  ",
+            text_of(&status_bar_cells(bar, 4, ChromeOptions::default())),
+            "s>!b",
             "four ASCII markers keep every field at the narrowest useful size"
         );
     }
 
     #[test]
     fn a_status_bar_uses_ascii_tokens_and_a_zero_attention_count() {
+        let tabs = status_tabs();
         let queue = AttentionQueue::new();
+        let hint = PrefixHint::default();
         let row = status_bar_cells(
-            SessionId::new(1),
-            &status_tabs(),
-            &queue,
-            &PrefixHint::default(),
+            StatusBar::new(&tabs, &queue, &hint).session("main"),
             40,
+            ChromeOptions::default(),
         );
         let text = text_of(&row);
         assert!(row.iter().all(|cell| cell.ch.is_ascii()));
@@ -2701,14 +2888,14 @@ mod tests {
 
     #[test]
     fn a_status_bar_span_keeps_its_origin_and_width() {
+        let tabs = status_tabs();
         let queue = AttentionQueue::new();
+        let hint = PrefixHint::default();
         let span = status_bar_span(
             Point::new(4, 23),
-            SessionId::new(1),
-            &status_tabs(),
-            &queue,
-            &PrefixHint::default(),
+            StatusBar::new(&tabs, &queue, &hint).session("main"),
             20,
+            ChromeOptions::default(),
         );
         assert_eq!(span.at, Point::new(4, 23));
         assert_eq!(span.cells.len(), 20);
@@ -2718,23 +2905,19 @@ mod tests {
 
     /// The row a workspace with `panes` panes draws at `width`.
     fn hinted_row(hint: &PrefixHint, width: u16) -> String {
-        text_of(&status_bar_cells(
-            SessionId::new(7),
-            &status_tabs(),
-            &AttentionQueue::new(),
-            hint,
-            width,
-        ))
+        let tabs = status_tabs();
+        let queue = AttentionQueue::new();
+        status_text(&tabs, &queue, hint, width)
     }
 
     #[test]
     fn one_pane_spends_trailing_width_on_the_split_stack_and_help_clues() {
         let hint = PrefixHint::for_panes("C-b", 1);
         assert!(hint.is_guided(), "one pane is the first-attach shape");
-        assert_eq!(
-            hinted_row(&hint, 48),
-            "session:7 >2 build 0! C-b split % stack \" help ?",
-            "the widest form names the prefix and all three clues"
+        let row = hinted_row(&hint, 60);
+        assert!(
+            row.contains("s main") && row.contains("C-b split % stack \" help ?"),
+            "the widest form names the workspace and all three clues: {row:?}"
         );
     }
 
@@ -2742,29 +2925,31 @@ mod tests {
     fn a_second_pane_wins_the_clue_width_back() {
         let hint = PrefixHint::for_panes("C-b", 2);
         assert!(!hint.is_guided());
-        assert_eq!(
-            hinted_row(&hint, 48).trim_end(),
-            "session:7 >2 build 0! C-b ?",
-            "past the first pane the ordinary summary is the whole hint"
+        let row = hinted_row(&hint, 48);
+        assert!(row.contains("s main") && row.contains("C-b"), "{row:?}");
+        assert!(
+            !row.contains("split %"),
+            "past the first pane guidance is gone: {row:?}"
         );
     }
 
     #[test]
     fn the_clues_yield_from_the_end_before_any_core_field_does() {
         let hint = PrefixHint::for_panes("C-b", 1);
-        // Every rung below still carries `session:7 >2 build 0!` — the session,
+        // Every rung below still carries the session, active tab, and attention
         // tab, and attention fields are untouched while the clues are spent.
         for (width, expected) in [
-            (48, "C-b split % stack \" help ?"),
-            (47, "C-b split % stack \""),
-            (40, "C-b split %"),
-            (32, "C-b ?"),
+            (60, "C-b split % stack \" help ?"),
+            (53, "C-b split % stack \""),
+            (45, "C-b split %"),
         ] {
             let row = hinted_row(&hint, width);
-            assert!(
-                row.starts_with("session:7 >2 build 0! "),
-                "a core field yielded before the clues at width {width}: {row:?}"
-            );
+            for core in ["s main", "1 shell", ">2 build", "0!"] {
+                assert!(
+                    row.contains(core),
+                    "core field {core:?} yielded before the clues at width {width}: {row:?}"
+                );
+            }
             assert!(
                 row.trim_end().ends_with(expected),
                 "width {width} expected the hint {expected:?}, got {row:?}"
@@ -2793,8 +2978,8 @@ mod tests {
         let pending = settled.clone().pending(true);
         assert!(!settled.is_pending() && pending.is_pending());
 
-        let settled_row = hinted_row(&settled, 50);
-        let pending_row = hinted_row(&pending, 50);
+        let settled_row = hinted_row(&settled, 62);
+        let pending_row = hinted_row(&pending, 62);
         assert!(
             !settled_row.contains("[C-b]"),
             "a settled prefix is never bracketed: {settled_row:?}"
@@ -2806,11 +2991,10 @@ mod tests {
         assert_eq!(
             fg_of(
                 &status_bar_cells(
-                    SessionId::new(7),
-                    &status_tabs(),
-                    &AttentionQueue::new(),
-                    &pending,
-                    50,
+                    StatusBar::new(&status_tabs(), &AttentionQueue::new(), &pending)
+                        .session("main"),
+                    62,
+                    ChromeOptions::default(),
                 ),
                 '['
             ),
@@ -2822,13 +3006,13 @@ mod tests {
     #[test]
     fn every_hinted_row_is_exactly_its_width_and_ascii_at_every_width() {
         let hint = PrefixHint::for_panes("C-b", 1).pending(true);
+        let tabs = status_tabs();
+        let queue = status_queue();
         for width in 0..=60_u16 {
             let row = status_bar_cells(
-                SessionId::new(7),
-                &status_tabs(),
-                &status_queue(),
-                &hint,
+                StatusBar::new(&tabs, &queue, &hint).session("main"),
                 width,
+                ChromeOptions::default(),
             );
             assert_eq!(row.len(), usize::from(width), "width {width}");
             assert!(

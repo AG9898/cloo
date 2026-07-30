@@ -16,12 +16,12 @@
 #![allow(dead_code)]
 
 use cloo_client::chrome::{
-    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TabBar,
+    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, StatusBar, TabBar,
 };
 use cloo_client::input::PaneArea;
 use cloo_client::renderer::{FramePane, Grid, Span, compose_frame};
 use cloo_client::theme::Theme;
-use cloo_proto::{Cell, CellAttrs, Color, PaneId, RowUpdate, SessionId, Size, TabId, TabSummary};
+use cloo_proto::{Cell, CellAttrs, Color, PaneId, RowUpdate, Size, TabId, TabSummary};
 
 use crate::harness::FrameMatrix;
 
@@ -114,7 +114,6 @@ impl ScenePane {
 #[derive(Debug, Clone)]
 pub struct Scene {
     size: Size,
-    session: SessionId,
     /// The daemon-projected session name the tab row's badge draws, when one has
     /// been received. `None` is the honest pre-`WorkspaceStatus` state.
     name: Option<String>,
@@ -128,12 +127,11 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// An empty terminal of `size`, on session 1, with the default prefix hint.
+    /// An empty terminal of `size`, with the default prefix hint.
     #[must_use]
     pub fn new(size: Size) -> Self {
         Self {
             size,
-            session: SessionId::new(1),
             name: None,
             clients: None,
             tabs: Vec::new(),
@@ -142,13 +140,6 @@ impl Scene {
             hint: PrefixHint::default(),
             dim_unfocused: true,
         }
-    }
-
-    /// Sets the session the status row names.
-    #[must_use]
-    pub fn session(mut self, session: u64) -> Self {
-        self.session = SessionId::new(session);
-        self
     }
 
     /// Supplies the daemon's projected session name, as `WorkspaceStatus` does.
@@ -229,15 +220,14 @@ impl Scene {
         if let Some(clients) = self.clients {
             bar = bar.clients(clients);
         }
-        compose_frame(
-            self.size,
-            bar,
-            self.session,
-            &panes,
-            &self.queue,
-            &self.hint,
-            self.options(theme),
-        )
+        let mut status = StatusBar::new(&self.tabs, &self.queue, &self.hint);
+        if let Some(name) = &self.name {
+            status = status.session(name);
+        }
+        if let Some(clients) = self.clients {
+            status = status.clients(clients);
+        }
+        compose_frame(self.size, bar, &panes, status, self.options(theme))
     }
 
     /// Composes and captures the complete cell matrix.

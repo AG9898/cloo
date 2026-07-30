@@ -158,7 +158,6 @@ fn the_tab_row_matches_the_same_goldens_in_sixteen_colors() {
 /// One tab, one focused pane with a header, and the always-on status row.
 fn workspace() -> Scene {
     Scene::new(Size::new(40, 8))
-        .session(1)
         .named("dev")
         .clients(1)
         .tab("main", true)
@@ -177,37 +176,66 @@ fn workspace() -> Scene {
 
 /// The complete expected frame for [`workspace`], role by role.
 ///
-/// `P`/`-`/`M`/`p`/`.` are the status row, still authored against the reference
-/// palette and so expected as [`Paint::Reference`]. The tab row (`S`, `T`, `,`,
-/// `w`), the pane header (`a`, `m`, `B`, `s`), and the pane body (`~`) all
-/// resolve through the client theme.
+/// The status row, tab row, pane frame, and pane body all resolve through the
+/// client theme; the golden names semantic roles rather than literal colors.
 fn workspace_golden() -> ExpectedFrame {
-    let reference = |token| Paint::Reference(token);
-    let chrome_bg = Paint::Reference(ThemeToken::Surface);
+    let chrome_bg = Paint::Token(ThemeToken::Surface);
     let pane_bg = Paint::Token(ThemeToken::Surface);
     let frame_bg = Paint::Token(ThemeToken::Frame);
 
     tab_row_styles(ExpectedFrame::new())
         .style(
-            'A',
-            SemanticStyle::new(reference(ThemeToken::Accent), chrome_bg).attrs(CellAttrs::BOLD),
+            'd',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Surface),
+                Paint::Token(ThemeToken::Accent),
+            )
+            .attrs(CellAttrs::BOLD),
         )
         .style('.', SemanticStyle::new(Paint::Terminal, chrome_bg))
         .style(
-            'P',
-            SemanticStyle::new(reference(ThemeToken::Primary), chrome_bg).attrs(CellAttrs::BOLD),
+            'u',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Muted),
+                Paint::Token(ThemeToken::RaisedSurface),
+            )
+            .attrs(CellAttrs::BOLD.union(CellAttrs::UNDERLINE)),
         )
         .style(
-            'p',
-            SemanticStyle::new(reference(ThemeToken::Primary), chrome_bg),
+            'v',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Accent),
+                Paint::Token(ThemeToken::RaisedSurface),
+            )
+            .attrs(CellAttrs::BOLD.union(CellAttrs::UNDERLINE)),
         )
         .style(
-            '-',
-            SemanticStyle::new(reference(ThemeToken::Muted), chrome_bg),
+            'i',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Info),
+                Paint::Token(ThemeToken::RaisedSurface),
+            )
+            .attrs(CellAttrs::BOLD.union(CellAttrs::UNDERLINE)),
+        )
+        .style(
+            't',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Primary),
+                Paint::Token(ThemeToken::RaisedSurface),
+            )
+            .attrs(CellAttrs::BOLD.union(CellAttrs::UNDERLINE)),
         )
         .style(
             'M',
-            SemanticStyle::new(reference(ThemeToken::Muted), chrome_bg).attrs(CellAttrs::BOLD),
+            SemanticStyle::new(Paint::Token(ThemeToken::Muted), chrome_bg).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            '-',
+            SemanticStyle::new(Paint::Token(ThemeToken::Muted), chrome_bg),
+        )
+        .style(
+            'p',
+            SemanticStyle::new(Paint::Token(ThemeToken::Primary), chrome_bg),
         )
         .style(
             'a',
@@ -262,8 +290,8 @@ fn workspace_golden() -> ExpectedFrame {
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
         )
         .row(
-            "session:1 >1 main 0! C-b ?              ",
-            "PPPPPPPPP-AAAAAAA-MM-ppp-A..............",
+            " s dev  >1 main  0!       1 client  C-b ",
+            "ddddddduviuttttu.MM......----------.ppp.",
         )
 }
 

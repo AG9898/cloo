@@ -77,9 +77,9 @@ pub use capabilities::{
 };
 pub use chrome::{
     Attention, AttentionQueue, ChromeOptions, DEFAULT_PREFIX_HINT, PaneChrome, PrefixHint,
-    QueueEntry, TOAST_CAPACITY, TOAST_LIFETIME, TOAST_MARGIN, TOAST_MAX_WIDTH, TabBar, Toast,
-    ToastDeck, body_span, dim_cell, dim_cell_with_theme, dim_cells, header_cells, header_span,
-    queue_row_cells, queue_row_span, status_bar_cells, status_bar_span, summary_cells,
+    QueueEntry, StatusBar, TOAST_CAPACITY, TOAST_LIFETIME, TOAST_MARGIN, TOAST_MAX_WIDTH, TabBar,
+    Toast, ToastDeck, body_span, dim_cell, dim_cell_with_theme, dim_cells, header_cells,
+    header_span, queue_row_cells, queue_row_span, status_bar_cells, status_bar_span, summary_cells,
     summary_span, tab_row_cells, tab_row_span, toast_cells, toast_cells_in, toast_rows, toast_span,
     toast_stack_span,
 };
