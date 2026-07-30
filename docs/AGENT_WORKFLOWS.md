@@ -178,6 +178,18 @@ nor refills a queue the user just cleared. The keyboard drives focus and acknowl
 it is pure rendering over the attention state the server already owns; nothing here reads the grid.
 The visual contract is in [STYLEGUIDE.md](STYLEGUIDE.md#overlays-and-notifications).
 
+M9-15 connects that model to the attached client. `<prefix> !` opens the queue as an overlay built
+from the live `ServerMessage::Panes` and `ServerMessage::Attention` projections, and while it is
+open every one of those projections refreshes it. Its rows pair a queue entry with the `PaneId` the
+entry names, because a queue position is a number a closing pane hands to its neighbour and neither
+of the surface's verbs may act on a pane the user was not looking at. Both verbs are typed session
+actions: Enter sends `Action::FocusPane(pane)` and closes the surface, and `a` or Space sends
+`Action::AcknowledgeAttention(pane)` and leaves it open. Acknowledgment reaches the session actor's
+existing `AcknowledgeAttention` command, so it is single-owned: the row leaves when the projection
+saying the pane was seen comes back, and a second attached client is told the same thing. Nothing
+else the overlay understands reaches the wire, and no keystroke ever reaches a child while it is
+open.
+
 ## Compatibility Tiers
 
 | Tier | Contract |

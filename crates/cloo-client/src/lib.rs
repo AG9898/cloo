@@ -33,9 +33,9 @@
 //!   reverted when input or a resize interrupts them, and drawn away entirely
 //!   by the reduce-motion setting.
 //! - [`overlay`] — the keyboard-first help surface, session switcher, profile
-//!   launcher, and pane-details view, as one model and one renderer over the
-//!   shared chrome rules, plus the notice a launch the workspace never made
-//!   leaves on the status row.
+//!   launcher, attention queue, and pane-details view, as one model and one
+//!   renderer over the shared chrome rules, plus the notice a launch the
+//!   workspace never made leaves on the status row.
 //! - [`copy_mode`] — highlights and the status row for server-owned copy mode,
 //!   plus the explicit, policy-gated OSC 52 copy.
 //! - [`effects`] — client-local policy and safe rendering for allowlisted

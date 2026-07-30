@@ -419,8 +419,10 @@ The attached client layers an open overlay over the already composed tab, frame,
 status spans: it dims that existing frame without changing any character, then paints the raised
 overlay box above it. Its keys are consumed locally — they never become pane input. The client-local
 entries remain `<prefix> ?` for commands/help, `<prefix> s` for sessions, `<prefix> i` for focused
-pane details, and `<prefix> a` for the profile launcher. Each is claimed only while the keymap
-leaves that chord unbound, and all use the same Escape dismissal and keyboard vocabulary.
+pane details, `<prefix> a` for the profile launcher, and `<prefix> !` for the attention queue —
+the queue's chord is the glyph the status row's attention count already wears. Each is claimed only
+while the keymap leaves that chord unbound, and all use the same Escape dismissal and keyboard
+vocabulary.
 
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:
@@ -434,10 +436,33 @@ contract concrete:
   `needs_input`, `ready`, or `failed`; progress and the absence of news never enter. Its order is
   deterministic: newest first, a repeat of the same live state coalesces in place, a changed state
   moves its pane to the front, and an acknowledged state does not return until the pane's state
-  actually changes (a lull resets that memory). A queue row reuses the pane header's exact-width
-  degradation ladder, so a row and a header look identical and the selected row wears the same
-  accent a focused pane does. The keyboard drives it through `input::queue_action`: navigate,
-  focus the selected pane, acknowledge, or dismiss.
+  actually changes (a lull resets that memory). The standalone `chrome::queue_row_cells` renders a
+  row through the pane header's exact-width degradation ladder, so a row drawn beside a header
+  matches it. The keyboard drives it through `input::queue_action`: navigate, focus the selected
+  pane, acknowledge, or dismiss.
+
+  As of M9-15 the live surface is an overlay like every other. `<prefix> !` opens it over the
+  attached frame, and it takes the shared overlay treatment — dimmed backdrop, raised box, title
+  row, and hint row — with each row spending its width in the same order as the rest: the pane
+  number leads, the pane name is the title, and the state (`! needs input`, glyph *and* label,
+  coloured through the client theme) is the trailing field that yields first:
+
+  ```
+    attention 1/2
+  > 3 build x failed
+    2 claude ! needs input
+    esc close enter focus a ack
+  ```
+
+  The hints keep dismissal first and give the middle slot to `a`, the one verb no other overlay
+  has. Enter focuses the pane its row names and closes the surface; acknowledging leaves it open,
+  because the row disappears only when the daemon's next attention projection says the pane has
+  been seen. That is deliberate: acknowledgment is session state, so it crosses the wire as
+  `Action::AcknowledgeAttention(pane)` rather than becoming a local view flag two attached clients
+  could disagree about. An open queue follows the projection while it is open, keeping the cursor
+  on the pane it was on rather than on a position a departing row shifted. A workspace with nothing
+  waiting still opens the surface: an empty queue says `attention` with no position claim, and a
+  key that appeared to do nothing would be the worse answer.
 - **Toasts.** The live `ToastDeck` is bounded and coalesces per pane — a repeated event becomes one notice
   with a growing `(xN)` count moved to newest, and a new pane's toast evicts the oldest when the
   deck is full, so a burst can never grow the stack without limit. Toasts float over the

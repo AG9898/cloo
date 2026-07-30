@@ -41,13 +41,14 @@ use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
     ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
-    OuterModes, PaneArea, ScreenLayout, overlay_action, route_mouse,
+    OuterModes, PaneArea, ScreenLayout, overlay_action, queue_action, route_mouse,
 };
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
 use crate::outer::current_size;
 use crate::overlay::{
-    ADD_PANE_KEY, DETAILS_KEY, HELP_KEY, LaunchNotice, LaunchRequest, Overlay, OverlayOutcome,
-    PaneDetails, SESSIONS_KEY, SessionEntry, backdrop_span, launch_notice_span, overlay_spans,
+    ADD_PANE_KEY, ATTENTION_KEY, AttentionEntry, DETAILS_KEY, HELP_KEY, LaunchNotice,
+    LaunchRequest, Overlay, OverlayKind, OverlayOutcome, PaneDetails, SESSIONS_KEY, SessionEntry,
+    backdrop_span, launch_notice_span, overlay_spans,
 };
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
@@ -1094,6 +1095,11 @@ impl LiveState {
     }
 
     /// Draws an attention queue only from the complete server projection.
+    ///
+    /// An open queue overlay is refreshed from the same pass, because the server
+    /// owns both the states it lists and the acknowledgment that clears one: a
+    /// row the user just acknowledged leaves when the projection saying so
+    /// arrives, not when the client decided to hide it.
     fn rebuild_queue(&mut self) {
         self.queue = AttentionQueue::new();
         for (index, pane) in self.panes.values().enumerate() {
@@ -1108,6 +1114,30 @@ impl LiveState {
                 );
             }
         }
+        let entries = self.attention_entries();
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.refresh_attention(entries);
+        }
+    }
+
+    /// The queue's rows paired with the panes they name.
+    ///
+    /// The queue is keyed by the position a user refers to a pane by, which is
+    /// the right key for coalescing and the wrong one to put on the wire: a
+    /// closing pane renumbers its neighbours. Resolving the position back to the
+    /// `PaneId` here — through the very map the numbering came from — is what
+    /// lets a row act on the pane the user actually saw. A row whose pane has
+    /// since gone is dropped rather than aimed at its successor.
+    fn attention_entries(&self) -> Vec<AttentionEntry> {
+        self.queue
+            .entries()
+            .iter()
+            .filter_map(|entry| {
+                let position = usize::from(entry.index).checked_sub(1)?;
+                let info = self.panes.values().nth(position)?;
+                Some(AttentionEntry::new(info.pane, entry))
+            })
+            .collect()
     }
 
     /// Composes the frame from the exact areas the mouse hit tester uses.
@@ -1235,6 +1265,7 @@ impl LiveState {
             Some(SESSIONS_KEY) => Some(Overlay::sessions(vec![
                 SessionEntry::new(self.session, "current", self.areas.len()).attached(true),
             ])),
+            Some(ATTENTION_KEY) => Some(Overlay::attention(self.attention_entries())),
             Some(DETAILS_KEY) => self
                 .layout
                 .as_ref()
@@ -1262,17 +1293,28 @@ impl LiveState {
     /// Applies an open overlay's own keyboard vocabulary.
     ///
     /// Every key an open overlay understands is consumed here and never reaches
-    /// a pane, including the confirmation that closes it. A launch is the one
-    /// outcome the caller has to act on, so it is handed back rather than
-    /// swallowed — the overlay is already closed by the time it is.
+    /// a pane, including the confirmation that closes it. The queue is decoded
+    /// with [`queue_action`] because it is the one surface with a verb the
+    /// shared vocabulary has no word for — acknowledging a row is not confirming
+    /// it — and everything else with [`overlay_action`]. A launch and the two
+    /// session actions a queue row produces are handed back rather than
+    /// swallowed, because only the caller holds the connection.
     fn apply_overlay_keys(&mut self, keys: &[u8]) -> OverlayKeys {
-        let Some(action) = overlay_action(keys) else {
-            return OverlayKeys::Ignored;
-        };
         let Some(overlay) = self.overlay.as_mut() else {
             return OverlayKeys::Ignored;
         };
-        match overlay.apply(action) {
+        let outcome = if matches!(overlay.kind(), OverlayKind::Attention(_)) {
+            let Some(action) = queue_action(keys) else {
+                return OverlayKeys::Ignored;
+            };
+            overlay.apply_queue(action)
+        } else {
+            let Some(action) = overlay_action(keys) else {
+                return OverlayKeys::Ignored;
+            };
+            overlay.apply(action)
+        };
+        match outcome {
             OverlayOutcome::Open => OverlayKeys::Consumed,
             OverlayOutcome::Dismissed | OverlayOutcome::SwitchSession(_) => {
                 self.overlay = None;
@@ -1281,6 +1323,17 @@ impl LiveState {
             OverlayOutcome::Launch(request) => {
                 self.overlay = None;
                 OverlayKeys::Launch(request)
+            }
+            // Focusing the pane a row names is the queue's whole purpose, so it
+            // closes; acknowledging leaves the surface up, because the row goes
+            // away when the server's projection says it has and a user usually
+            // has more than one to clear.
+            OverlayOutcome::FocusPane(pane) => {
+                self.overlay = None;
+                OverlayKeys::Command(Action::FocusPane(pane))
+            }
+            OverlayOutcome::Acknowledge(pane) => {
+                OverlayKeys::Command(Action::AcknowledgeAttention(pane))
             }
         }
     }
@@ -1373,6 +1426,8 @@ enum OverlayKeys {
     Consumed,
     /// The overlay closed on a confirmed profile.
     Launch(LaunchRequest),
+    /// The overlay produced one typed session action to send.
+    Command(Action),
 }
 
 #[cfg(test)]
@@ -1482,15 +1537,25 @@ async fn route_keys(
 ) -> Result<bool, AttachRunError> {
     if state.overlay.is_some() {
         keys.reset();
-        // A confirmed launcher row is the one overlay outcome that leaves the
-        // client: an *identifier* the daemon resolves against its own table,
-        // never a command. Nothing else here reaches the wire at all.
-        if let OverlayKeys::Launch(request) = state.apply_overlay_keys(&bytes) {
-            attached
-                .send_command(Action::LaunchProfile(request.profile().as_str().to_owned()))
-                .await
-                .map_err(AttachError::from)?;
-            state.sent_launch(&request, Instant::now());
+        // Three overlay outcomes leave the client, and all three are typed: a
+        // profile *identifier* the daemon resolves against its own table, and
+        // the focus and acknowledgment a queue row names by pane. Nothing else
+        // here reaches the wire at all, and no keystroke ever does.
+        match state.apply_overlay_keys(&bytes) {
+            OverlayKeys::Launch(request) => {
+                attached
+                    .send_command(Action::LaunchProfile(request.profile().as_str().to_owned()))
+                    .await
+                    .map_err(AttachError::from)?;
+                state.sent_launch(&request, Instant::now());
+            }
+            OverlayKeys::Command(action) => {
+                attached
+                    .send_command(action)
+                    .await
+                    .map_err(AttachError::from)?;
+            }
+            OverlayKeys::Ignored | OverlayKeys::Consumed => {}
         }
         return Ok(false);
     }
@@ -1571,7 +1636,6 @@ fn spawn_input_reader() -> tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::overlay::OverlayKind;
     use cloo_proto::{Cell, CellAttrs, CopySelection, PaneRect, RowUpdate, ScrollPoint, TabId};
     use tokio::io::duplex;
 
@@ -2451,6 +2515,215 @@ mod tests {
             state.launch.is_none(),
             "a dismissal must not leave a launch notice behind"
         );
+    }
+
+    // -- the attention queue -------------------------------------------------
+
+    /// Two panes with server identity, so the queue has real rows to list and a
+    /// real `PaneId` to name in the action a row produces.
+    fn attention_queue_state() -> LiveState {
+        let mut state = LiveState::new(
+            Size::new(40, 14),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
+        let panes = [PaneId::new(1), PaneId::new(2), PaneId::new(3)];
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: panes
+                    .iter()
+                    .enumerate()
+                    .map(|(index, pane)| PaneRect {
+                        pane: *pane,
+                        x: 1,
+                        y: u16::try_from(index).unwrap_or(0) * 4 + 1,
+                        size: Size::new(38, 2),
+                    })
+                    .collect(),
+                focused: Some(panes[0]),
+                zoomed: None,
+            }))
+            .expect("the layout applies");
+        state
+            .apply(ServerMessage::Panes(
+                [
+                    (panes[0], "shell"),
+                    (panes[1], "claude"),
+                    (panes[2], "build"),
+                ]
+                .into_iter()
+                .map(|(pane, name)| PaneInfo {
+                    pane,
+                    profile: "generic".to_owned(),
+                    name: name.to_owned(),
+                    task: None,
+                    cwd: "/home/dev".to_owned(),
+                })
+                .collect(),
+            ))
+            .expect("the pane identity applies");
+        state
+            .apply(attention_projection(&[
+                // Progress is not something a person is asked to act on, so this
+                // pane must never reach the queue.
+                (panes[0], AttentionState::Working, false),
+                (panes[1], AttentionState::NeedsInput, false),
+                (panes[2], AttentionState::Failed, false),
+            ]))
+            .expect("the attention applies");
+        state
+    }
+
+    /// One `ServerMessage::Attention`, which is the only thing that ever changes
+    /// what the queue holds.
+    fn attention_projection(states: &[(PaneId, AttentionState, bool)]) -> ServerMessage {
+        ServerMessage::Attention(
+            states
+                .iter()
+                .map(|(pane, state, acknowledged)| PaneAttention {
+                    pane: *pane,
+                    state: *state,
+                    source: cloo_proto::AttentionSource::Lifecycle,
+                    acknowledged: *acknowledged,
+                })
+                .collect(),
+        )
+    }
+
+    /// The rows an open queue is listing, as `(pane, title, state)`.
+    fn attention_queue_rows(state: &LiveState) -> Vec<(PaneId, String, Attention)> {
+        let Some(OverlayKind::Attention(entries)) = state.overlay.as_ref().map(Overlay::kind)
+        else {
+            panic!("the attention queue is open");
+        };
+        entries
+            .iter()
+            .map(|entry| (entry.pane, entry.title.clone(), entry.attention))
+            .collect()
+    }
+
+    /// The surface is built from the server's own projection: one row per pane
+    /// with a live actionable state, newest first, and nothing else at all.
+    #[test]
+    fn the_attention_key_opens_an_attention_queue_of_the_live_projection() {
+        let mut state = attention_queue_state();
+        assert!(state.open_overlay(b"!", &Keymap::defaults()));
+        assert_eq!(
+            attention_queue_rows(&state),
+            vec![
+                (PaneId::new(3), "build".to_owned(), Attention::Failed),
+                (PaneId::new(2), "claude".to_owned(), Attention::NeedsInput),
+            ],
+            "a working pane is progress, not a queue row"
+        );
+    }
+
+    /// The overlay owns every key it understands, and the two it acts on leave
+    /// as *typed session actions naming a pane* — never as bytes for a child.
+    #[test]
+    fn an_open_attention_queue_produces_only_typed_pane_actions() {
+        let mut state = attention_queue_state();
+        assert!(state.open_overlay(b"!", &Keymap::defaults()));
+
+        assert_eq!(state.apply_overlay_keys(b"j"), OverlayKeys::Consumed);
+        assert_eq!(
+            state.apply_overlay_keys(b" "),
+            OverlayKeys::Command(Action::AcknowledgeAttention(PaneId::new(2))),
+            "acknowledging names the pane the cursor is on"
+        );
+        assert!(
+            state.overlay.is_some(),
+            "the queue stays up: the row leaves when the server says it has"
+        );
+        assert_eq!(state.apply_overlay_keys(b"k"), OverlayKeys::Consumed);
+        assert_eq!(
+            state.apply_overlay_keys(b"\r"),
+            OverlayKeys::Command(Action::FocusPane(PaneId::new(3)))
+        );
+        assert!(
+            state.overlay.is_none(),
+            "focusing the pane a row names is what the queue is for, so it closes"
+        );
+    }
+
+    /// The single-owner rule made visible: acknowledgment is session state, so
+    /// the row survives the keypress and leaves on the projection that says the
+    /// server applied it.
+    #[test]
+    fn an_acknowledged_attention_queue_row_leaves_on_the_server_projection() {
+        let mut state = attention_queue_state();
+        assert!(state.open_overlay(b"!", &Keymap::defaults()));
+        assert_eq!(
+            state.apply_overlay_keys(b"a"),
+            OverlayKeys::Command(Action::AcknowledgeAttention(PaneId::new(3)))
+        );
+        assert_eq!(
+            attention_queue_rows(&state).len(),
+            2,
+            "a client that hid the row itself would be a second source of truth"
+        );
+
+        state
+            .apply(attention_projection(&[
+                (PaneId::new(1), AttentionState::Working, false),
+                (PaneId::new(2), AttentionState::NeedsInput, false),
+                (PaneId::new(3), AttentionState::Failed, true),
+            ]))
+            .expect("the acknowledgment comes back as a projection");
+        assert_eq!(
+            attention_queue_rows(&state),
+            vec![(PaneId::new(2), "claude".to_owned(), Attention::NeedsInput)],
+            "the open queue follows the projection while it is open"
+        );
+        assert_eq!(
+            state.apply_overlay_keys(b"\r"),
+            OverlayKeys::Command(Action::FocusPane(PaneId::new(2))),
+            "the cursor lands on the row that is left, not on a stale position"
+        );
+    }
+
+    /// The rest of the overlay contract, on the live surface: it is drawn as
+    /// client chrome over a dimmed frame, and Escape always closes it.
+    #[test]
+    fn an_open_attention_queue_is_dimmed_chrome_and_escapes_cleanly() {
+        let mut state = attention_queue_state();
+        assert!(state.open_overlay(b"!", &Keymap::defaults()));
+        let frame = state.frame();
+        assert!(
+            frame.spans.iter().any(|span| {
+                span.cells
+                    .iter()
+                    .map(|cell| cell.ch)
+                    .collect::<String>()
+                    .starts_with("  attention 1/2")
+            }),
+            "the queue draws through the shared overlay treatment"
+        );
+        assert!(
+            frame.chrome.iter().rev().take(4).all(|chrome| *chrome),
+            "an overlay is client chrome, never a pane span"
+        );
+        assert_eq!(state.apply_overlay_keys(b"\x1b"), OverlayKeys::Consumed);
+        assert!(state.overlay.is_none());
+    }
+
+    /// A workspace with nothing waiting still answers the key: an empty queue is
+    /// a legible answer, and a key that appeared to do nothing is the worse one.
+    #[test]
+    fn an_empty_attention_queue_opens_and_acts_on_nothing() {
+        let mut state = overlay_state(12, "C-b");
+        assert!(state.open_overlay(b"!", &Keymap::defaults()));
+        assert!(attention_queue_rows(&state).is_empty());
+        for key in [b"j".as_slice(), b"k", b"a", b"\r"] {
+            assert_eq!(
+                state.apply_overlay_keys(key),
+                OverlayKeys::Consumed,
+                "{key:?} must name no pane at all"
+            );
+        }
+        assert!(state.overlay.is_some());
     }
 
     /// The client tracks its own request rather than reading a grid: the pane it

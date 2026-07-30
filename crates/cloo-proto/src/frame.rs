@@ -23,7 +23,7 @@ use crate::error::ProtoError;
 /// that presents as a rendering bug. Adapters share the number rather than
 /// carrying one of their own: both protocols are built from this one crate, so
 /// two versions could only ever disagree by accident.
-pub const PROTOCOL_VERSION: u16 = 12;
+pub const PROTOCOL_VERSION: u16 = 13;
 
 /// Width of the length prefix, in bytes.
 pub const LENGTH_PREFIX_LEN: usize = 4;
@@ -288,6 +288,10 @@ mod tests {
             ClientMessage::Command(Action::NextCopyMatch(SearchDirection::Forward)),
             ClientMessage::Command(Action::CopySelection(ClipboardTarget::Clipboard)),
             ClientMessage::Command(Action::CopySelection(ClipboardTarget::PrimarySelection)),
+            // Like `FocusPane`, this names a pane a keypress cannot supply; it
+            // is the attention queue's half of the acknowledgment the session
+            // actor already owned.
+            ClientMessage::Command(Action::AcknowledgeAttention(PaneId::new(3))),
             ClientMessage::Command(Action::DetachClient),
         ]
     }

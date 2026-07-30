@@ -441,6 +441,31 @@ async fn await_attention(
     .unwrap_or_else(|_| panic!("pane {pane:?} was never reported {state:?}"))
 }
 
+/// Waits for a pane to be reported as acknowledged.
+async fn await_acknowledged(
+    attached: &mut Attached<UnixStream>,
+    pane: PaneId,
+) -> cloo_proto::PaneAttention {
+    tokio::time::timeout(PATIENCE, async {
+        loop {
+            match attached.recv().await.expect("the connection must hold") {
+                Some(ServerMessage::Attention(states)) => {
+                    if let Some(found) = states
+                        .into_iter()
+                        .find(|att| att.pane == pane && att.acknowledged)
+                    {
+                        return found;
+                    }
+                }
+                Some(_) => {}
+                None => panic!("the server closed before acknowledging {pane:?}"),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("pane {pane:?} was never reported acknowledged"))
+}
+
 /// Whether `pid` still exists.
 fn alive(pid: u32) -> bool {
     // SAFETY: `kill` with signal 0 performs an existence and permission check
@@ -2138,6 +2163,54 @@ async fn a_typed_launch_request_creates_a_pane_from_the_servers_own_profile_tabl
         .await
         .expect("input must let the fixture exit");
     drop(attached);
+    tokio::time::timeout(PATIENCE, daemon)
+        .await
+        .expect("the daemon must exit")
+        .expect("the daemon task must not panic")
+        .expect("the daemon must not fail");
+}
+
+/// The attention queue's acknowledgment is a *session* action, and the proof is
+/// that a second attached client is told the pane has been seen. A client that
+/// merely hid the row locally could never produce this, and the two terminals
+/// would go on disagreeing about what is waiting.
+#[tokio::test]
+async fn acknowledging_attention_is_a_session_action_every_client_is_told_about() {
+    let dir = TempDir::new("acknowledge-attention");
+    let socket = dir.socket();
+    let (_pid, daemon) = spawn_daemon(&socket, "printf '\\007'; read _; exit 0");
+    let pane = PaneId::new(1);
+
+    let mut attached = client(&socket).await;
+    let mut observer = client(&socket).await;
+
+    let att = await_attention(&mut attached, pane, AttentionState::NeedsInput).await;
+    assert!(!att.acknowledged, "a fresh bell is unseen");
+    assert_eq!(att.source, AttentionSource::Bell);
+
+    attached
+        .send_command(Action::AcknowledgeAttention(pane))
+        .await
+        .expect("acknowledging a queue row must reach the daemon");
+
+    for (name, conn) in [
+        ("the client that acknowledged", &mut attached),
+        ("a second attached client", &mut observer),
+    ] {
+        let seen = await_acknowledged(conn, pane).await;
+        assert_eq!(
+            seen.state,
+            AttentionState::NeedsInput,
+            "{name}: acknowledgment moves the seen flag and nothing else"
+        );
+    }
+
+    attached
+        .send_input(b"\n".to_vec())
+        .await
+        .expect("input must let the fixture exit");
+    drop(attached);
+    drop(observer);
     tokio::time::timeout(PATIENCE, daemon)
         .await
         .expect("the daemon must exit")

@@ -505,13 +505,14 @@ pub fn action_name(action: &Action) -> Option<&'static str> {
         Action::DetachClient => "detach-client",
         // The first three need text a chord cannot carry — a profile
         // identifier is chosen in the launcher, not spelled in a binding — and
-        // the last two name a pane, which a keypress does not either. The
+        // the last three name a pane, which a keypress does not either. The
         // keyboard reaches the same session state through `focus-left` and
-        // friends.
+        // friends, and through the attention queue's own row.
         Action::RenameTab(_)
         | Action::CopySearch { .. }
         | Action::LaunchProfile(_)
         | Action::FocusPane(_)
+        | Action::AcknowledgeAttention(_)
         | Action::ResizePane { .. } => return None,
     })
 }

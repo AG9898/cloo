@@ -781,6 +781,20 @@ pub enum Action {
     /// every attached terminal's clipboard. That client's own policy and
     /// capabilities are still the final gate.
     CopySelection(ClipboardTarget),
+    /// Mark a pane's current attention state as seen by the user.
+    ///
+    /// Acknowledgment is *session* state, not a client view flag: it rides on
+    /// [`PaneAttention::acknowledged`] and therefore has exactly one owner. A
+    /// client that dismissed a queue row locally would be a second source of
+    /// truth, so the attention queue sends this instead and lets the resulting
+    /// [`ServerMessage::Attention`] projection take the row away — which is also
+    /// what makes a second attached client agree about what has been seen.
+    ///
+    /// It names a *pane*, which a keypress cannot supply, so like
+    /// [`FocusPane`](Self::FocusPane) it has no keymap spelling; a client reaches
+    /// it by acknowledging a row in its attention queue. A pane that has closed,
+    /// or one whose state was already acknowledged, changes nothing.
+    AcknowledgeAttention(PaneId),
     /// Detach this client, leaving the session running.
     DetachClient,
 }

@@ -671,6 +671,14 @@ impl Daemon {
                 ClientMessage::Command(Action::NextCopyMatch(direction)) => {
                     self.session()?.next_copy_match(direction.into()).await?;
                 }
+                // Acknowledgment is session state, so a queue row a user
+                // dismissed reaches the same single writer every attention
+                // report does. A pane that has closed, or one already
+                // acknowledged, is a no-op inside the actor rather than an
+                // error out here.
+                ClientMessage::Command(Action::AcknowledgeAttention(pane)) => {
+                    self.session()?.acknowledge_attention(pane).await?;
+                }
                 // Detach is handled by the connection task so it can send the
                 // acknowledgement before it reports `Gone`. An inspection never
                 // reaches here at all: it is a first frame answered by the

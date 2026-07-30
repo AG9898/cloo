@@ -603,8 +603,8 @@ testable as a cell matrix.
 The help surface is built from the live `cloo_core::keymap::Keymap` and from nothing else:
 `Overlay::help` reads the effective prefix into the title and looks each listed action's chord up in
 the table, so a rebound prefix and a rebound chord are shown verbatim and an unbound action has no
-row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`, and
-`ADD_PANE_KEY`) shared with `attach`'s `open_overlay`, which is reached only for
+row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`,
+`ADD_PANE_KEY`, and `ATTENTION_KEY`) shared with `attach`'s `open_overlay`, which is reached only for
 a chord the keymap left unbound — so a user who binds `?` keeps their binding, and the help surface
 drops the row it would otherwise have claimed. It is also why ordinary shell text opens nothing: a
 chord reaches `open_overlay` only after the prefix has already been resolved.
@@ -627,6 +627,35 @@ lives beside the attention queue's in `cloo-client::input`, because an open over
 keyboard exactly as chrome owns a mouse click over a border; none of it reaches a child. The
 visual contract — the shared width ladder, the text selection marker, the dimmed backdrop — is in
 [`STYLEGUIDE.md`](STYLEGUIDE.md#overlays-and-notifications).
+
+##### The attention queue (M9-15, handshake v13)
+
+M9-15 makes the attention queue live as `OverlayKind::Attention`, opened with `<prefix> !` and
+rendered by the same title/list/hint model as every other overlay. It differs from its neighbours in
+three ways, and each is deliberate.
+
+Its rows are `AttentionEntry`, a `chrome::QueueEntry` **paired with the `PaneId` it names**. The
+queue model is keyed by the position a user refers to a pane by — the right key for coalescing, and
+the wrong one to put on the wire, because a closing pane hands its number to a neighbour.
+`LiveState::attention_entries` resolves the position back through the very pane map the numbering
+came from, and drops a row whose pane has gone rather than aiming it at a successor.
+
+It is decoded with `input::queue_action` rather than `overlay_action`, because it is the one surface
+with a verb the shared vocabulary has no word for: acknowledging a row is not confirming it.
+Navigation and dismissal map onto the shared model, so they behave identically everywhere.
+
+Its contents change while it is open. `Overlay::refresh_attention` is driven from
+`LiveState::rebuild_queue`, so every `Panes` and `Attention` projection refreshes an open queue,
+keeping the cursor on its *pane* rather than on a position a departing row shifted.
+
+Both of its verbs are typed session actions. Enter sends `Action::FocusPane(pane)` and closes the
+surface; `a` or Space sends `Action::AcknowledgeAttention(pane)` — new in this milestone, which is
+what takes the handshake to v13 — and leaves it open. That variant is the wire half of the session
+actor's existing `Command::AcknowledgeAttention`: acknowledgment rides on
+`PaneAttention::acknowledged` and therefore has exactly one owner, so a client that hid the row
+locally would be a second source of truth two attached terminals could disagree about. The row
+leaves when the projection saying the pane was seen comes back. Like `FocusPane`, the variant names
+a pane a keypress cannot supply, so it has no keymap spelling.
 
 #### Motion
 

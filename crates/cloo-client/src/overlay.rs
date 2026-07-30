@@ -1,13 +1,13 @@
 //! Keyboard-first overlays: the help surface, the session switcher, the profile
-//! launcher, and pane details.
+//! launcher, the attention queue, and pane details.
 //!
 //! `docs/STYLEGUIDE.md` gives every overlay one language — dim the background,
 //! keep a clear selected row, show keyboard hints, dismiss with Escape — so this
-//! module is one model and one renderer rather than four of each. An overlay is
+//! module is one model and one renderer rather than five of each. An overlay is
 //! a list, a cursor into it, and a title; what differs between them is what a
 //! row says and what confirming one *means*.
 //!
-//! Five rules are load-bearing.
+//! Six rules are load-bearing.
 //!
 //! - **The keyboard owns an open overlay.** [`OverlayAction`] is cloo's own
 //!   vocabulary, decoded by [`crate::input::overlay_action`], and none of it
@@ -28,6 +28,12 @@
 //!   an identifier against its own table and refuses an unknown one in silence,
 //!   so [`LaunchNotice`] tracks the client's *own* request — never a grid — and
 //!   turns a request that produced no pane into a visible refusal.
+//! - **Acknowledging a queue row is a session action, not a view flag.** The
+//!   server owns [`cloo_proto::PaneAttention::acknowledged`], so
+//!   [`OverlayOutcome::Acknowledge`] names a pane for the wire and the row
+//!   leaves only when the next attention projection says it has. A locally
+//!   dismissed row would be a second source of truth two clients could disagree
+//!   about.
 //!
 //! Like [`crate::chrome`], everything here is a pure function into [`Cell`]s:
 //! nothing writes to a descriptor, so a row is testable against an exact string
@@ -53,8 +59,8 @@ use cloo_core::keymap::{Key, Keymap, action_name};
 use cloo_core::{Profile, ProfileCommand, ProfileId};
 use cloo_proto::{Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionId, Size};
 
-use crate::chrome::{Attention, dim_cell_with_theme};
-use crate::input::OverlayAction;
+use crate::chrome::{Attention, QueueEntry, dim_cell_with_theme};
+use crate::input::{OverlayAction, QueueAction};
 use crate::renderer::Span;
 use crate::theme::{Theme, ThemeToken};
 
@@ -225,6 +231,39 @@ impl PaneDetails {
     }
 }
 
+/// One pane waiting on the user, as the attention overlay lists it.
+///
+/// A [`crate::chrome::QueueEntry`] plus the [`PaneId`] the wire uses. The queue
+/// model is keyed by the *position* a user refers to a pane by, which is the
+/// right key for coalescing and the wrong one for an action: focus and
+/// acknowledgment name a pane on the wire, and a position can quietly become a
+/// different pane when one closes. Pairing the two here is what lets a row
+/// produce a typed action about the pane the user actually saw.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttentionEntry {
+    /// The pane the row acts on.
+    pub pane: PaneId,
+    /// Its position in the tab, as the chrome numbers panes.
+    pub index: u16,
+    /// Its name.
+    pub title: String,
+    /// The actionable state that put it in the queue.
+    pub attention: Attention,
+}
+
+impl AttentionEntry {
+    /// Pairs one queue row with the pane it names.
+    #[must_use]
+    pub fn new(pane: PaneId, entry: &QueueEntry) -> Self {
+        Self {
+            pane,
+            index: entry.index,
+            title: entry.title.clone(),
+            attention: entry.attention,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
@@ -237,6 +276,12 @@ pub const DETAILS_KEY: char = 'i';
 pub const SESSIONS_KEY: char = 's';
 /// The chord that opens the profile launcher.
 pub const ADD_PANE_KEY: char = 'a';
+/// The chord that opens the attention queue.
+///
+/// `!` rather than a letter, because it is the glyph the status row's attention
+/// count already wears: the key to reach the queue is the mark that says there
+/// is something in it.
+pub const ATTENTION_KEY: char = '!';
 
 /// The bound actions the help surface lists, in the order it lists them.
 ///
@@ -267,9 +312,10 @@ const HELP_ACTIONS: [(Action, &str); 14] = [
 /// `(key, label, note)`. These never cross the wire, so they are not in the
 /// keymap — but a user who binds one of these keys to a real action takes it
 /// from the client, and the row disappears with it rather than lying.
-const HELP_CLIENT_KEYS: [(char, &str, &str); 4] = [
+const HELP_CLIENT_KEYS: [(char, &str, &str); 5] = [
     (ADD_PANE_KEY, "add pane", "client"),
     (SESSIONS_KEY, "sessions", "client"),
+    (ATTENTION_KEY, "attention queue", "client"),
     (DETAILS_KEY, "pane details", "client"),
     (HELP_KEY, "this help", "client"),
 ];
@@ -389,6 +435,8 @@ pub enum OverlayKind {
     Sessions(Vec<SessionEntry>),
     /// The profile launcher.
     Launcher(Vec<ProfileEntry>),
+    /// The attention queue.
+    Attention(Vec<AttentionEntry>),
     /// The pane-details view.
     Details(PaneDetails),
 }
@@ -436,6 +484,43 @@ impl Overlay {
         }
     }
 
+    /// Opens the attention queue over the panes currently waiting on the user.
+    ///
+    /// The rows are the live [`crate::chrome::AttentionQueue`]'s, newest first
+    /// and one per pane, paired with the pane each names. An empty queue still
+    /// opens: "nothing is waiting" is an answer, and a surface that refused to
+    /// appear would be indistinguishable from a key that does nothing.
+    #[must_use]
+    pub fn attention(entries: Vec<AttentionEntry>) -> Self {
+        Self {
+            kind: OverlayKind::Attention(entries),
+            selected: 0,
+        }
+    }
+
+    /// Replaces the attention rows with a newer projection, keeping the cursor.
+    ///
+    /// The queue is the one overlay whose contents change while it is open: the
+    /// server owns both the states it lists and the acknowledgment that removes
+    /// a row, so an open queue that kept its opening snapshot would show a pane
+    /// the user just cleared. The selection is kept by *pane* rather than by
+    /// position, so a row disappearing above the cursor does not move it onto a
+    /// neighbour the user was not looking at.
+    pub fn refresh_attention(&mut self, entries: Vec<AttentionEntry>) {
+        let OverlayKind::Attention(current) = &mut self.kind else {
+            return;
+        };
+        let selected = current.get(self.selected).map(|entry| entry.pane);
+        *current = entries;
+        self.selected = selected
+            .and_then(|pane| current.iter().position(|entry| entry.pane == pane))
+            .unwrap_or(self.selected);
+        let last = self.len().saturating_sub(1);
+        if self.selected > last {
+            self.selected = last;
+        }
+    }
+
     /// Opens the pane-details view.
     #[must_use]
     pub fn details(details: PaneDetails) -> Self {
@@ -461,6 +546,7 @@ impl Overlay {
             OverlayKind::Help(help) => &help.title,
             OverlayKind::Sessions(_) => "sessions",
             OverlayKind::Launcher(_) => "launch profile",
+            OverlayKind::Attention(_) => "attention",
             OverlayKind::Details(_) => "pane details",
         }
     }
@@ -472,6 +558,7 @@ impl Overlay {
             OverlayKind::Help(help) => help.entries.len(),
             OverlayKind::Sessions(entries) => entries.len(),
             OverlayKind::Launcher(entries) => entries.len(),
+            OverlayKind::Attention(entries) => entries.len(),
             OverlayKind::Details(details) => details.fields().len(),
         }
     }
@@ -527,6 +614,38 @@ impl Overlay {
         }
     }
 
+    /// Applies one attention-queue keyboard action.
+    ///
+    /// The queue keeps its own vocabulary — [`QueueAction`], decoded by
+    /// [`crate::input::queue_action`] — because it is the one overlay with a
+    /// verb the others do not have: acknowledging a row is not confirming it.
+    /// Everything else maps onto the shared model, so navigation and dismissal
+    /// behave identically to every other surface.
+    pub fn apply_queue(&mut self, action: QueueAction) -> OverlayOutcome {
+        match action {
+            QueueAction::Next => {
+                self.select_next();
+                OverlayOutcome::Open
+            }
+            QueueAction::Prev => {
+                self.select_prev();
+                OverlayOutcome::Open
+            }
+            QueueAction::Focus => self.confirm(),
+            QueueAction::Acknowledge => match &self.kind {
+                OverlayKind::Attention(entries) => entries
+                    .get(self.selected)
+                    .map_or(OverlayOutcome::Open, |entry| {
+                        OverlayOutcome::Acknowledge(entry.pane)
+                    }),
+                // Nothing else has anything to acknowledge, so the key is spent
+                // rather than passed on: an open overlay owns the keyboard.
+                _ => OverlayOutcome::Open,
+            },
+            QueueAction::Dismiss => OverlayOutcome::Dismissed,
+        }
+    }
+
     /// What confirming the selected row means.
     ///
     /// An empty list confirms to nothing at all — a launcher with no profile
@@ -550,6 +669,13 @@ impl Overlay {
                         })
                     })
             }
+            // The queue is a navigation surface: confirming a row means going to
+            // the pane it names, which is the whole reason the list exists.
+            OverlayKind::Attention(entries) => entries
+                .get(self.selected)
+                .map_or(OverlayOutcome::Open, |entry| {
+                    OverlayOutcome::FocusPane(entry.pane)
+                }),
             // Details and help are reading surfaces: there is nothing to act
             // on, so Enter does the only other thing a user could mean by it.
             OverlayKind::Help(_) | OverlayKind::Details(_) => OverlayOutcome::Dismissed,
@@ -616,6 +742,23 @@ impl Overlay {
                     extras: vec![Field::new(entry.command.clone(), muted, CellAttrs::NONE)],
                 }
             }
+            // The pane number leads, exactly as it leads a pane header, and the
+            // state is the trailing field: glyph *and* label, coloured through
+            // the client theme, so the row never rests on colour and reads the
+            // same as the header of the pane it names.
+            OverlayKind::Attention(entries) => {
+                let entry = &entries[index];
+                RowSpec {
+                    selected,
+                    lead: Field::new(entry.index.to_string(), muted, CellAttrs::NONE),
+                    title: Field::new(entry.title.clone(), primary, CellAttrs::BOLD),
+                    extras: vec![Field::new(
+                        format!("{} {}", entry.attention.glyph(), entry.attention.label()),
+                        entry.attention.color_in(theme),
+                        CellAttrs::NONE,
+                    )],
+                }
+            }
             OverlayKind::Details(details) => {
                 let (label, value) = details.fields().swap_remove(index);
                 RowSpec {
@@ -637,6 +780,10 @@ impl Overlay {
             OverlayKind::Help(_) => ["esc close", "enter close", "j/k move"],
             OverlayKind::Sessions(_) => ["esc close", "enter switch", "j/k move"],
             OverlayKind::Launcher(_) => ["esc close", "enter launch", "j/k move"],
+            // `a` earns the middle slot over navigation: acknowledging is the
+            // verb this surface has that no other overlay does, and a user who
+            // cannot find it will never clear the queue.
+            OverlayKind::Attention(_) => ["esc close", "enter focus", "a ack"],
             OverlayKind::Details(_) => ["esc close", "enter close", "j/k move"],
         }
     }
@@ -818,6 +965,15 @@ pub enum OverlayOutcome {
     SwitchSession(SessionId),
     /// Launch a pane from this profile.
     Launch(LaunchRequest),
+    /// Move focus to the pane this row names.
+    FocusPane(PaneId),
+    /// Mark this pane's attention state as seen.
+    ///
+    /// Distinct from every other outcome in that the overlay *stays open*: the
+    /// row goes away when the server's next attention projection says it has,
+    /// which is what keeps acknowledgment single-owned rather than something two
+    /// clients could disagree about.
+    Acknowledge(PaneId),
 }
 
 // ---------------------------------------------------------------------------
@@ -1109,7 +1265,8 @@ fn truncate(text: &str, budget: usize) -> &str {
 mod tests {
     use super::*;
 
-    use cloo_core::ProfileCommand;
+    use cloo_core::{ProfileCommand, ThemeChoice, ThemeName};
+    use cloo_proto::TermCaps;
 
     fn help() -> Overlay {
         Overlay::help(&Keymap::defaults())
@@ -1152,6 +1309,28 @@ mod tests {
         Overlay::launcher(&Profile::built_ins())
     }
 
+    /// Two panes waiting, newest first, exactly as the live queue orders them.
+    fn attention_rows() -> Vec<AttentionEntry> {
+        vec![
+            AttentionEntry {
+                pane: PaneId::new(4),
+                index: 2,
+                title: "claude".to_owned(),
+                attention: Attention::NeedsInput,
+            },
+            AttentionEntry {
+                pane: PaneId::new(9),
+                index: 3,
+                title: "build".to_owned(),
+                attention: Attention::Failed,
+            },
+        ]
+    }
+
+    fn attention_queue() -> Overlay {
+        Overlay::attention(attention_rows())
+    }
+
     fn details() -> Overlay {
         Overlay::details(PaneDetails::from_info(
             &PaneInfo {
@@ -1175,13 +1354,15 @@ mod tests {
     /// an overlay that could not be closed would hold the terminal hostage.
     #[test]
     fn every_overlay_is_dismissible_including_an_empty_one() {
-        let cases: [(&str, Overlay); 6] = [
+        let cases: [(&str, Overlay); 8] = [
             ("help", help()),
             ("sessions", sessions()),
             ("launcher", launcher()),
+            ("attention queue", attention_queue()),
             ("details", details()),
             ("no sessions", Overlay::sessions(Vec::new())),
             ("no profiles", Overlay::launcher(&[])),
+            ("nothing waiting", Overlay::attention(Vec::new())),
         ];
         for (name, mut overlay) in cases {
             assert_eq!(
@@ -1541,6 +1722,218 @@ mod tests {
         );
     }
 
+    // -- the attention queue -------------------------------------------------
+
+    /// The queue is reached like every other client surface: `!` is offered
+    /// while the keymap leaves it free, and a user who binds it takes both the
+    /// chord and its help row, because the chord will never reach the client
+    /// again.
+    #[test]
+    fn the_attention_queue_key_is_offered_only_while_the_keymap_leaves_it_free() {
+        assert_eq!(
+            help_key(&help(), "attention queue").as_deref(),
+            Some("!"),
+            "a surface a user cannot discover is one they do not have"
+        );
+        let mut keys = Keymap::defaults();
+        keys.bind(Key::char(ATTENTION_KEY), Action::ToggleZoom);
+        assert_eq!(help_key(&Overlay::help(&keys), "attention queue"), None);
+    }
+
+    /// The queue's two verbs, and the difference between them: focusing names
+    /// the pane and is done, acknowledging names the pane and leaves the surface
+    /// up for the next row.
+    #[test]
+    fn an_attention_queue_focuses_and_acknowledges_the_pane_a_row_names() {
+        let mut queue = attention_queue();
+        assert_eq!(
+            queue.apply_queue(QueueAction::Focus),
+            OverlayOutcome::FocusPane(PaneId::new(4))
+        );
+        queue.apply_queue(QueueAction::Next);
+        assert_eq!(
+            queue.apply_queue(QueueAction::Acknowledge),
+            OverlayOutcome::Acknowledge(PaneId::new(9)),
+            "acknowledgment names the pane the user is looking at, not a position"
+        );
+    }
+
+    /// The whole reason the rows carry a `PaneId`: a queue position is a number
+    /// a closing pane can hand to a different pane entirely, and neither verb
+    /// may act on a pane the user was not looking at.
+    #[test]
+    fn an_attention_queue_acts_on_a_pane_and_never_on_a_position() {
+        let mut queue = Overlay::attention(vec![AttentionEntry {
+            pane: PaneId::new(9),
+            // The same position the first fixture row occupies, held by a
+            // different pane after its neighbour closed.
+            index: 2,
+            title: "build".to_owned(),
+            attention: Attention::Failed,
+        }]);
+        assert_eq!(
+            queue.apply_queue(QueueAction::Focus),
+            OverlayOutcome::FocusPane(PaneId::new(9))
+        );
+    }
+
+    #[test]
+    fn an_attention_queue_navigates_and_dismisses_like_every_other_overlay() {
+        let mut queue = attention_queue();
+        assert_eq!(queue.apply_queue(QueueAction::Prev), OverlayOutcome::Open);
+        assert_eq!(queue.selection(), 0, "the top does not wrap");
+        for expected in [1, 1] {
+            assert_eq!(queue.apply_queue(QueueAction::Next), OverlayOutcome::Open);
+            assert_eq!(queue.selection(), expected);
+        }
+        assert_eq!(
+            queue.apply_queue(QueueAction::Dismiss),
+            OverlayOutcome::Dismissed
+        );
+    }
+
+    #[test]
+    fn an_empty_attention_queue_acts_on_nothing_at_all() {
+        let mut queue = Overlay::attention(Vec::new());
+        for action in [
+            QueueAction::Next,
+            QueueAction::Prev,
+            QueueAction::Focus,
+            QueueAction::Acknowledge,
+        ] {
+            assert_eq!(
+                queue.apply_queue(action),
+                OverlayOutcome::Open,
+                "{action:?}"
+            );
+            assert_eq!(queue.selection(), 0);
+        }
+    }
+
+    /// Acknowledgment is the server's answer, so the row leaves on the next
+    /// projection rather than when the client hid it — and the cursor stays on
+    /// the pane the user had selected rather than on whatever slid into its row.
+    #[test]
+    fn an_attention_queue_refresh_keeps_the_cursor_on_its_pane() {
+        let mut queue = attention_queue();
+        queue.apply_queue(QueueAction::Next);
+        assert_eq!(queue.selection(), 1);
+        queue.refresh_attention(vec![attention_rows()[1].clone()]);
+        assert_eq!(queue.len(), 1);
+        assert_eq!(
+            queue.apply_queue(QueueAction::Focus),
+            OverlayOutcome::FocusPane(PaneId::new(9)),
+            "the row above going away must not move the cursor onto a neighbour"
+        );
+    }
+
+    #[test]
+    fn an_attention_queue_refresh_clamps_onto_a_shorter_list() {
+        let mut queue = attention_queue();
+        queue.apply_queue(QueueAction::Next);
+        queue.refresh_attention(vec![attention_rows()[0].clone()]);
+        assert_eq!(queue.selection(), 0);
+        queue.refresh_attention(Vec::new());
+        assert_eq!(queue.selection(), 0);
+        assert_eq!(queue.apply_queue(QueueAction::Focus), OverlayOutcome::Open);
+    }
+
+    /// Refreshing is the queue's own affair: nothing else changes while it is
+    /// open, and a stray call must not silently empty another surface.
+    #[test]
+    fn refreshing_attention_queue_rows_leaves_another_overlay_alone() {
+        let mut overlay = sessions();
+        overlay.refresh_attention(Vec::new());
+        assert_eq!(overlay.len(), 3);
+    }
+
+    /// The 16-colour and no-glyph contract: the row says the state in words and
+    /// in a shape, and the surface resolves through the client theme rather than
+    /// a fixed palette, so the same expectation holds at both colour depths.
+    #[test]
+    fn an_attention_queue_row_is_ascii_and_states_itself_without_colour() {
+        let queue = attention_queue();
+        for (name, theme) in [
+            ("truecolor", Theme::storm()),
+            (
+                "16-colour",
+                Theme::new(ThemeChoice::Named(ThemeName::Storm), TermCaps::default()),
+            ),
+        ] {
+            for row in overlay_cells(&queue, Size::new(40, 6), theme) {
+                assert!(
+                    row.iter().all(|cell| cell.ch.is_ascii()),
+                    "{name}: {:?} must survive a terminal with no glyph support",
+                    text(&row)
+                );
+            }
+            let row = row_cells(&queue.row(0, false, theme), 40, theme);
+            assert!(
+                text(&row).contains("! needs input"),
+                "{name}: the state is text as well as a colour"
+            );
+            let state = row
+                .iter()
+                .find(|cell| cell.ch == '!')
+                .expect("the state glyph is on the row");
+            assert_eq!(
+                state.fg,
+                Attention::NeedsInput.color_in(theme),
+                "{name}: the state colour is the theme's, not a fixed palette's"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attention_queue_row_spends_width_in_the_documented_order() {
+        let theme = Theme::storm();
+        let queue = attention_queue();
+        for (width, expected) in [
+            (32_u16, "  2 claude ! needs input        "),
+            (20, "  2 claude          "),
+            (8, "  2 clau"),
+            (4, "  2 "),
+        ] {
+            assert_eq!(
+                text(&row_cells(&queue.row(0, false, theme), width, theme)),
+                expected,
+                "at width {width}"
+            );
+        }
+    }
+
+    /// Dismissal leads the hints in every overlay; here the middle slot goes to
+    /// the verb no other surface has, because a user who cannot find `a` never
+    /// clears the queue.
+    #[test]
+    fn a_narrow_attention_queue_still_says_how_to_close_and_how_to_clear() {
+        let theme = Theme::storm();
+        let queue = attention_queue();
+        let box_cells = overlay_cells(&queue, Size::new(34, 4), theme);
+        assert_eq!(text(&box_cells[0]).trim_end(), "  attention 1/2");
+        assert_eq!(
+            text(&box_cells[3]).trim_end(),
+            "  esc close enter focus a ack"
+        );
+        assert_eq!(
+            text(&hint_cells(&queue, 14, theme)).trim_end(),
+            "  esc close",
+            "the last hint standing is the one that says how to get out"
+        );
+    }
+
+    /// An empty queue is an answer, not a broken surface: it opens, it says what
+    /// it is, it claims no position in a list that does not exist, and it closes.
+    #[test]
+    fn an_empty_attention_queue_still_renders_a_legible_box() {
+        let theme = Theme::storm();
+        let queue = Overlay::attention(Vec::new());
+        let box_cells = overlay_cells(&queue, Size::new(30, 4), theme);
+        assert_eq!(text(&box_cells[0]).trim_end(), "  attention");
+        assert!(text(&box_cells[1]).trim().is_empty());
+        assert!(text(&box_cells[3]).contains("esc close"));
+    }
+
     // -- rendering ----------------------------------------------------------
 
     /// The exact-width guarantee, at every width, for every overlay. This loop
@@ -1553,6 +1946,7 @@ mod tests {
             ("help", help()),
             ("sessions", sessions()),
             ("launcher", launcher()),
+            ("attention queue", attention_queue()),
             ("details", details()),
         ] {
             for width in 0..=60_u16 {
