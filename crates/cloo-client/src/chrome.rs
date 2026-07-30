@@ -32,9 +32,11 @@
 //! ```
 
 use std::collections::{HashMap, VecDeque};
+use std::time::{Duration, Instant};
 
-use cloo_proto::{Cell, CellAttrs, Color, Point, SessionId, TabSummary};
+use cloo_proto::{Cell, CellAttrs, Color, Point, SessionId, Size, TabSummary};
 
+use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
 use crate::renderer::Span;
 use crate::theme::{Theme, ThemeToken};
 
@@ -1455,7 +1457,35 @@ pub fn queue_row_span(at: Point, entry: &QueueEntry, selected: bool, width: u16)
 // Toasts
 // ---------------------------------------------------------------------------
 
+/// How many toasts the live stack shows at once.
+///
+/// Three is the style guide's "bounded" made concrete: enough that two panes
+/// finishing together are both seen, few enough that the stack cannot walk down
+/// a pane the user is working in.
+pub const TOAST_CAPACITY: usize = 3;
+
+/// How long a toast stays up before it dismisses itself.
+///
+/// The same linger the status row's transient notice takes, and for the same
+/// reason: long enough to read, and never covering a harness the user is typing
+/// into indefinitely.
+pub const TOAST_LIFETIME: Duration = Duration::from_secs(4);
+
+/// The columns the stack keeps clear of the frame's right edge.
+pub const TOAST_MARGIN: u16 = 1;
+
+/// The most width one toast takes, however wide the terminal is.
+///
+/// A toast is a concise notice, not a panel: past this it would start reading as
+/// a column of the workspace rather than as something passing through.
+pub const TOAST_MAX_WIDTH: u16 = 36;
+
 /// A transient notice that a pane raised an actionable event.
+///
+/// Carries its own clock: when it stops showing, and the frame-budgeted entrance
+/// it is still part-way through. Both are driven by
+/// [`ToastDeck::tick`](ToastDeck::tick) from the client's render clock — never
+/// by a pane's output — so a busy child can raise no frames here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Toast {
     /// The pane the notice is about.
@@ -1466,19 +1496,90 @@ pub struct Toast {
     pub attention: Attention,
     /// How many times this pane's event has coalesced into this notice.
     pub repeats: u32,
+    /// When this notice stops showing.
+    until: Instant,
+    /// The entrance, in flight until it settles.
+    motion: Motion,
+    /// The step of that entrance the deck last handed out, or `None` once it has
+    /// settled into the chrome's own colours.
+    phase: Option<Phase>,
+}
+
+impl Toast {
+    /// A first notice for a pane, raised at `now` with the default lifetime and
+    /// an animated entrance.
+    ///
+    /// [`ToastDeck`] applies its own lifetime and motion settings when it raises
+    /// one, so this is the shape a caller rendering a toast on its own needs.
+    #[must_use]
+    pub fn new(index: u16, title: impl Into<String>, attention: Attention, now: Instant) -> Self {
+        let mut toast = Self {
+            index,
+            title: title.into(),
+            attention,
+            repeats: 1,
+            until: now,
+            motion: Motion::new(MotionSettings::animated()),
+            phase: None,
+        };
+        toast.enter(now, TOAST_LIFETIME, MotionSettings::animated());
+        toast
+    }
+
+    /// The step of the entrance to draw, or `None` for the settled cells.
+    #[must_use]
+    pub const fn phase(&self) -> Option<Phase> {
+        self.phase
+    }
+
+    /// When this notice stops showing.
+    #[must_use]
+    pub const fn expires_at(&self) -> Instant {
+        self.until
+    }
+
+    /// Restarts the entrance and the lifetime, which is what raising or
+    /// refreshing a notice means.
+    ///
+    /// The entrance is [`MotionKind::Overlay`]: a toast is a client-owned
+    /// surface appearing, quantized into the render loop's frame budget like
+    /// every other transition. Under reduce-motion it settles on the frame it
+    /// started, so the deck asks for no extra frames at all.
+    fn enter(&mut self, now: Instant, lifetime: Duration, settings: MotionSettings) {
+        self.until = now + lifetime;
+        self.motion = Motion::new(settings);
+        let phase = self.motion.start(MotionKind::Overlay, now);
+        self.phase = (!phase.is_settled()).then_some(phase);
+    }
+
+    /// Advances the entrance, reporting whether the cells it draws changed.
+    fn tick(&mut self, now: Instant) -> bool {
+        let Some(next) = self.motion.tick(now) else {
+            return false;
+        };
+        self.phase = (!next.is_settled()).then_some(next);
+        true
+    }
 }
 
 /// A bounded, coalescing stack of toasts.
 ///
-/// Two rules from the style guide are the whole point: the stack is *bounded*,
-/// so a burst can never grow it without limit, and repeated events from the
-/// same pane *coalesce* into one notice with a repeat count rather than stacking
-/// copies. When a new pane's toast would exceed capacity, the oldest is dropped.
+/// Three rules from the style guide are the whole point: the stack is *bounded*,
+/// so a burst can never grow it without limit; repeated events from the same
+/// pane *coalesce* into one notice with a repeat count rather than stacking
+/// copies; and a notice dismisses itself, so it can never sit indefinitely over
+/// a harness the user is typing into. When a new pane's toast would exceed
+/// capacity, the oldest is dropped.
+///
+/// Time is passed in rather than read, exactly as [`crate::motion`] does it: a
+/// whole lifetime is testable frame by frame without sleeping.
 #[derive(Debug, Clone)]
 pub struct ToastDeck {
     /// Front = oldest.
     toasts: VecDeque<Toast>,
     capacity: usize,
+    lifetime: Duration,
+    settings: MotionSettings,
 }
 
 impl ToastDeck {
@@ -1488,37 +1589,104 @@ impl ToastDeck {
         Self {
             toasts: VecDeque::new(),
             capacity: capacity.max(1),
+            lifetime: TOAST_LIFETIME,
+            settings: MotionSettings::animated(),
         }
+    }
+
+    /// Sets how long a toast raised from now on stays up.
+    #[must_use]
+    pub const fn lifetime(mut self, lifetime: Duration) -> Self {
+        self.lifetime = lifetime;
+        self
+    }
+
+    /// Sets the entrance's accessibility settings.
+    #[must_use]
+    pub const fn motion(mut self, settings: MotionSettings) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Replaces the entrance's accessibility settings without losing the stack.
+    ///
+    /// A live client resolves these from a reloaded configuration, and a notice
+    /// already showing must not disappear because the user changed a preference.
+    /// Reduce-motion settles every entrance in flight on this frame.
+    pub fn set_motion(&mut self, settings: MotionSettings) {
+        self.settings = settings;
+        if settings.reduce_motion {
+            for toast in &mut self.toasts {
+                toast.phase = None;
+            }
+        }
+    }
+
+    /// How long a toast raised now would stay up.
+    #[must_use]
+    pub const fn lifetime_of(&self) -> Duration {
+        self.lifetime
     }
 
     /// Raises or coalesces a toast for a pane.
     ///
     /// A pane already showing coalesces: its state and title refresh, its repeat
-    /// count grows, and it moves to the newest position. A new pane pushes onto
-    /// the back, evicting the oldest toast if the deck is full.
-    pub fn push(&mut self, index: u16, title: impl Into<String>, attention: Attention) {
+    /// count grows, its lifetime and entrance restart, and it moves to the newest
+    /// position. A new pane pushes onto the back, evicting the oldest toast if
+    /// the deck is full.
+    pub fn push(
+        &mut self,
+        index: u16,
+        title: impl Into<String>,
+        attention: Attention,
+        now: Instant,
+    ) {
         if let Some(pos) = self.toasts.iter().position(|toast| toast.index == index) {
             let mut toast = self.toasts.remove(pos).expect("position just found");
             toast.title = title.into();
             toast.attention = attention;
             toast.repeats = toast.repeats.saturating_add(1);
+            toast.enter(now, self.lifetime, self.settings);
             self.toasts.push_back(toast);
             return;
         }
         if self.toasts.len() == self.capacity {
             self.toasts.pop_front();
         }
-        self.toasts.push_back(Toast {
-            index,
-            title: title.into(),
-            attention,
-            repeats: 1,
-        });
+        let mut toast = Toast::new(index, title, attention, now);
+        toast.enter(now, self.lifetime, self.settings);
+        self.toasts.push_back(toast);
+    }
+
+    /// Advances every entrance and drops every expired notice.
+    ///
+    /// Reports whether the frame changed, which is what decides whether the
+    /// client redraws. Called from the render clock only: a toast is raised by an
+    /// explicit attention projection and animated by the frame budget, so a large
+    /// `cat` never becomes an animation source.
+    pub fn tick(&mut self, now: Instant) -> bool {
+        let before = self.toasts.len();
+        self.toasts.retain(|toast| now < toast.until);
+        let expired = self.toasts.len() != before;
+        let mut advanced = false;
+        for toast in &mut self.toasts {
+            advanced |= toast.tick(now);
+        }
+        expired || advanced
     }
 
     /// Removes a pane's toast, if it has one.
     pub fn dismiss(&mut self, index: u16) {
         self.toasts.retain(|toast| toast.index != index);
+    }
+
+    /// Drops notices for pane positions the workspace no longer has.
+    ///
+    /// A toast names the pane by the position the user refers to it by, and a
+    /// closing pane renumbers its neighbours. Dropping the positions that no
+    /// longer exist is what keeps a notice from outliving its pane.
+    pub fn retain_within(&mut self, panes: u16) {
+        self.toasts.retain(|toast| toast.index <= panes);
     }
 
     /// The toasts, oldest first.
@@ -1545,32 +1713,44 @@ impl ToastDeck {
     }
 }
 
-/// A concise toast line, truncated to `width`.
+/// A concise toast line, truncated to `width`, in the default palette.
+#[must_use]
+pub fn toast_cells(toast: &Toast, width: u16) -> Vec<Cell> {
+    toast_cells_in(toast, width, Theme::storm())
+}
+
+/// A concise toast line, truncated to `width`, in one client theme.
 ///
 /// Renders `<title> <glyph> <label>` with the state coloured and, when the pane
 /// has coalesced more than once, a muted `(xN)` repeat count. Unlike a header it
 /// is not padded to width: a toast floats over the layout rather than owning a
-/// row.
+/// row. Every part is text and shape as well as colour, so the 16-colour and
+/// terminal-palette themes say the same thing the truecolour one does.
 #[must_use]
-pub fn toast_cells(toast: &Toast, width: u16) -> Vec<Cell> {
+pub fn toast_cells_in(toast: &Toast, width: u16, theme: Theme) -> Vec<Cell> {
     let width = usize::from(width);
     if width == 0 {
         return Vec::new();
     }
     let mut cells = Vec::new();
-    push_str(&mut cells, &toast.title, PRIMARY, CellAttrs::NONE);
+    push_str(
+        &mut cells,
+        &toast.title,
+        theme.color(ThemeToken::Primary),
+        CellAttrs::NONE,
+    );
     push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
     push_str(
         &mut cells,
         &format!("{} {}", toast.attention.glyph(), toast.attention.label()),
-        toast.attention.color(),
+        toast.attention.color_in(theme),
         CellAttrs::NONE,
     );
     if toast.repeats > 1 {
         push_str(
             &mut cells,
             &format!(" (x{})", toast.repeats),
-            MUTED,
+            theme.color(ThemeToken::Muted),
             CellAttrs::NONE,
         );
     }
@@ -1584,9 +1764,50 @@ pub fn toast_span(at: Point, toast: &Toast, width: u16) -> Span {
     Span::new(at, toast_cells(toast, width))
 }
 
+/// The rows a bounded toast stack draws on, oldest first.
+///
+/// The upper-right safe area is the rows *between* the client's two fixed chrome
+/// rows: a toast never covers the tab row or the status row, because both are
+/// always-on surfaces a user reads while the notice is up. `avoid_row` is the
+/// focused pane's cursor row, and it is skipped rather than drawn over — a
+/// notice may pass in front of a harness, never in front of the line it is being
+/// typed into. Fewer rows than `count` means the frame is too short to hold the
+/// whole stack, and the oldest notices are the ones that fit.
+#[must_use]
+pub fn toast_rows(outer: Size, count: usize, avoid_row: Option<u16>) -> Vec<u16> {
+    let last = outer.rows.saturating_sub(2);
+    let mut rows = Vec::new();
+    let mut row = 1u16;
+    while rows.len() < count && row <= last && row != u16::MAX {
+        if Some(row) != avoid_row {
+            rows.push(row);
+        }
+        row += 1;
+    }
+    rows
+}
+
+/// One toast, right-aligned in the outer frame's upper-right safe area.
+///
+/// The width is the toast's own — a notice floats, so it claims no more of a row
+/// than its text needs — bounded by [`TOAST_MAX_WIDTH`] and by the frame itself.
+#[must_use]
+pub fn toast_stack_span(outer: Size, row: u16, toast: &Toast, theme: Theme) -> Span {
+    let width = outer
+        .cols
+        .saturating_sub(TOAST_MARGIN.saturating_mul(2))
+        .min(TOAST_MAX_WIDTH);
+    let cells = toast_cells_in(toast, width, theme);
+    let len = u16::try_from(cells.len()).unwrap_or(u16::MAX);
+    let col = outer.cols.saturating_sub(len.saturating_add(TOAST_MARGIN));
+    Span::new(Point::new(col, row), cells)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::motion::{FRAME_BUDGET, MOTION_STEPS};
 
     /// The header's text, with styling discarded.
     fn text_of(cells: &[Cell]) -> String {
@@ -2577,12 +2798,20 @@ mod tests {
 
     // -- Toasts -----------------------------------------------------------
 
+    /// A toast with a repeat count, without going through a deck.
+    fn repeated_toast(index: u16, title: &str, attention: Attention, repeats: u32) -> Toast {
+        let mut toast = Toast::new(index, title, attention, Instant::now());
+        toast.repeats = repeats;
+        toast
+    }
+
     #[test]
     fn a_toast_deck_is_bounded_and_evicts_the_oldest() {
+        let now = Instant::now();
         let mut deck = ToastDeck::new(2);
-        deck.push(1, "a", Attention::NeedsInput);
-        deck.push(2, "b", Attention::Ready);
-        deck.push(3, "c", Attention::Failed);
+        deck.push(1, "a", Attention::NeedsInput, now);
+        deck.push(2, "b", Attention::Ready, now);
+        deck.push(3, "c", Attention::Failed, now);
         assert_eq!(deck.len(), 2, "capacity is never exceeded");
         let indices: Vec<u16> = deck.toasts().map(|toast| toast.index).collect();
         assert_eq!(indices, vec![2, 3], "the oldest was dropped");
@@ -2590,10 +2819,11 @@ mod tests {
 
     #[test]
     fn a_repeat_toast_coalesces_and_moves_to_the_newest() {
+        let now = Instant::now();
         let mut deck = ToastDeck::new(3);
-        deck.push(1, "a", Attention::NeedsInput);
-        deck.push(2, "b", Attention::Ready);
-        deck.push(1, "a", Attention::Failed);
+        deck.push(1, "a", Attention::NeedsInput, now);
+        deck.push(2, "b", Attention::Ready, now);
+        deck.push(1, "a", Attention::Failed, now);
         assert_eq!(deck.len(), 1 + 1, "a repeat is one notice, not two");
         let toasts: Vec<&Toast> = deck.toasts().collect();
         assert_eq!(toasts[0].index, 2, "the untouched toast is now oldest");
@@ -2605,28 +2835,133 @@ mod tests {
     #[test]
     fn a_zero_capacity_deck_still_holds_one() {
         let mut deck = ToastDeck::new(0);
-        deck.push(1, "a", Attention::NeedsInput);
+        deck.push(1, "a", Attention::NeedsInput, Instant::now());
         assert_eq!(deck.len(), 1);
     }
 
     #[test]
     fn dismissing_removes_a_panes_toast() {
+        let now = Instant::now();
         let mut deck = ToastDeck::new(3);
-        deck.push(1, "a", Attention::NeedsInput);
-        deck.push(2, "b", Attention::Ready);
+        deck.push(1, "a", Attention::NeedsInput, now);
+        deck.push(2, "b", Attention::Ready, now);
         deck.dismiss(1);
         let indices: Vec<u16> = deck.toasts().map(|toast| toast.index).collect();
         assert_eq!(indices, vec![2]);
     }
 
     #[test]
+    fn a_closed_panes_position_takes_its_toast_with_it() {
+        let now = Instant::now();
+        let mut deck = ToastDeck::new(3);
+        deck.push(1, "a", Attention::NeedsInput, now);
+        deck.push(3, "c", Attention::Failed, now);
+        deck.retain_within(2);
+        let indices: Vec<u16> = deck.toasts().map(|toast| toast.index).collect();
+        assert_eq!(indices, vec![1], "a notice never outlives its pane");
+    }
+
+    // -- Toast lifetime and entrance --------------------------------------
+
+    #[test]
+    fn a_toast_dismisses_itself_on_its_own_deadline() {
+        let now = Instant::now();
+        let mut deck = ToastDeck::new(3).lifetime(Duration::from_secs(1));
+        deck.push(1, "claude", Attention::NeedsInput, now);
+        assert_eq!(
+            deck.toasts().next().map(Toast::expires_at),
+            Some(now + Duration::from_secs(1))
+        );
+
+        assert!(!deck.is_empty());
+        let _ = deck.tick(now + Duration::from_millis(999));
+        assert_eq!(deck.len(), 1, "a notice inside its lifetime stays up");
+        assert!(
+            deck.tick(now + Duration::from_secs(1)),
+            "the deadline passing changes the frame"
+        );
+        assert!(deck.is_empty(), "a toast never covers a pane indefinitely");
+        assert!(
+            !deck.tick(now + Duration::from_secs(30)),
+            "an empty deck asks for no further frames"
+        );
+    }
+
+    #[test]
+    fn a_refreshed_toast_restarts_its_deadline() {
+        let now = Instant::now();
+        let mut deck = ToastDeck::new(3).lifetime(Duration::from_secs(1));
+        deck.push(1, "claude", Attention::NeedsInput, now);
+        deck.push(
+            1,
+            "claude",
+            Attention::Failed,
+            now + Duration::from_millis(900),
+        );
+        let _ = deck.tick(now + Duration::from_secs(1));
+        assert_eq!(
+            deck.len(),
+            1,
+            "the refresh, not the first raise, is the clock"
+        );
+        let _ = deck.tick(now + Duration::from_millis(1900));
+        assert!(deck.is_empty());
+    }
+
+    #[test]
+    fn an_entrance_is_frame_budgeted_and_settles_into_the_chromes_own_cells() {
+        let now = Instant::now();
+        let mut deck = ToastDeck::new(3);
+        deck.push(1, "claude", Attention::NeedsInput, now);
+        let entering = deck.toasts().next().expect("one toast").phase();
+        assert_eq!(entering.map(Phase::step), Some(0), "it enters over frames");
+
+        // Sampled far faster than the frame budget — a burst of PTY reads —
+        // the entrance still advances at most once per budget.
+        let mut frames = 0;
+        for n in 0..1000 {
+            if deck.tick(now + Duration::from_micros(n * 200)) {
+                frames += 1;
+            }
+        }
+        assert!(
+            frames <= usize::from(MOTION_STEPS),
+            "{frames} frames for one entrance"
+        );
+        assert_eq!(
+            deck.toasts().next().expect("one toast").phase(),
+            None,
+            "a settled toast draws the chrome's own cells"
+        );
+    }
+
+    #[test]
+    fn reduce_motion_gives_a_toast_no_entrance_at_all() {
+        let now = Instant::now();
+        let mut deck = ToastDeck::new(3).motion(MotionSettings::reduced());
+        deck.push(1, "claude", Attention::NeedsInput, now);
+        assert_eq!(deck.toasts().next().expect("one toast").phase(), None);
+        assert!(
+            !deck.tick(now + FRAME_BUDGET),
+            "reduce-motion asks for no entrance frames"
+        );
+    }
+
+    #[test]
+    fn changing_the_motion_preference_keeps_the_stack() {
+        let now = Instant::now();
+        let mut deck = ToastDeck::new(3);
+        deck.push(1, "claude", Attention::NeedsInput, now);
+        deck.set_motion(MotionSettings::reduced());
+        assert_eq!(deck.len(), 1, "a preference change is not a dismissal");
+        assert_eq!(deck.toasts().next().expect("one toast").phase(), None);
+    }
+
+    // -- Toast rendering and placement ------------------------------------
+
+    #[test]
     fn a_toast_line_carries_text_glyph_colour_and_a_repeat_count() {
-        let toast = Toast {
-            index: 2,
-            title: "codex".into(),
-            attention: Attention::NeedsInput,
-            repeats: 3,
-        };
+        let toast = repeated_toast(2, "codex", Attention::NeedsInput, 3);
         let cells = toast_cells(&toast, 40);
         let text = text_of(&cells);
         assert_eq!(text, "codex ! needs input (x3)");
@@ -2635,24 +2970,86 @@ mod tests {
 
     #[test]
     fn a_single_toast_omits_the_repeat_count() {
-        let toast = Toast {
-            index: 1,
-            title: "sh".into(),
-            attention: Attention::Ready,
-            repeats: 1,
-        };
+        let toast = repeated_toast(1, "sh", Attention::Ready, 1);
         assert_eq!(text_of(&toast_cells(&toast, 40)), "sh + ready");
     }
 
     #[test]
     fn a_toast_is_truncated_to_width_rather_than_padded() {
-        let toast = Toast {
-            index: 1,
-            title: "sh".into(),
-            attention: Attention::Ready,
-            repeats: 1,
-        };
+        let toast = repeated_toast(1, "sh", Attention::Ready, 1);
         assert_eq!(toast_cells(&toast, 4).len(), 4);
         assert!(toast_cells(&toast, 0).is_empty());
+    }
+
+    #[test]
+    fn a_sixteen_colour_toast_says_the_same_thing_the_truecolour_one_does() {
+        let toast = repeated_toast(1, "build", Attention::Failed, 2);
+        let ansi = Theme::named(cloo_core::ThemeName::Storm, cloo_proto::TermCaps::default());
+        assert_eq!(
+            text_of(&toast_cells_in(&toast, 40, ansi)),
+            text_of(&toast_cells(&toast, 40)),
+            "glyph, label, and repeat count never depend on the palette"
+        );
+        assert_eq!(
+            fg_of(&toast_cells_in(&toast, 40, ansi), 'x'),
+            Attention::Failed.color_in(ansi),
+            "the state still resolves through the client theme"
+        );
+    }
+
+    #[test]
+    fn the_stack_sits_between_the_tab_and_status_rows() {
+        let outer = Size::new(80, 24);
+        assert_eq!(
+            toast_rows(outer, 3, None),
+            vec![1, 2, 3],
+            "the tab row is row zero and is never covered"
+        );
+        assert!(
+            toast_rows(outer, 40, None).iter().all(|row| *row < 23),
+            "the status row is never covered either"
+        );
+        assert!(
+            toast_rows(Size::new(80, 2), 3, None).is_empty(),
+            "a frame with no room between its chrome rows shows none"
+        );
+    }
+
+    #[test]
+    fn the_focused_cursors_row_is_skipped_rather_than_drawn_over() {
+        let rows = toast_rows(Size::new(80, 24), 2, Some(2));
+        assert_eq!(
+            rows,
+            vec![1, 3],
+            "a notice never covers the line being typed"
+        );
+    }
+
+    #[test]
+    fn a_stacked_toast_is_right_aligned_inside_the_frame() {
+        let outer = Size::new(80, 24);
+        let toast = repeated_toast(1, "claude", Attention::NeedsInput, 1);
+        let span = toast_stack_span(outer, 1, &toast, Theme::storm());
+        let len = u16::try_from(span.cells.len()).expect("a short notice");
+        assert_eq!(span.at.row, 1);
+        assert_eq!(
+            span.at.col + len + TOAST_MARGIN,
+            outer.cols,
+            "the stack floats against the right edge, inside the margin"
+        );
+        assert_eq!(text_of(&span.cells), "claude ! needs input");
+    }
+
+    #[test]
+    fn a_narrow_frame_truncates_a_toast_rather_than_overflowing_it() {
+        let outer = Size::new(12, 24);
+        let toast = repeated_toast(1, "claude", Attention::NeedsInput, 1);
+        let span = toast_stack_span(outer, 1, &toast, Theme::storm());
+        let len = u16::try_from(span.cells.len()).expect("a short notice");
+        assert!(
+            len <= outer.cols - TOAST_MARGIN * 2,
+            "{len} cells in {outer:?}"
+        );
+        assert!(span.at.col + len <= outer.cols);
     }
 }

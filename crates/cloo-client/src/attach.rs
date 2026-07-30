@@ -36,14 +36,17 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
 use crate::capabilities::{CapsError, detect_attach_caps};
-use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TabBar};
+use crate::chrome::{
+    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TOAST_CAPACITY, TabBar,
+    ToastDeck, toast_rows, toast_stack_span,
+};
 use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
     ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
     OuterModes, PaneArea, ScreenLayout, overlay_action, queue_action, route_mouse,
 };
-use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
+use crate::motion::{Motion, MotionKind, MotionSettings, Phase, phase_span};
 use crate::outer::current_size;
 use crate::overlay::{
     ADD_PANE_KEY, ATTENTION_KEY, AttentionEntry, DETAILS_KEY, HELP_KEY, LaunchNotice,
@@ -698,7 +701,7 @@ where
             }
             Step::Server(Some(message)) => {
                 let transition = state.transition_for(&message);
-                dirty |= state.apply(message)?;
+                dirty |= state.apply_at(message, Instant::now())?;
                 state.tabs = attached.tabs().to_vec();
                 if let Some(kind) = transition {
                     phase = Some(motion.start(kind, Instant::now()));
@@ -761,8 +764,12 @@ where
                 }
                 // A launch the workspace silently refused has no message to
                 // wait for, so the render clock is what turns its deadline into
-                // something the user can see.
-                dirty |= state.tick_launch(Instant::now());
+                // something the user can see. The toast stack's entrance and
+                // expiry ride the same clock, so a burst of pane output can
+                // never become an animation source.
+                let now = Instant::now();
+                dirty |= state.tick_launch(now);
+                dirty |= state.tick_toasts(now);
                 if dirty {
                     draw(&mut out, &mut renderer, &state, phase)?;
                     dirty = false;
@@ -807,6 +814,10 @@ struct LiveState {
     copy_mode: Option<CopyModeState>,
     overlay: Option<Overlay>,
     queue: AttentionQueue,
+    /// The bounded stack of transient notices floating in the upper-right safe
+    /// area. Raised only by a new actionable attention projection, and advanced
+    /// only by the render clock.
+    toasts: ToastDeck,
     screen: ScreenLayout,
     /// The configured prefix's spelling, as the status row must draw it.
     prefix: String,
@@ -844,6 +855,7 @@ impl LiveState {
             copy_mode: None,
             overlay: None,
             queue: AttentionQueue::new(),
+            toasts: ToastDeck::new(TOAST_CAPACITY),
             screen: ScreenLayout::new(outer_size)
                 .tab_row(0)
                 .status_row(outer_size.rows.saturating_sub(1)),
@@ -867,6 +879,7 @@ impl LiveState {
         self.caps = caps;
         self.theme = Theme::new(visual.theme, caps);
         self.visual = visual;
+        self.toasts = ToastDeck::new(TOAST_CAPACITY).motion(MotionSettings::from_visual(visual));
         self
     }
 
@@ -895,6 +908,9 @@ impl LiveState {
         }
         self.theme = Theme::new(visual.theme, self.caps);
         self.visual = visual;
+        // A preference change is not a dismissal: the notices already up keep
+        // their own deadlines and only their entrance follows the new setting.
+        self.toasts.set_motion(MotionSettings::from_visual(visual));
         true
     }
 
@@ -931,8 +947,18 @@ impl LiveState {
         PrefixHint::for_panes(self.prefix.as_str(), self.areas.len()).pending(self.prefix_pending)
     }
 
-    /// Applies one server clock tick and reports whether it changes the frame.
+    /// Applies one server clock tick against the current instant.
+    ///
+    /// The client's own transient surfaces are the only reason a wire message
+    /// needs a clock at all, so the instant is passed in by
+    /// [`Self::apply_at`] and this remains the convenient call.
+    #[cfg(test)]
     fn apply(&mut self, message: ServerMessage) -> Result<bool, RenderError> {
+        self.apply_at(message, Instant::now())
+    }
+
+    /// Applies one server clock tick and reports whether it changes the frame.
+    fn apply_at(&mut self, message: ServerMessage, now: Instant) -> Result<bool, RenderError> {
         match message {
             ServerMessage::Damage { pane, rows } => {
                 let Some(grid) = self.grids.get_mut(&pane) else {
@@ -975,10 +1001,14 @@ impl LiveState {
                 Ok(true)
             }
             ServerMessage::Attention(attention) => {
-                self.attention = attention
+                let next: BTreeMap<PaneId, PaneAttention> = attention
                     .into_iter()
                     .map(|state| (state.pane, state))
                     .collect();
+                // Diffed against the projection still cached, because a toast is
+                // raised by an *event* and the wire carries state.
+                self.raise_toasts(&next, now);
+                self.attention = next;
                 self.rebuild_queue();
                 Ok(true)
             }
@@ -1118,6 +1148,90 @@ impl LiveState {
         if let Some(overlay) = self.overlay.as_mut() {
             overlay.refresh_attention(entries);
         }
+        self.toasts
+            .retain_within(u16::try_from(self.panes.len()).unwrap_or(u16::MAX));
+    }
+
+    /// Raises a toast for each pane whose actionable state is *new*.
+    ///
+    /// The wire carries state, not events, so the event is the difference
+    /// between the projection about to be cached and the one already held: a
+    /// pane that was not actionable and now is, or one whose actionable state
+    /// changed, or one whose acknowledgment was cleared. An identical projection
+    /// resent — which a client must tolerate — raises nothing at all, while a
+    /// pane that genuinely raises the same state again coalesces into one notice
+    /// with a growing count.
+    ///
+    /// Only two things take a notice away early: an acknowledgment, because the
+    /// user has already seen the event wherever they acknowledged it, and the
+    /// pane leaving the workspace. A pane settling back to quiet does *not* — the
+    /// notice is a record of something that happened, and yanking it off the
+    /// screen the moment the child calms down is how a user misses it. Its own
+    /// deadline is what clears it.
+    fn raise_toasts(&mut self, next: &BTreeMap<PaneId, PaneAttention>, now: Instant) {
+        let panes: Vec<(u16, PaneId, String)> = self
+            .panes
+            .values()
+            .enumerate()
+            .map(|(position, info)| {
+                (
+                    u16::try_from(position + 1).unwrap_or(u16::MAX),
+                    info.pane,
+                    info.name.clone(),
+                )
+            })
+            .collect();
+        for (index, pane, name) in panes {
+            let Some(state) = next.get(&pane) else {
+                self.toasts.dismiss(index);
+                continue;
+            };
+            if state.acknowledged {
+                self.toasts.dismiss(index);
+                continue;
+            }
+            if !attention(state.state).is_actionable() {
+                continue;
+            }
+            let changed = self
+                .attention
+                .get(&pane)
+                .is_none_or(|previous| previous.acknowledged || previous.state != state.state);
+            if changed {
+                self.toasts.push(index, name, attention(state.state), now);
+            }
+        }
+    }
+
+    /// Advances the toast stack's own clock, reporting whether the frame changed.
+    ///
+    /// Called from the render tick and from nowhere else, which is what keeps a
+    /// notice's entrance and expiry off a pane's output clock.
+    fn tick_toasts(&mut self, now: Instant) -> bool {
+        self.toasts.tick(now)
+    }
+
+    /// The bounded toast stack, drawn in the upper-right safe area.
+    ///
+    /// The focused cursor's row is handed to the placement so a notice can pass
+    /// in front of a harness without ever covering the line being typed into,
+    /// and each toast is drawn at whatever step of its entrance it has reached.
+    fn toast_spans(&self) -> Vec<crate::renderer::Span> {
+        if self.toasts.is_empty() {
+            return Vec::new();
+        }
+        let avoid = self.cursor().map(|cursor| cursor.pos.row);
+        toast_rows(self.outer_size, self.toasts.len(), avoid)
+            .into_iter()
+            .zip(self.toasts.toasts())
+            .map(|(row, toast)| {
+                let span = toast_stack_span(self.outer_size, row, toast, self.theme);
+                match toast.phase() {
+                    Some(phase) => phase_span(&span, phase, self.theme.color(ThemeToken::Frame)),
+                    None => span,
+                }
+            })
+            .collect()
     }
 
     /// The queue's rows paired with the panes they name.
@@ -1223,8 +1337,15 @@ impl LiveState {
 
     /// Composes normal pane contents plus client-owned visual layers.
     fn frame(&self) -> RenderFrame {
-        let base = self.spans();
+        let mut base = self.spans();
         let mut chrome: Vec<bool> = base.iter().map(|span| !self.is_body_span(span)).collect();
+        // A toast floats *over* a pane, so it is client chrome wherever it lands
+        // rather than something the geometry test could tell apart from pane
+        // content. It still dims under an open overlay like the rest of the
+        // frame, which is why it is layered here and not painted afterwards.
+        let toasts = self.toast_spans();
+        chrome.extend(std::iter::repeat_n(true, toasts.len()));
+        base.extend(toasts);
         let mut spans = if self.overlay.is_some() {
             base.iter()
                 .map(|span| backdrop_span(span.at, &span.cells, self.theme))
@@ -2724,6 +2845,424 @@ mod tests {
             );
         }
         assert!(state.overlay.is_some());
+    }
+
+    // -- the live toast stack ------------------------------------------------
+
+    /// A terminal that negotiated 24-bit colour.
+    fn truecolor_caps() -> TermCaps {
+        TermCaps {
+            truecolor: true,
+            ..TermCaps::default()
+        }
+    }
+
+    /// A nested workspace: two stacked panes beside a tall one, which is the
+    /// geometry card 03 draws and the one a floating notice has to survive.
+    ///
+    /// `cols`/`rows` are the outer terminal, so a narrow frame is the same
+    /// fixture with a different size.
+    fn nested_toast_state(outer: Size, caps: TermCaps) -> LiveState {
+        let panes = [PaneId::new(1), PaneId::new(2), PaneId::new(3)];
+        let split = outer.cols / 2;
+        let body = outer.rows.saturating_sub(FIXED_CHROME_ROWS);
+        let mut state = LiveState::new(outer, SessionId::new(1), hello_tabs(), "C-b".to_owned())
+            .preferences(caps, VisualConfig::defaults());
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: vec![
+                    PaneRect {
+                        pane: panes[0],
+                        x: 0,
+                        y: 0,
+                        size: Size::new(split, body),
+                    },
+                    PaneRect {
+                        pane: panes[1],
+                        x: split,
+                        y: 0,
+                        size: Size::new(outer.cols - split, body / 2),
+                    },
+                    PaneRect {
+                        pane: panes[2],
+                        x: split,
+                        y: body / 2,
+                        size: Size::new(outer.cols - split, body - body / 2),
+                    },
+                ],
+                focused: Some(panes[0]),
+                zoomed: None,
+            }))
+            .expect("the nested layout applies");
+        state
+            .apply(ServerMessage::Panes(
+                [
+                    (panes[0], "shell"),
+                    (panes[1], "claude"),
+                    (panes[2], "build"),
+                ]
+                .into_iter()
+                .map(|(pane, name)| PaneInfo {
+                    pane,
+                    profile: "generic".to_owned(),
+                    name: name.to_owned(),
+                    task: None,
+                    cwd: "/home/dev".to_owned(),
+                })
+                .collect(),
+            ))
+            .expect("the pane identity applies");
+        state
+    }
+
+    /// The toasts showing, oldest first, as `(pane index, title, state, repeats)`.
+    fn toast_stack(state: &LiveState) -> Vec<(u16, String, Attention, u32)> {
+        state
+            .toasts
+            .toasts()
+            .map(|toast| {
+                (
+                    toast.index,
+                    toast.title.clone(),
+                    toast.attention,
+                    toast.repeats,
+                )
+            })
+            .collect()
+    }
+
+    /// The text of every span in a composed frame.
+    fn frame_text(state: &LiveState) -> Vec<String> {
+        state
+            .frame()
+            .spans
+            .iter()
+            .map(|span| span.cells.iter().map(|cell| cell.ch).collect())
+            .collect()
+    }
+
+    /// A new actionable state is the event; the wire's repeated *state* is not.
+    #[test]
+    fn a_new_actionable_attention_event_raises_one_toast_and_repeats_coalesce() {
+        let now = Instant::now();
+        let mut state = nested_toast_state(Size::new(60, 14), truecolor_caps());
+        state
+            .apply_at(
+                attention_projection(&[
+                    // Progress is not something a person is asked to act on.
+                    (PaneId::new(1), AttentionState::Working, false),
+                    (PaneId::new(2), AttentionState::NeedsInput, false),
+                ]),
+                now,
+            )
+            .expect("the attention applies");
+        assert_eq!(
+            toast_stack(&state),
+            vec![(2, "claude".to_owned(), Attention::NeedsInput, 1)],
+            "one actionable event, one notice"
+        );
+
+        // A daemon may resend an unchanged projection at any time; that is not a
+        // second event and must not touch the count.
+        state
+            .apply_at(
+                attention_projection(&[
+                    (PaneId::new(1), AttentionState::Working, false),
+                    (PaneId::new(2), AttentionState::NeedsInput, false),
+                ]),
+                now,
+            )
+            .expect("the resend applies");
+        assert_eq!(toast_stack(&state)[0].3, 1, "a resend is not a repeat");
+
+        // The pane genuinely raising it again is, and it coalesces.
+        state
+            .apply_at(
+                attention_projection(&[(PaneId::new(2), AttentionState::Quiet, false)]),
+                now,
+            )
+            .expect("the lull applies");
+        state
+            .apply_at(
+                attention_projection(&[(PaneId::new(2), AttentionState::NeedsInput, false)]),
+                now,
+            )
+            .expect("the second event applies");
+        assert_eq!(
+            toast_stack(&state),
+            vec![(2, "claude".to_owned(), Attention::NeedsInput, 2)],
+            "a repeat is one notice with a count, never two"
+        );
+
+        // A changed state refreshes the same notice rather than stacking one.
+        state
+            .apply_at(
+                attention_projection(&[(PaneId::new(2), AttentionState::Failed, false)]),
+                now,
+            )
+            .expect("the changed state applies");
+        assert_eq!(
+            toast_stack(&state),
+            vec![(2, "claude".to_owned(), Attention::Failed, 3)]
+        );
+    }
+
+    /// The other half of the diff: an acknowledgment takes the notice away at
+    /// once, while a pane merely settling down leaves it to its own deadline.
+    #[test]
+    fn an_acknowledged_pane_takes_its_toast_away_and_a_settled_one_does_not() {
+        let now = Instant::now();
+        let mut state = nested_toast_state(Size::new(60, 14), truecolor_caps());
+        state
+            .apply_at(
+                attention_projection(&[
+                    (PaneId::new(2), AttentionState::NeedsInput, false),
+                    (PaneId::new(3), AttentionState::Failed, false),
+                ]),
+                now,
+            )
+            .expect("the attention applies");
+        assert_eq!(state.toasts.len(), 2);
+
+        state
+            .apply_at(
+                attention_projection(&[
+                    // Acknowledged in another client, or through the queue.
+                    (PaneId::new(2), AttentionState::NeedsInput, true),
+                    (PaneId::new(3), AttentionState::Quiet, false),
+                ]),
+                now,
+            )
+            .expect("the projection applies");
+        assert_eq!(
+            toast_stack(&state),
+            vec![(3, "build".to_owned(), Attention::Failed, 1)],
+            "an acknowledged event is gone; a finished one is still worth reading"
+        );
+
+        // The pane closing is the other thing that retires a notice, because a
+        // position that no longer exists names nothing.
+        state
+            .apply(ServerMessage::Panes(vec![PaneInfo {
+                pane: PaneId::new(1),
+                profile: "generic".to_owned(),
+                name: "shell".to_owned(),
+                task: None,
+                cwd: "/home/dev".to_owned(),
+            }]))
+            .expect("the closes apply");
+        assert!(state.toasts.is_empty());
+    }
+
+    /// Bounded in both axes: capacity caps the stack, and every notice leaves on
+    /// its own deadline rather than sitting over the workspace.
+    #[test]
+    fn a_toast_stack_is_bounded_and_clears_itself_on_the_render_clock() {
+        let now = Instant::now();
+        let mut state = nested_toast_state(Size::new(60, 14), truecolor_caps());
+        state
+            .apply(ServerMessage::Panes(
+                (1..=4)
+                    .map(|n| PaneInfo {
+                        pane: PaneId::new(n),
+                        profile: "generic".to_owned(),
+                        name: format!("pane{n}"),
+                        task: None,
+                        cwd: "/home/dev".to_owned(),
+                    })
+                    .collect(),
+            ))
+            .expect("a fourth pane applies");
+        state
+            .apply_at(
+                attention_projection(
+                    &(1..=4)
+                        .map(|n| (PaneId::new(n), AttentionState::NeedsInput, false))
+                        .collect::<Vec<_>>(),
+                ),
+                now,
+            )
+            .expect("four actionable events apply");
+        assert_eq!(state.toasts.len(), TOAST_CAPACITY, "a burst never grows");
+        assert_eq!(
+            toast_stack(&state)
+                .iter()
+                .map(|toast| toast.0)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4],
+            "the oldest is the one evicted"
+        );
+        let raised = frame_text(&state);
+        assert!(
+            raised.iter().any(|row| row == "pane4 ! needs input"),
+            "a raised notice reaches the frame as its own floating span: {raised:?}"
+        );
+
+        assert!(
+            !state.tick_toasts(now),
+            "a notice inside its lifetime asks for no repaint"
+        );
+        assert!(
+            state.tick_toasts(now + crate::chrome::TOAST_LIFETIME),
+            "the deadline passing changes the frame"
+        );
+        assert!(state.toasts.is_empty());
+        assert!(state.toast_spans().is_empty());
+        assert!(
+            !frame_text(&state)
+                .iter()
+                .any(|row| row == "pane4 ! needs input"),
+            "an expired notice leaves the frame with it"
+        );
+    }
+
+    /// The rule the frame cap exists for, applied to notices: a pane's output
+    /// raises nothing and animates nothing.
+    #[test]
+    fn a_toast_never_rides_a_panes_output_clock() {
+        let now = Instant::now();
+        let mut state = nested_toast_state(Size::new(60, 14), truecolor_caps());
+        state
+            .apply_at(
+                attention_projection(&[(PaneId::new(2), AttentionState::NeedsInput, false)]),
+                now,
+            )
+            .expect("the attention applies");
+        let raised = toast_stack(&state);
+
+        for _ in 0..500 {
+            state
+                .apply_at(
+                    ServerMessage::Damage {
+                        pane: PaneId::new(1),
+                        rows: vec![RowUpdate {
+                            row: 0,
+                            cells: vec![Cell::default(); 30],
+                        }],
+                    },
+                    now,
+                )
+                .expect("the damage applies");
+        }
+        assert_eq!(
+            toast_stack(&state),
+            raised,
+            "pane output is not an attention event"
+        );
+
+        // And the entrance advances at most once per frame budget however often
+        // the client is asked to draw.
+        let mut frames = 0;
+        for n in 0..1000 {
+            if state.tick_toasts(now + Duration::from_micros(n * 200)) {
+                frames += 1;
+            }
+        }
+        assert!(
+            frames <= usize::from(crate::motion::MOTION_STEPS),
+            "{frames} frames for one entrance"
+        );
+    }
+
+    /// Card 03's floating stack: upper-right, inside the two always-on chrome
+    /// rows, and never on the line the focused harness is being typed into.
+    #[test]
+    fn a_nested_live_frame_stacks_toasts_in_the_upper_right_safe_area() {
+        let now = Instant::now();
+        let outer = Size::new(60, 14);
+        let mut state = nested_toast_state(outer, truecolor_caps());
+        state
+            .apply(ServerMessage::CursorMoved {
+                pane: PaneId::new(1),
+                pos: Point::new(0, 0),
+                shape: CursorShape::Block,
+                visible: true,
+            })
+            .expect("the cursor applies");
+        let cursor = state.cursor().expect("the focused pane has a cursor");
+        state
+            .apply_at(
+                attention_projection(&[
+                    (PaneId::new(2), AttentionState::NeedsInput, false),
+                    (PaneId::new(3), AttentionState::Failed, false),
+                ]),
+                now,
+            )
+            .expect("the attention applies");
+
+        let spans = state.toast_spans();
+        assert_eq!(spans.len(), 2, "both notices are placed");
+        for span in &spans {
+            let len = u16::try_from(span.cells.len()).expect("a short notice");
+            assert!(span.at.row > 0, "the tab row is never covered");
+            assert!(
+                span.at.row < outer.rows - 1,
+                "neither is the status row: {span:?}"
+            );
+            assert_ne!(
+                span.at.row, cursor.pos.row,
+                "a notice never covers the focused input row"
+            );
+            assert_eq!(
+                span.at.col + len + crate::chrome::TOAST_MARGIN,
+                outer.cols,
+                "the stack floats against the right edge"
+            );
+        }
+
+        let frame = state.frame();
+        let toasts = frame.chrome.len() - spans.len();
+        assert!(
+            frame.chrome[toasts..].iter().all(|chrome| *chrome),
+            "a notice floating over a pane is still client chrome, never pane content"
+        );
+    }
+
+    /// The 16-colour fallback says the same thing, and neither palette gives the
+    /// stack a keyboard: a notice owns no keys, so input still reaches the pane.
+    #[test]
+    fn stacked_toasts_degrade_to_sixteen_colours_and_leak_no_input_to_a_pane() {
+        let now = Instant::now();
+        let raise = attention_projection(&[
+            (PaneId::new(2), AttentionState::NeedsInput, false),
+            (PaneId::new(3), AttentionState::Failed, false),
+        ]);
+        let mut truecolor = nested_toast_state(Size::new(60, 14), truecolor_caps());
+        truecolor
+            .apply_at(raise.clone(), now)
+            .expect("the attention applies");
+        let mut ansi = nested_toast_state(Size::new(60, 14), TermCaps::default());
+        ansi.apply_at(raise, now).expect("the attention applies");
+
+        assert_eq!(
+            ansi.toast_spans()
+                .iter()
+                .map(|span| span.cells.iter().map(|cell| cell.ch).collect::<String>())
+                .collect::<Vec<_>>(),
+            truecolor
+                .toast_spans()
+                .iter()
+                .map(|span| span.cells.iter().map(|cell| cell.ch).collect::<String>())
+                .collect::<Vec<_>>(),
+            "glyph and label never depend on the palette"
+        );
+        assert!(
+            ansi.toast_spans()[0]
+                .cells
+                .iter()
+                .any(|cell| matches!(cell.fg, cloo_proto::Color::Indexed(_))),
+            "a 16-colour terminal gets indexed colour, not invented truecolour"
+        );
+
+        for keys in [b"j".as_slice(), b"\r", b"\x1b", b"a"] {
+            assert_eq!(
+                ansi.apply_overlay_keys(keys),
+                OverlayKeys::Ignored,
+                "{keys:?} belongs to the pane: a toast has no keyboard"
+            );
+        }
+        assert!(ansi.overlay.is_none());
     }
 
     /// The client tracks its own request rather than reading a grid: the pane it

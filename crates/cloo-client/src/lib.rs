@@ -13,8 +13,8 @@
 //!   [`compose_frame`], which assembles the whole attached multi-pane picture
 //!   from one resolved layout.
 //! - [`chrome`] — pane headers, the focus and attention treatment, the dimming
-//!   policy, and the attention queue, summary, and toast deck, as pure functions
-//!   into cells.
+//!   policy, and the attention queue, summary, and the bounded self-dismissing
+//!   toast deck, as pure functions into cells.
 //! - [`outer`] — the outer terminal's geometry, which is the client's to know
 //!   and never session state.
 //! - [`capabilities`] — what that terminal can do, the documented fallback for
@@ -74,9 +74,11 @@ pub use capabilities::{
 };
 pub use chrome::{
     Attention, AttentionQueue, ChromeOptions, DEFAULT_PREFIX_HINT, PaneChrome, PrefixHint,
-    QueueEntry, TabBar, Toast, ToastDeck, body_span, dim_cell, dim_cell_with_theme, dim_cells,
-    header_cells, header_span, queue_row_cells, queue_row_span, status_bar_cells, status_bar_span,
-    summary_cells, summary_span, tab_row_cells, tab_row_span, toast_cells, toast_span,
+    QueueEntry, TOAST_CAPACITY, TOAST_LIFETIME, TOAST_MARGIN, TOAST_MAX_WIDTH, TabBar, Toast,
+    ToastDeck, body_span, dim_cell, dim_cell_with_theme, dim_cells, header_cells, header_span,
+    queue_row_cells, queue_row_span, status_bar_cells, status_bar_span, summary_cells,
+    summary_span, tab_row_cells, tab_row_span, toast_cells, toast_cells_in, toast_rows, toast_span,
+    toast_stack_span,
 };
 pub use copy_mode::{
     Highlight, apply_copy, copy_request, highlight_spans, status_cells as copy_status_cells,

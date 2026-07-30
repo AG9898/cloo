@@ -94,7 +94,11 @@ pub enum MotionKind {
     Split,
     /// A pane was closed.
     Close,
-    /// An overlay opened or dismissed.
+    /// An overlay opened or dismissed, or a client-owned notice appearing —
+    /// [`crate::chrome::ToastDeck`] enters its toasts on this kind. A toast is
+    /// raised by an explicit attention projection and stepped by the render
+    /// clock, so it is a surface appearing rather than a data clock reaching
+    /// this vocabulary.
     Overlay,
 }
 

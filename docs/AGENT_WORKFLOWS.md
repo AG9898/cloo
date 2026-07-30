@@ -190,6 +190,20 @@ saying the pane was seen comes back, and a second attached client is told the sa
 else the overlay understands reaches the wire, and no keystroke ever reaches a child while it is
 open.
 
+M9-16 connects the other half of that model — the `ToastDeck` — to the same live projections. The
+wire carries attention *state*, so the client raises a notice from the *difference* between the
+projection arriving and the one it already holds: a pane that becomes actionable, changes to another
+actionable state, or has its acknowledgment cleared. An unchanged projection resent raises nothing,
+which is what keeps a daemon free to repeat itself. A pane that raises an event again inside a
+notice's lifetime coalesces into that one notice with a growing `(xN)` count, a changed state
+refreshes it in place, and a fourth pane's event evicts the oldest, so a burst can never grow the
+stack. An acknowledgment or the pane closing retires a notice at once; a pane merely settling back
+to quiet does not, because the notice records something that happened and its own deadline is what
+clears it. The stack is raised only by `ServerMessage::Attention` and advanced only by the render
+clock, so a busy child raises no notice and animates nothing. It owns no keys at all: a toast is
+never navigated, and every keystroke while one is showing still belongs to the focused pane. The
+visual contract is in [STYLEGUIDE.md](STYLEGUIDE.md#overlays-and-notifications).
+
 ## Compatibility Tiers
 
 | Tier | Contract |

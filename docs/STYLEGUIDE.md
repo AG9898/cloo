@@ -469,6 +469,26 @@ contract concrete:
   upper-right safe area, never obscure the focused pane's active input row indefinitely, and
   auto-dismiss after the configured lifetime.
 
+  As of M9-16 that is the attached client's own stack: at most three notices, each `<pane name>
+  <glyph> <label>` with the `(xN)` count only when it repeated, right-aligned one column inside the
+  frame's right edge and no wider than 36 columns:
+
+  ```
+                                          claude ! needs input
+                                          build x failed (x2)
+  ```
+
+  The stack occupies the rows *between* the two always-on chrome rows — never the tab row, never the
+  status row — and the focused pane's cursor row is skipped rather than drawn over, so a notice may
+  pass in front of a harness but never in front of the line being typed into. A frame with no room
+  between its chrome rows shows none. Each notice enters through the shared 120ms motion budget as a
+  client surface appearing, settles into the chrome's own colours, and clears itself four seconds
+  after it was raised or last refreshed; reduce-motion gives it no entrance at all. Nothing about it
+  rides a pane's output clock: a notice is raised only by a new actionable attention projection and
+  advanced only by the render tick. It is client chrome wherever it lands, it dims with the rest of
+  the frame under an open overlay, and it owns no keys — a keystroke while a toast is showing
+  belongs to the focused pane.
+
 ### Configuration and live preview
 
 The configuration surface and the file it represents must agree. Runtime configuration accepts
