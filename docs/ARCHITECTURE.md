@@ -1272,8 +1272,13 @@ and attaches through a selected session's ordinary socket before releasing the c
 Inspection creates no client attachment, does not resize a session, and exposes no child transcript.
 
 The clock, effective prefix, selected theme, overlay query/selection, and optional repository label
-are client-local. Repository information may be derived asynchronously from the focused pane's
-reported working directory, must never block the render loop, and is omitted when unavailable.
+are client-local. As of M9-12, `cloo-client::status::ClientStatus` holds clock text from an
+injectable local-time source and an optional `RepositoryStatus` for the focused pane's reported
+working directory. The attached loop runs each Git query on a blocking task, kills it after 250ms,
+and refreshes a stable focus once per second; a missing repository, command failure, or detached
+head omits the unavailable field. A focus change clears the old answer before starting the new
+lookup, and a late result is accepted only if its directory is still focused. No lookup reads a
+grid or transcript, and neither value crosses the wire or enters session state.
 Tabs, pane metadata, attention, client counts, and effective sizing remain server projections.
 No status segment may display placeholder data as though it were authoritative.
 

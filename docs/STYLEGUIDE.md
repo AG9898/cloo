@@ -246,6 +246,12 @@ those fields in later status compositions: an outer-terminal resize is merely re
 daemon answers, and neither pane geometry nor pane text may be used as a substitute. This task does
 not yet add those fields to the rendered minimal bar.
 
+As of M9-12, clock and repository values have a client-local model but are not yet rendered. Clock
+text comes from the client's local wall clock. Repository branch and change count come only from a
+bounded asynchronous Git query against the focused pane's reported working directory; a detached
+head omits the branch, and a missing repository, failed or slow query, or changed focus leaves the
+repository segment absent. Pane text is never a source for either value.
+
 Width yields in one fixed order: clock, client geometry, branch, inactive tab summaries, active tab
 title, full session name, per-state attention detail, and finally the help suffix. At the narrowest
 useful width the row becomes `s>!b`, retaining one ASCII marker for session, tab, attention, and

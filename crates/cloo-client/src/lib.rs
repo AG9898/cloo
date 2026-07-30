@@ -4,7 +4,7 @@
 //! session state. **All chrome is rendered here**, which is why theming never
 //! touches the server.
 //!
-//! Thirteen modules today:
+//! Fourteen modules today:
 //!
 //! - [`raw_mode`] — entering raw mode and restoring it on every exit path,
 //!   including panic and signal.
@@ -44,6 +44,8 @@
 //!   detaching without taking the session with it.
 //! - [`session_catalog`] — bounded, version-verified discovery of live local
 //!   sessions without attaching to any of them.
+//! - [`status`] — injectable local clock data and bounded repository discovery
+//!   for the focused pane, kept off the render loop.
 //!
 //! Rendering is a pure function into a byte buffer rather than a write to a
 //! descriptor, which is what makes a fake grid renderable in a unit test with an
@@ -63,6 +65,7 @@ pub mod raw_mode;
 pub mod renderer;
 pub mod resize;
 pub mod session_catalog;
+pub mod status;
 pub mod theme;
 
 pub use attach::{
@@ -109,5 +112,9 @@ pub use resize::ResizeWatch;
 pub use session_catalog::{
     INSPECTION_DEADLINE, SessionCatalogEntry, SessionCatalogError, discover_sessions,
     discover_sessions_from,
+};
+pub use status::{
+    ClientStatus, LocalClock, LocalTime, REPOSITORY_DEADLINE, REPOSITORY_REFRESH_INTERVAL,
+    RepositoryStatus, SystemClock, repository_status,
 };
 pub use theme::{Theme, ThemeToken};

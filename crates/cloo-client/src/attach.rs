@@ -58,6 +58,9 @@ use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
 use crate::resize::ResizeWatch;
 use crate::session_catalog::{SessionCatalogEntry, SessionCatalogError, discover_sessions};
+use crate::status::{
+    ClientStatus, REPOSITORY_REFRESH_INTERVAL, RepositoryStatus, SystemClock, repository_status,
+};
 use crate::theme::{Theme, ThemeToken};
 
 /// The render tick shared with the daemon: roughly 60 frames per second.
@@ -78,6 +81,7 @@ const SWITCH_DETACH_DEADLINE: Duration = Duration::from_secs(2);
 const KEYBOARD_RESIZE_LINGER: Duration = Duration::from_millis(750);
 
 type CatalogResult = Result<Vec<SessionCatalogEntry>, SessionCatalogError>;
+type RepositoryResult = (PathBuf, Option<RepositoryStatus>);
 
 /// Everything attaching can refuse to do.
 #[derive(Debug)]
@@ -728,6 +732,11 @@ where
     let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut catalog_refreshing = false;
     let mut catalog_refreshed = None;
+    let clock = SystemClock;
+    let _ = state.local_status.refresh_clock(&clock);
+    let (repository_tx, mut repository_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut repository_refreshing = BTreeSet::new();
+    let mut repository_refreshed = None;
 
     loop {
         let step = tokio::select! {
@@ -739,6 +748,9 @@ where
             resized = resizes.changed(), if !detaching => Step::Resized(resized),
             catalog = catalog_rx.recv(), if catalog_refreshing => {
                 Step::Catalog(catalog.expect("a refresh sender exists while one is running"))
+            },
+            repository = repository_rx.recv() => {
+                Step::Repository(repository.expect("the repository sender lives with the loop"))
             },
             _ = frames.tick() => Step::Frame,
         };
@@ -773,6 +785,12 @@ where
                 let transition = state.transition_for(&message);
                 dirty |= state.apply_at(message, Instant::now())?;
                 state.tabs = attached.tabs().to_vec();
+                if let Some(cwd) = state.refresh_repository_target() {
+                    repository_refreshed = None;
+                    if repository_refreshing.insert(cwd.clone()) {
+                        start_repository_refresh(repository_tx.clone(), cwd);
+                    }
+                }
                 if let Some(kind) = transition {
                     phase = Some(motion.start(kind, Instant::now()));
                     dirty = true;
@@ -870,6 +888,19 @@ where
                 // expiry ride the same clock, so a burst of pane output can
                 // never become an animation source.
                 let now = Instant::now();
+                dirty |= state.local_status.refresh_clock(&clock);
+                if let Some(cwd) = state.repository_target.clone()
+                    && !repository_refreshing.contains(&cwd)
+                    && repository_refreshed.as_ref().is_none_or(
+                        |(refreshed_cwd, last): &(PathBuf, Instant)| {
+                            refreshed_cwd != &cwd
+                                || now.duration_since(*last) >= REPOSITORY_REFRESH_INTERVAL
+                        },
+                    )
+                {
+                    repository_refreshing.insert(cwd.clone());
+                    start_repository_refresh(repository_tx.clone(), cwd);
+                }
                 if state.session_switcher_open()
                     && !catalog_refreshing
                     && catalog_refreshed
@@ -892,6 +923,13 @@ where
                 if let Ok(entries) = result {
                     dirty |= state.refresh_sessions(entries, path);
                 }
+            }
+            Step::Repository((cwd, repository)) => {
+                repository_refreshing.remove(&cwd);
+                if state.repository_target.as_ref() == Some(&cwd) {
+                    repository_refreshed = Some((cwd.clone(), Instant::now()));
+                }
+                dirty |= state.apply_repository(cwd, repository);
             }
         }
     }
@@ -921,11 +959,23 @@ enum Step {
     Frame,
     /// One bounded, version-verified local catalog refresh completed.
     Catalog(CatalogResult),
+    /// One client-local repository lookup completed away from the render loop.
+    Repository(RepositoryResult),
 }
 
 fn start_catalog_refresh(tx: tokio::sync::mpsc::UnboundedSender<CatalogResult>) {
     tokio::spawn(async move {
         let _ = tx.send(discover_sessions().await);
+    });
+}
+
+fn start_repository_refresh(
+    tx: tokio::sync::mpsc::UnboundedSender<RepositoryResult>,
+    cwd: PathBuf,
+) {
+    tokio::task::spawn_blocking(move || {
+        let repository = repository_status(&cwd);
+        let _ = tx.send((cwd, repository));
     });
 }
 
@@ -978,6 +1028,10 @@ struct LiveState {
     /// The client-local card-08 treatment. The session still owns the ratio;
     /// this remembers only which drawn divider is active and its visible share.
     resize: Option<ResizeActivity>,
+    /// Clock and repository facts owned by this terminal, never by the session.
+    local_status: ClientStatus,
+    /// The focused working directory whose repository answer is current or in flight.
+    repository_target: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1025,6 +1079,8 @@ impl LiveState {
             caps: TermCaps::default(),
             config_revision: 0,
             resize: None,
+            local_status: ClientStatus::default(),
+            repository_target: None,
         }
     }
 
@@ -1137,6 +1193,36 @@ impl LiveState {
     /// it can be.
     fn prefix_hint(&self) -> PrefixHint {
         PrefixHint::for_panes(self.prefix.as_str(), self.areas.len()).pending(self.prefix_pending)
+    }
+
+    /// Changes repository provenance only when the focused pane's reported
+    /// directory changes. Clearing first prevents a slow old answer from being
+    /// displayed for the new focus.
+    fn refresh_repository_target(&mut self) -> Option<PathBuf> {
+        let next = self.focused_cwd();
+        if next == self.repository_target {
+            return None;
+        }
+        self.repository_target = next.clone();
+        self.local_status.set_repository(None);
+        next
+    }
+
+    fn focused_cwd(&self) -> Option<PathBuf> {
+        let focused = self.layout.as_ref()?.focused?;
+        self.panes
+            .get(&focused)
+            .map(|pane| PathBuf::from(&pane.cwd))
+    }
+
+    /// Accepts only the answer still naming the focused pane's directory.
+    fn apply_repository(&mut self, cwd: PathBuf, repository: Option<RepositoryStatus>) -> bool {
+        if self.repository_target.as_ref() != Some(&cwd)
+            || self.focused_cwd().as_ref() != Some(&cwd)
+        {
+            return false;
+        }
+        self.local_status.set_repository(repository)
     }
 
     /// Applies one server clock tick against the current instant.
@@ -2417,6 +2503,81 @@ mod tests {
                 .expect("replacement status applies")
         );
         assert_eq!(state.status.as_ref(), Some(&replacement));
+    }
+
+    #[test]
+    fn client_local_status_discards_a_repository_answer_after_focus_changes() {
+        let first = PaneId::new(1);
+        let second = PaneId::new(2);
+        let mut state = LiveState::new(
+            Size::new(40, 8),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
+        state
+            .apply(ServerMessage::Panes(vec![
+                PaneInfo {
+                    pane: first,
+                    profile: "generic".to_owned(),
+                    name: "one".to_owned(),
+                    task: None,
+                    cwd: "/repo/one".to_owned(),
+                },
+                PaneInfo {
+                    pane: second,
+                    profile: "generic".to_owned(),
+                    name: "two".to_owned(),
+                    task: None,
+                    cwd: "/repo/two".to_owned(),
+                },
+            ]))
+            .expect("pane metadata applies");
+        let layout = |focused| LayoutSnapshot {
+            tab: TabId::new(1),
+            panes: vec![
+                PaneRect {
+                    pane: first,
+                    x: 1,
+                    y: 1,
+                    size: Size::new(18, 4),
+                },
+                PaneRect {
+                    pane: second,
+                    x: 21,
+                    y: 1,
+                    size: Size::new(18, 4),
+                },
+            ],
+            focused: Some(focused),
+            zoomed: None,
+        };
+
+        state
+            .apply(ServerMessage::Layout(layout(first)))
+            .expect("first focus applies");
+        assert_eq!(
+            state.refresh_repository_target(),
+            Some(PathBuf::from("/repo/one"))
+        );
+        state
+            .apply(ServerMessage::Layout(layout(second)))
+            .expect("second focus applies");
+        assert_eq!(
+            state.refresh_repository_target(),
+            Some(PathBuf::from("/repo/two"))
+        );
+
+        let stale = RepositoryStatus {
+            branch: Some("stale".to_owned()),
+            changes: 9,
+        };
+        assert!(!state.apply_repository(PathBuf::from("/repo/one"), Some(stale)));
+        assert_eq!(
+            state.local_status.repository(),
+            None,
+            "the old pane's answer is omitted instead of shown for the new focus"
+        );
     }
 
     #[tokio::test]
