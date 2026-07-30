@@ -35,9 +35,10 @@ header-only scaffold: every attached pane has a complete one-cell top, side, and
 adjacent framed allocations do not overlap. The top row is likewise no longer a bare list of tab
 titles — it is the session-aware composition described under [Tab row](#tab-row). The prefix surface
 is no longer a static help list either: it is the searchable command palette card 04 asks for, though
-that card's golden frames are still M9-21's. The remaining overlays and status variants still need
-their card-specific passes. A helper being byte-tested does not by itself establish that the
-attached frame matches the handoff.
+that card's golden frames are still M9-21's. The session switcher now uses the verified local daemon
+catalog and can move the live client between those sockets. The remaining configuration and status
+variants still need their card-specific passes. A helper being byte-tested does not by itself
+establish that the attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
 
@@ -367,9 +368,18 @@ client surfaces, retains a selected row, and confirms the selected action. An em
 the discoverable command list; `<prefix> ?` may open the same surface with that list visible.
 
 The session switcher lists the daemon's real session catalog rather than synthesizing the current
-session. Each row carries truthful tab/pane counts, attachment state, and recency when the daemon
-can supply it. Confirming a row attaches or switches through a typed client action; selection alone
-never kills or detaches another session.
+session. Each row carries the daemon-reported name, tab/pane/client counts, and an `attached` label
+for the socket this client is viewing; singular and plural nouns remain explicit. A catalog that has
+not answered yet is an empty, closable switcher rather than a fabricated current row. The catalog is
+verified again once per second while the surface remains open, with every candidate still bounded by
+its private inspection deadline, so a newly started or disappearing daemon updates the rows without
+blocking indefinitely.
+
+Confirming another row first completes an ordinary attach handshake to that row's verified socket.
+Only after the selected daemon accepts does the client detach its current socket and replace the
+frame; a daemon that disappears between inspection and confirmation is removed from the still-open
+switcher, leaving the current attachment intact. Confirming the current row simply closes the
+surface. No row kills a daemon, and every switcher key remains client-owned.
 
 The session switcher, profile launcher, pane-details view, attention queue, and command palette use
 one rendering model. An overlay is a title row, a list, and a hint row — plus the palette's own query

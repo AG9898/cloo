@@ -57,11 +57,12 @@
 //! ```
 
 use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cloo_core::keymap::{Key, Keymap, action_name};
 use cloo_core::{Profile, ProfileCommand, ProfileId};
-use cloo_proto::{Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionId, Size};
+use cloo_proto::{Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionSummary, Size};
 
 use crate::chrome::{Attention, QueueEntry, dim_cell_with_theme};
 use crate::input::{OverlayAction, PaletteAction, QueueAction};
@@ -87,24 +88,30 @@ const PLAIN_MARKER: &str = "  ";
 /// never authoritative and never inferred from a grid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
-    /// Which session.
-    pub session: SessionId,
+    /// The verified socket this row attaches through.
+    socket: PathBuf,
     /// The session's user-visible name.
-    pub title: String,
+    title: String,
+    /// How many tabs it holds.
+    tabs: u16,
     /// How many panes it holds.
-    pub panes: usize,
+    panes: u16,
+    /// How many clients were attached when it was inspected.
+    clients: u16,
     /// Whether this client is currently attached to it.
-    pub attached: bool,
+    attached: bool,
 }
 
 impl SessionEntry {
-    /// Describes one session for the switcher.
+    /// Describes one independently inspected session for the switcher.
     #[must_use]
-    pub fn new(session: SessionId, title: impl Into<String>, panes: usize) -> Self {
+    pub fn new(socket: PathBuf, summary: SessionSummary) -> Self {
         Self {
-            session,
-            title: title.into(),
-            panes,
+            socket,
+            title: summary.name,
+            tabs: summary.tabs,
+            panes: summary.panes,
+            clients: summary.clients,
             attached: false,
         }
     }
@@ -114,6 +121,12 @@ impl SessionEntry {
     pub const fn attached(mut self, attached: bool) -> Self {
         self.attached = attached;
         self
+    }
+
+    /// The verified socket confirming this row switches to.
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
     }
 }
 
@@ -174,6 +187,12 @@ fn command_summary(command: &ProfileCommand) -> String {
         ProfileCommand::Program { program, args } if args.is_empty() => program.clone(),
         ProfileCommand::Program { program, args } => format!("{program} {}", args.join(" ")),
     }
+}
+
+/// A truthful count with its singular or plural noun.
+fn count(value: u16, noun: &str) -> String {
+    let plural = if value == 1 { "" } else { "s" };
+    format!("{value} {noun}{plural}")
 }
 
 /// Everything the pane-details overlay shows about one pane.
@@ -668,6 +687,20 @@ impl Overlay {
         }
     }
 
+    /// Replaces session rows with a newer verified catalog, keeping the cursor
+    /// on the same socket when it still exists.
+    pub fn refresh_sessions(&mut self, entries: Vec<SessionEntry>) {
+        let OverlayKind::Sessions(current) = &mut self.kind else {
+            return;
+        };
+        let selected = current.get(self.selected).map(|entry| entry.socket.clone());
+        *current = entries;
+        self.selected = selected
+            .and_then(|socket| current.iter().position(|entry| entry.socket == socket))
+            .unwrap_or(self.selected)
+            .min(current.len().saturating_sub(1));
+    }
+
     /// Opens the pane-details view.
     #[must_use]
     pub fn details(details: PaneDetails) -> Self {
@@ -901,7 +934,7 @@ impl Overlay {
             OverlayKind::Sessions(entries) => entries
                 .get(self.selected)
                 .map_or(OverlayOutcome::Open, |entry| {
-                    OverlayOutcome::SwitchSession(entry.session)
+                    OverlayOutcome::SwitchSession(entry.socket.clone())
                 }),
             OverlayKind::Launcher(entries) => {
                 entries
@@ -958,11 +991,7 @@ impl Overlay {
             }
             OverlayKind::Sessions(entries) => {
                 let entry = &entries[index];
-                let mut extras = vec![Field::new(
-                    format!("{} panes", entry.panes),
-                    muted,
-                    CellAttrs::NONE,
-                )];
+                let mut extras = Vec::with_capacity(4);
                 if entry.attached {
                     extras.push(Field::new(
                         "attached",
@@ -970,9 +999,14 @@ impl Overlay {
                         CellAttrs::NONE,
                     ));
                 }
+                extras.extend([
+                    Field::new(count(entry.tabs, "tab"), muted, CellAttrs::NONE),
+                    Field::new(count(entry.panes, "pane"), muted, CellAttrs::NONE),
+                    Field::new(count(entry.clients, "client"), muted, CellAttrs::NONE),
+                ]);
                 RowSpec {
                     selected,
-                    lead: Field::new(entry.session.get().to_string(), muted, CellAttrs::NONE),
+                    lead: Field::new("", Color::Default, CellAttrs::NONE),
                     title: Field::new(entry.title.clone(), primary, CellAttrs::BOLD),
                     extras,
                 }
@@ -1222,7 +1256,7 @@ pub enum OverlayOutcome {
     /// The overlay closed without acting.
     Dismissed,
     /// Attach to this session instead.
-    SwitchSession(SessionId),
+    SwitchSession(PathBuf),
     /// Launch a pane from this profile.
     Launch(LaunchRequest),
     /// Move focus to the pane this row names.
@@ -1328,11 +1362,12 @@ fn row_cells(row: &RowSpec, width: u16, theme: Theme) -> Vec<Cell> {
     if gap == 1 {
         push_text(&mut cells, " ", muted, surface);
     }
-    push_text(
+    push_styled(
         &mut cells,
         truncate(&row.title.text, budget),
         row.title.fg,
         surface,
+        row.title.attrs,
     );
     for extra in &row.extras[..kept] {
         push_text(&mut cells, " ", muted, surface);
@@ -1649,9 +1684,37 @@ mod tests {
 
     fn sessions() -> Overlay {
         Overlay::sessions(vec![
-            SessionEntry::new(SessionId::new(7), "main", 3).attached(true),
-            SessionEntry::new(SessionId::new(8), "review", 1),
-            SessionEntry::new(SessionId::new(9), "scratch", 2),
+            SessionEntry::new(
+                PathBuf::from("/run/cloo/main.sock"),
+                SessionSummary {
+                    name: "main".to_owned(),
+                    tabs: 2,
+                    panes: 3,
+                    clients: 1,
+                    uptime_secs: 12,
+                },
+            )
+            .attached(true),
+            SessionEntry::new(
+                PathBuf::from("/run/cloo/review.sock"),
+                SessionSummary {
+                    name: "review".to_owned(),
+                    tabs: 1,
+                    panes: 1,
+                    clients: 0,
+                    uptime_secs: 8,
+                },
+            ),
+            SessionEntry::new(
+                PathBuf::from("/run/cloo/scratch.sock"),
+                SessionSummary {
+                    name: "scratch".to_owned(),
+                    tabs: 1,
+                    panes: 2,
+                    clients: 2,
+                    uptime_secs: 3,
+                },
+            ),
         ])
     }
 
@@ -1769,7 +1832,7 @@ mod tests {
         overlay.apply(OverlayAction::Next);
         assert_eq!(
             overlay.apply(OverlayAction::Confirm),
-            OverlayOutcome::SwitchSession(SessionId::new(8))
+            OverlayOutcome::SwitchSession(PathBuf::from("/run/cloo/review.sock"))
         );
     }
 
@@ -2596,9 +2659,12 @@ mod tests {
         let mut overlay = sessions();
         overlay.apply(OverlayAction::Next);
         let rows = overlay_cells(&overlay, Size::new(30, 5), theme);
-        assert!(text(&rows[1]).starts_with("  7"), "unselected keeps a gap");
         assert!(
-            text(&rows[2]).starts_with("> 8"),
+            text(&rows[1]).starts_with("  main"),
+            "unselected keeps a gap"
+        );
+        assert!(
+            text(&rows[2]).starts_with("> review"),
             "the cursor is a glyph, so a monochrome terminal loses nothing"
         );
     }
@@ -2608,14 +2674,14 @@ mod tests {
         let theme = Theme::storm();
         let overlay = sessions();
         let full = text(&row_cells(&overlay.row(0, false, theme), 32, theme));
-        assert_eq!(full, "  7 main 3 panes attached       ");
+        assert_eq!(full, "  main attached 2 tabs 3 panes  ");
         // The extras go first, from the end, and only then does the title
-        // truncate — the marker and the session ID are what a row is.
+        // truncate — the marker and daemon-reported name are what a row is.
         for (width, expected) in [
-            (24_u16, "  7 main 3 panes        "),
-            (12, "  7 main    "),
-            (7, "  7 mai"),
-            (5, "  7 m"),
+            (24_u16, "  main attached 2 tabs  "),
+            (12, "  main      "),
+            (7, "  main "),
+            (5, "  mai"),
         ] {
             assert_eq!(
                 text(&row_cells(&overlay.row(0, false, theme), width, theme)),
@@ -2644,12 +2710,12 @@ mod tests {
         let size = Size::new(20, 4);
         assert_eq!(
             text(&overlay_cells(&overlay, size, theme)[1]).trim_end(),
-            "> 7 main 3 panes"
+            "> main attached"
         );
         overlay.apply(OverlayAction::Last);
         let rows = overlay_cells(&overlay, size, theme);
-        assert_eq!(text(&rows[1]).trim_end(), "  8 review 1 panes");
-        assert_eq!(text(&rows[2]).trim_end(), "> 9 scratch 2 panes");
+        assert_eq!(text(&rows[1]).trim_end(), "  review 1 tab");
+        assert_eq!(text(&rows[2]).trim_end(), "> scratch 1 tab");
     }
 
     #[test]

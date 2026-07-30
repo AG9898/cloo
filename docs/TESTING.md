@@ -979,6 +979,21 @@ of ordinary bytes is consumed locally and becomes the query — the fixture that
 search term can reach a pane — Enter hands back the typed `Action`, and confirming a client row
 swaps the palette for that surface without touching the wire.
 
+M9-18 connects the session switcher under names carrying `session_switcher`. `src/attach.rs` feeds
+two `SessionCatalogEntry` values into `LiveState`, asserts the frame draws only their reported names
+and counts with the current socket marked attached, and confirms the other row to its socket path.
+A refresh removing the selected daemon keeps the surface open and clamps selection onto the one
+verified row left. The card-05 visual fixture captures the complete 40x4 switcher in Storm truecolor
+and its 16-color resolution, plus explicit empty and 12-column frames; the golden includes the
+selection glyph, attachment word, all three count nouns, and dismissal hint.
+
+The end-to-end half is `crates/cloo/tests/attach.rs`. Two named daemons bind ordinary sockets under
+one isolated `XDG_RUNTIME_DIR`; a real outer-PTY client opens the switcher on the first, waits for the
+bounded catalog refresh, selects the second, and renders its child without leaving raw mode. A fresh
+attachment to the first daemon then sends `safe` and its child reports exactly `main-got=safe`, which
+is the non-vacuous assertion that neither `j` nor Enter leaked out of the overlay. Prefix detach
+restores the terminal, and both daemon sockets remain connectable afterward.
+
 Typed outer-terminal effects are unit tested in `src/effects.rs`: the policy begins deny-all, a
 permitted title and a capable, permitted OSC 52 store produce their exact terminal bytes once,
 and an unsupported, unsafe, policy-denied, or capability-denied effect leaves the output buffer

@@ -55,6 +55,7 @@ use crate::overlay::{
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
 use crate::resize::ResizeWatch;
+use crate::session_catalog::{SessionCatalogEntry, SessionCatalogError, discover_sessions};
 use crate::theme::{Theme, ThemeToken};
 
 /// The render tick shared with the daemon: roughly 60 frames per second.
@@ -66,6 +67,13 @@ const INPUT_BUF_LEN: usize = 1024;
 /// Pane headers and bottom edges live inside the session's framed allocations,
 /// so they are not subtracted a second time here.
 const FIXED_CHROME_ROWS: u16 = 2;
+/// How often an open session switcher verifies its catalog again.
+const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// A healthy detach acknowledgement should be immediate; dropping the socket
+/// after this bound still removes the old attachment without touching its daemon.
+const SWITCH_DETACH_DEADLINE: Duration = Duration::from_secs(2);
+
+type CatalogResult = Result<Vec<SessionCatalogEntry>, SessionCatalogError>;
 
 /// Everything attaching can refuse to do.
 #[derive(Debug)]
@@ -591,8 +599,8 @@ where
         .enable_time()
         .build()
         .map_err(AttachRunError::Runtime)?;
-    let result = runtime.block_on(live_loop(
-        path,
+    let result = runtime.block_on(run_attachments(
+        path.to_owned(),
         outer_size,
         caps,
         modes,
@@ -608,6 +616,56 @@ where
     Ok(status)
 }
 
+/// Keeps terminal ownership stable while the client moves between daemon
+/// sockets. Input and resize sources are created once, so a switch cannot leave
+/// an old reader consuming keys intended for the new attachment.
+async fn run_attachments<F>(
+    mut path: PathBuf,
+    outer_size: Size,
+    caps: TermCaps,
+    modes: OuterModes,
+    config: Config,
+    mut reload_config: F,
+) -> Result<i32, AttachRunError>
+where
+    F: FnMut() -> Option<Config>,
+{
+    let mut resizes = ResizeWatch::new(outer_size).map_err(AttachRunError::Signal)?;
+    let mut input = spawn_input_reader();
+    let mut attached = attach(&path, session_size(outer_size), caps, None).await?;
+    loop {
+        match live_loop(
+            &path,
+            attached,
+            AttachmentSettings {
+                caps,
+                modes,
+                config: config.clone(),
+            },
+            &mut reload_config,
+            &mut input,
+            &mut resizes,
+        )
+        .await?
+        {
+            LiveOutcome::Exit(status) => return Ok(status),
+            LiveOutcome::Switch {
+                path: next_path,
+                attached: next,
+            } => {
+                path = next_path;
+                attached = next;
+            }
+        }
+    }
+}
+
+struct AttachmentSettings {
+    caps: TermCaps,
+    modes: OuterModes,
+    config: Config,
+}
+
 /// A terminal's usable session area after the frame's fixed chrome rows.
 ///
 /// A client reports the pane area rather than its full outer-terminal height:
@@ -620,18 +678,21 @@ const fn session_size(outer: Size) -> Size {
 /// The async attached-client body, entered only after raw mode is armed.
 async fn live_loop<F>(
     path: &Path,
-    outer_size: Size,
-    caps: TermCaps,
-    modes: OuterModes,
-    config: Config,
-    mut reload_config: F,
-) -> Result<i32, AttachRunError>
+    mut attached: Attached<UnixStream>,
+    settings: AttachmentSettings,
+    reload_config: &mut F,
+    input: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    resizes: &mut ResizeWatch,
+) -> Result<LiveOutcome, AttachRunError>
 where
     F: FnMut() -> Option<Config>,
 {
-    // Install this before attaching, so the one `SIGWINCH` that happens while
-    // the socket handshake is in flight cannot be lost.
-    let mut resizes = ResizeWatch::new(outer_size).map_err(AttachRunError::Signal)?;
+    let AttachmentSettings {
+        caps,
+        modes,
+        config,
+    } = settings;
+    let outer_size = resizes.last();
     // The chrome shows the chord this client actually resolved, so a rebound
     // prefix is discoverable from the first frame rather than only from the
     // configuration file.
@@ -639,7 +700,6 @@ where
     let prefix = keymap.prefix().to_string();
     let profiles = config.profiles().to_vec();
     let visual = *config.visual();
-    let mut attached = attach(path, session_size(outer_size), caps, None).await?;
     let mut state = LiveState::new(
         outer_size,
         attached.session(),
@@ -651,7 +711,6 @@ where
     let mut renderer = Renderer::new(caps);
     let mut out = io::stdout();
     let policy = EffectPolicy::default();
-    let mut input = spawn_input_reader();
     let mut input_open = true;
     let mut decoder = InputDecoder::new(modes);
     let mut keys = KeyRouter::new(keymap);
@@ -662,6 +721,9 @@ where
     let mut phase = None;
     let mut dirty = true;
     let mut detaching = false;
+    let (catalog_tx, mut catalog_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut catalog_refreshing = false;
+    let mut catalog_refreshed = None;
 
     loop {
         let step = tokio::select! {
@@ -671,6 +733,9 @@ where
                 None => Step::InputClosed,
             },
             resized = resizes.changed(), if !detaching => Step::Resized(resized),
+            catalog = catalog_rx.recv(), if catalog_refreshing => {
+                Step::Catalog(catalog.expect("a refresh sender exists while one is running"))
+            },
             _ = frames.tick() => Step::Frame,
         };
 
@@ -683,9 +748,11 @@ where
                 if dirty {
                     draw(&mut out, &mut renderer, &state, phase)?;
                 }
-                return Ok(status);
+                return Ok(LiveOutcome::Exit(status));
             }
-            Step::Server(Some(ServerMessage::Detached)) | Step::Server(None) => return Ok(0),
+            Step::Server(Some(ServerMessage::Detached)) | Step::Server(None) => {
+                return Ok(LiveOutcome::Exit(0));
+            }
             Step::Server(Some(ServerMessage::ConfigReloaded { revision })) => {
                 if state.needs_reload(revision)
                     && state.reload_visual(revision, reload_config().map(|config| *config.visual()))
@@ -712,7 +779,7 @@ where
                     phase = Some(settled);
                 }
                 let overlay_was_open = state.overlay.is_some();
-                if route(
+                match route(
                     &mut attached,
                     &mut state,
                     &mut chrome,
@@ -722,13 +789,42 @@ where
                 )
                 .await?
                 {
-                    detaching = true;
+                    RouteOutcome::Continue => {}
+                    RouteOutcome::Detach => detaching = true,
+                    RouteOutcome::Switch(target) if target == path => {
+                        state.overlay = None;
+                    }
+                    RouteOutcome::Switch(target) => {
+                        match attach(&target, session_size(state.outer_size), caps, None).await {
+                            Ok(next) => {
+                                // The selected daemon has accepted the new
+                                // attachment before the current one is released.
+                                // A disappearing row therefore cannot strand the
+                                // user between sessions.
+                                let _ =
+                                    tokio::time::timeout(SWITCH_DETACH_DEADLINE, attached.detach())
+                                        .await;
+                                return Ok(LiveOutcome::Switch {
+                                    path: target,
+                                    attached: next,
+                                });
+                            }
+                            Err(_) => {
+                                state.remove_session(&target);
+                                catalog_refreshed = None;
+                            }
+                        }
+                    }
                 }
                 state.prefix_pending = keys.is_pending();
                 if overlay_was_open != state.overlay.is_some() {
                     phase = Some(motion.start(MotionKind::Overlay, Instant::now()));
                 }
                 dirty = true;
+                if state.session_switcher_open() && !catalog_refreshing {
+                    start_catalog_refresh(catalog_tx.clone());
+                    catalog_refreshing = true;
+                }
             }
             Step::InputClosed => input_open = false,
             Step::Resized(size) => {
@@ -748,8 +844,11 @@ where
                         phase = Some(settled);
                     }
                     let overlay_was_open = state.overlay.is_some();
-                    if route_keys(&mut attached, &mut keys, &mut state, bytes).await? {
-                        detaching = true;
+                    match route_keys(&mut attached, &mut keys, &mut state, bytes).await? {
+                        RouteOutcome::Continue => {}
+                        RouteOutcome::Detach => detaching = true,
+                        // A lone Escape flush cannot confirm a switcher row.
+                        RouteOutcome::Switch(_) => {}
                     }
                     state.prefix_pending = keys.is_pending();
                     if overlay_was_open != state.overlay.is_some() {
@@ -767,6 +866,14 @@ where
                 // expiry ride the same clock, so a burst of pane output can
                 // never become an animation source.
                 let now = Instant::now();
+                if state.session_switcher_open()
+                    && !catalog_refreshing
+                    && catalog_refreshed
+                        .is_none_or(|last| now.duration_since(last) >= SESSION_REFRESH_INTERVAL)
+                {
+                    start_catalog_refresh(catalog_tx.clone());
+                    catalog_refreshing = true;
+                }
                 dirty |= state.tick_launch(now);
                 dirty |= state.tick_toasts(now);
                 if dirty {
@@ -774,8 +881,25 @@ where
                     dirty = false;
                 }
             }
+            Step::Catalog(result) => {
+                catalog_refreshing = false;
+                catalog_refreshed = Some(Instant::now());
+                if let Ok(entries) = result {
+                    dirty |= state.refresh_sessions(entries, path);
+                }
+            }
         }
     }
+}
+
+/// The live loop either leaves the terminal or hands an already-verified
+/// attachment back to the outer switching loop.
+enum LiveOutcome {
+    Exit(i32),
+    Switch {
+        path: PathBuf,
+        attached: Attached<UnixStream>,
+    },
 }
 
 /// One selected branch of the live loop.
@@ -790,6 +914,14 @@ enum Step {
     Resized(Size),
     /// The render clock advanced.
     Frame,
+    /// One bounded, version-verified local catalog refresh completed.
+    Catalog(CatalogResult),
+}
+
+fn start_catalog_refresh(tx: tokio::sync::mpsc::UnboundedSender<CatalogResult>) {
+    tokio::spawn(async move {
+        let _ = tx.send(discover_sessions().await);
+    });
 }
 
 /// The client-owned projection of the server's latest frame.
@@ -825,6 +957,9 @@ struct LiveState {
     /// The profiles this client's launcher can offer. Client-visible only: the
     /// daemon still resolves every identifier against its own table.
     profiles: Vec<Profile>,
+    /// Independently inspected local sessions. Socket paths are retained only
+    /// as typed switch targets; filenames never become display identity.
+    sessions: Vec<SessionEntry>,
     /// The launch this client is still waiting on, or the refusal it is showing.
     launch: Option<LaunchNotice>,
     /// The fully validated visual preferences this client resolved locally.
@@ -861,6 +996,7 @@ impl LiveState {
             prefix,
             prefix_pending: false,
             profiles: Vec::new(),
+            sessions: Vec::new(),
             launch: None,
             visual: VisualConfig::defaults(),
             theme: Theme::new(VisualConfig::defaults().theme, TermCaps::default()),
@@ -934,6 +1070,40 @@ impl LiveState {
     fn profiles(mut self, profiles: Vec<Profile>) -> Self {
         self.profiles = profiles;
         self
+    }
+
+    /// Replaces the verified catalog and refreshes an open switcher by socket,
+    /// preserving its selected daemon when that daemon is still live.
+    fn refresh_sessions(&mut self, entries: Vec<SessionCatalogEntry>, current: &Path) -> bool {
+        let next = entries
+            .into_iter()
+            .map(|entry| {
+                let attached = entry.socket == current;
+                SessionEntry::new(entry.socket, entry.summary).attached(attached)
+            })
+            .collect::<Vec<_>>();
+        if self.sessions == next {
+            return false;
+        }
+        self.sessions = next;
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.refresh_sessions(self.sessions.clone());
+        }
+        true
+    }
+
+    /// Removes a switch target whose attach raced its disappearance.
+    fn remove_session(&mut self, socket: &Path) {
+        self.sessions.retain(|entry| entry.socket() != socket);
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.refresh_sessions(self.sessions.clone());
+        }
+    }
+
+    fn session_switcher_open(&self) -> bool {
+        self.overlay
+            .as_ref()
+            .is_some_and(|overlay| matches!(overlay.kind(), OverlayKind::Sessions(_)))
     }
 
     /// The status row's prefix field for the frame about to be drawn.
@@ -1370,8 +1540,8 @@ impl LiveState {
     /// Starts a client-local overlay after an otherwise unbound prefix chord.
     ///
     /// These shortcuts never cross the wire. The help surface is read from the
-    /// very keymap the router resolved this chord with, the session switcher can
-    /// honestly list only the session this daemon exposed, pane details are
+    /// very keymap the router resolved this chord with, the session switcher
+    /// lists only independently inspected local daemons, pane details are
     /// built solely from the server metadata and attention already cached
     /// locally, and the launcher offers only the configured profiles this client
     /// resolved. A chord only reaches here when the keymap left it unbound, which
@@ -1396,16 +1566,14 @@ impl LiveState {
     ///
     /// The one place a [`ClientSurface`] becomes an overlay, so a chord and a
     /// confirmed palette row reach exactly the same surface: the session
-    /// switcher can honestly list only the session this daemon exposed, pane
+    /// switcher lists only independently inspected local daemons, pane
     /// details are built solely from server metadata and attention already
     /// cached locally, and the launcher offers only the configured profiles
     /// this client resolved.
     fn surface(&self, surface: ClientSurface) -> Option<Overlay> {
         match surface {
             ClientSurface::Launcher => Some(Overlay::launcher(&self.profiles)),
-            ClientSurface::Sessions => Some(Overlay::sessions(vec![
-                SessionEntry::new(self.session, "current", self.areas.len()).attached(true),
-            ])),
+            ClientSurface::Sessions => Some(Overlay::sessions(self.sessions.clone())),
             ClientSurface::Attention => Some(Overlay::attention(self.attention_entries())),
             // The only surface that can fail to open: with no focused pane
             // there is nothing to describe, and a blank details box would be a
@@ -1444,10 +1612,11 @@ impl LiveState {
         };
         match outcome {
             OverlayOutcome::Open => OverlayKeys::Consumed,
-            OverlayOutcome::Dismissed | OverlayOutcome::SwitchSession(_) => {
+            OverlayOutcome::Dismissed => {
                 self.overlay = None;
                 OverlayKeys::Consumed
             }
+            OverlayOutcome::SwitchSession(socket) => OverlayKeys::SwitchSession(socket),
             OverlayOutcome::Launch(request) => {
                 self.overlay = None;
                 OverlayKeys::Launch(request)
@@ -1600,6 +1769,8 @@ enum OverlayKeys {
     Launch(LaunchRequest),
     /// The overlay produced one typed session action to send.
     Command(Action),
+    /// The switcher confirmed one independently verified daemon socket.
+    SwitchSession(PathBuf),
 }
 
 #[cfg(test)]
@@ -1658,11 +1829,15 @@ async fn route(
     keys: &mut KeyRouter,
     decoder: &mut InputDecoder,
     bytes: Vec<u8>,
-) -> Result<bool, AttachRunError> {
-    let mut detach = false;
+) -> Result<RouteOutcome, AttachRunError> {
     for event in decoder.feed(&bytes) {
         match event {
-            InputEvent::Keys(bytes) => detach |= route_keys(attached, keys, state, bytes).await?,
+            InputEvent::Keys(bytes) => {
+                let outcome = route_keys(attached, keys, state, bytes).await?;
+                if !matches!(outcome, RouteOutcome::Continue) {
+                    return Ok(outcome);
+                }
+            }
             InputEvent::Paste(text) => {
                 attached.send_paste(text).await.map_err(AttachError::from)?
             }
@@ -1685,19 +1860,22 @@ async fn route(
                     }
                     MouseRoute::Chrome(target) => {
                         if let Some(action) = chrome.feed(&state.screen, target, &report) {
-                            detach |= apply_chrome(
+                            if apply_chrome(
                                 attached,
                                 action,
                                 state.copy_mode.as_ref().map(|copy_mode| copy_mode.pane),
                             )
-                            .await?;
+                            .await?
+                            {
+                                return Ok(RouteOutcome::Detach);
+                            }
                         }
                     }
                 }
             }
         }
     }
-    Ok(detach)
+    Ok(RouteOutcome::Continue)
 }
 
 /// Resolves prefix chords and sends the resulting application bytes or actions.
@@ -1706,7 +1884,7 @@ async fn route_keys(
     keys: &mut KeyRouter,
     state: &mut LiveState,
     bytes: Vec<u8>,
-) -> Result<bool, AttachRunError> {
+) -> Result<RouteOutcome, AttachRunError> {
     if state.overlay.is_some() {
         keys.reset();
         // Everything that leaves the client from an overlay is typed: a profile
@@ -1731,14 +1909,18 @@ async fn route_keys(
                     .send_command(action)
                     .await
                     .map_err(AttachError::from)?;
-                return Ok(detach);
+                return Ok(if detach {
+                    RouteOutcome::Detach
+                } else {
+                    RouteOutcome::Continue
+                });
             }
+            OverlayKeys::SwitchSession(socket) => return Ok(RouteOutcome::Switch(socket)),
             OverlayKeys::Ignored | OverlayKeys::Consumed => {}
         }
-        return Ok(false);
+        return Ok(RouteOutcome::Continue);
     }
 
-    let mut detach = false;
     for route in keys.feed(&bytes) {
         match route {
             KeyRoute::Pane(bytes) => attached
@@ -1750,7 +1932,7 @@ async fn route_keys(
                     .send_command(Action::DetachClient)
                     .await
                     .map_err(AttachError::from)?;
-                detach = true;
+                return Ok(RouteOutcome::Detach);
             }
             KeyRoute::Command(action) => attached
                 .send_command(action)
@@ -1762,7 +1944,14 @@ async fn route_keys(
             KeyRoute::Pending => {}
         }
     }
-    Ok(detach)
+    Ok(RouteOutcome::Continue)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RouteOutcome {
+    Continue,
+    Detach,
+    Switch(PathBuf),
 }
 
 /// Sends chrome gestures through the same command vocabulary as the keyboard.
@@ -2512,13 +2701,16 @@ mod tests {
         );
 
         let frame = state.frame();
-        assert!(frame.spans.iter().any(|span| {
-            span.cells
-                .iter()
-                .map(|cell| cell.ch)
-                .collect::<String>()
-                .starts_with("  sessions 1/1")
-        }));
+        assert!(
+            frame.spans.iter().any(|span| {
+                span.cells
+                    .iter()
+                    .map(|cell| cell.ch)
+                    .collect::<String>()
+                    .starts_with("  sessions")
+            }),
+            "the switcher opens without inventing a current-session row"
+        );
         assert!(
             frame.chrome.iter().rev().take(3).all(|chrome| *chrome),
             "the overlay is client chrome, never a pane span"
@@ -2666,6 +2858,75 @@ mod tests {
             ),
             "a client surface never reaches the wire"
         );
+    }
+
+    fn catalog_entry(
+        path: &str,
+        name: &str,
+        tabs: u16,
+        panes: u16,
+        clients: u16,
+    ) -> SessionCatalogEntry {
+        SessionCatalogEntry {
+            socket: PathBuf::from(path),
+            summary: SessionSummary {
+                name: name.to_owned(),
+                tabs,
+                panes,
+                clients,
+                uptime_secs: 10,
+            },
+        }
+    }
+
+    #[test]
+    fn session_switcher_uses_verified_catalog_and_returns_the_selected_socket() {
+        let current = Path::new("/run/cloo/main.sock");
+        let mut state = overlay_state(10, "C-b");
+        assert!(state.refresh_sessions(
+            vec![
+                catalog_entry("/run/cloo/main.sock", "main", 2, 3, 1),
+                catalog_entry("/run/cloo/review.sock", "review", 1, 1, 0),
+            ],
+            current,
+        ));
+        assert!(state.open_overlay(b"s", &Keymap::defaults()));
+
+        let drawn = frame_text(&state);
+        for truthful in ["main attached", "2 tabs", "3 panes", "review"] {
+            assert!(
+                drawn.iter().any(|row| row.contains(truthful)),
+                "the verified catalog must draw {truthful:?}: {drawn:?}"
+            );
+        }
+        assert!(state.apply_overlay_keys(b"j").consumed());
+        assert_eq!(
+            state.apply_overlay_keys(b"\r"),
+            OverlayKeys::SwitchSession(PathBuf::from("/run/cloo/review.sock"))
+        );
+        assert!(
+            state.overlay.is_some(),
+            "the current attachment keeps the switcher until the target accepts"
+        );
+    }
+
+    #[test]
+    fn session_switcher_refresh_drops_a_disappeared_daemon_and_keeps_a_live_selection() {
+        let current = Path::new("/run/cloo/main.sock");
+        let main = catalog_entry("/run/cloo/main.sock", "main", 1, 1, 1);
+        let review = catalog_entry("/run/cloo/review.sock", "review", 1, 1, 0);
+        let mut state = overlay_state(10, "C-b");
+        state.refresh_sessions(vec![main.clone(), review], current);
+        assert!(state.open_overlay(b"s", &Keymap::defaults()));
+        assert!(state.apply_overlay_keys(b"j").consumed());
+
+        assert!(state.refresh_sessions(vec![main], current));
+        let Some(OverlayKind::Sessions(entries)) = state.overlay.as_ref().map(Overlay::kind) else {
+            panic!("the switcher stays open while its catalog refreshes");
+        };
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].socket(), current);
+        assert_eq!(state.overlay.as_ref().map(Overlay::selection), Some(0));
     }
 
     /// The launcher is the client's own surface over the client's own profile

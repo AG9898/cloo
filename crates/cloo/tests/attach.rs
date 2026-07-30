@@ -216,6 +216,30 @@ fn spawn_attached_on(tty: &Tty, socket: &Path) -> std::process::Child {
         .expect("the cloo binary is built before its integration tests")
 }
 
+/// Runs the binary against ordinary named-session discovery rather than a
+/// `CLOO_SOCKET` override, which intentionally exposes only one endpoint.
+fn spawn_named_attached_on(tty: &Tty, runtime: &Path, session: &str) -> std::process::Child {
+    let stdio = || {
+        Stdio::from(
+            tty.slave
+                .try_clone()
+                .expect("the slave descriptor can be duplicated"),
+        )
+    };
+    Command::new(env!("CARGO_BIN_EXE_cloo"))
+        .arg("attach")
+        .arg(session)
+        .stdin(stdio())
+        .stdout(stdio())
+        .stderr(stdio())
+        .env("XDG_RUNTIME_DIR", runtime)
+        .env_remove("CLOO_SOCKET")
+        .env("TERM", "xterm-256color")
+        .env_remove("COLORTERM")
+        .spawn()
+        .expect("the cloo binary is built before its integration tests")
+}
+
 /// A daemon running in the background for the synchronous command test.
 ///
 /// Its stop channel is important: a daemon remains available after its child
@@ -252,6 +276,14 @@ impl Drop for ThreadDaemon {
 /// Runs a daemon in its own runtime so a blocking pty read in this synchronous
 /// binary test cannot prevent it from accepting or publishing damage.
 fn spawn_daemon_thread(socket: PathBuf, script: &'static str) -> ThreadDaemon {
+    spawn_named_daemon_thread(socket, "", script)
+}
+
+fn spawn_named_daemon_thread(
+    socket: PathBuf,
+    name: &'static str,
+    script: &'static str,
+) -> ThreadDaemon {
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let thread = std::thread::spawn(move || {
@@ -262,8 +294,9 @@ fn spawn_daemon_thread(socket: PathBuf, script: &'static str) -> ThreadDaemon {
             .expect("the daemon runtime builds");
         runtime.block_on(async move {
             let listener = Listener::bind(&socket).expect("a fresh socket must bind");
-            let mut daemon =
-                Daemon::new(listener, &base(), scripted(script)).expect("the daemon starts");
+            let mut daemon = Daemon::new(listener, &base(), scripted(script))
+                .expect("the daemon starts")
+                .with_session_name(name);
             ready_tx.send(()).expect("the test waits for the daemon");
             tokio::select! {
                 result = daemon.run() => {
@@ -939,6 +972,89 @@ async fn session_catalog_socket_override_is_one_verified_candidate() {
             .expect("the daemon task does not panic")
             .expect("the daemon stays healthy");
     }
+}
+
+#[test]
+fn session_switcher_moves_the_live_client_without_leaking_keys_or_killing_daemons() {
+    let dir = TempDir::new("session-switcher-live");
+    let runtime = dir.0.join("runtime");
+    let socket_dir = runtime.join("cloo");
+    let main_socket = socket_dir.join("main.sock");
+    let review_socket = socket_dir.join("review.sock");
+    let main = spawn_named_daemon_thread(
+        main_socket.clone(),
+        "main",
+        r#"printf main-session; IFS= read -r line; printf '\nmain-got=%s\n' "$line"; read _"#,
+    );
+    let review = spawn_named_daemon_thread(
+        review_socket.clone(),
+        "review",
+        "printf review-session; read _",
+    );
+    let tty = open_tty();
+    let mut process = spawn_named_attached_on(&tty, &runtime, "main");
+    read_until(&tty.master, "main-session")
+        .unwrap_or_else(|seen| panic!("the initial session never rendered; saw:\n{seen}"));
+
+    let mut master = unsafe {
+        // SAFETY: `tty.master` outlives this wrapper, which never closes it.
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(tty.master.as_raw_fd()))
+    };
+    master
+        .write_all(b"\x02s")
+        .expect("the session shortcut reaches the client");
+    read_until(&tty.master, "review")
+        .unwrap_or_else(|seen| panic!("the verified catalog never rendered; saw:\n{seen}"));
+    master
+        .write_all(b"j")
+        .expect("the switcher navigation reaches the client");
+    // Wait for the selected-row redraw before confirming, so separate terminal
+    // writes cannot coalesce into one overlay chord in the fixture.
+    read_until(&tty.master, "review")
+        .unwrap_or_else(|seen| panic!("the selected catalog row never rendered; saw:\n{seen}"));
+    master
+        .write_all(b"\r")
+        .expect("the switch confirmation reaches the client");
+    read_until(&tty.master, "review-session")
+        .unwrap_or_else(|seen| panic!("the selected session never rendered; saw:\n{seen}"));
+    assert!(is_raw(&tty.slave), "switching keeps one raw-mode owner");
+
+    // The old daemon is still live, and its child receives the first actual
+    // pane input after the switch rather than the switcher's `j` or Enter.
+    let runtime_check = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the verification runtime builds");
+    runtime_check.block_on(async {
+        let mut old = client(&main_socket).await;
+        old.send_input(b"safe\n".to_vec())
+            .await
+            .expect("the old session remains writable");
+        await_text(&mut old, "main-got=safe").await;
+        old.detach()
+            .await
+            .expect("the verification client detaches");
+    });
+
+    master
+        .write_all(b"\x02d")
+        .expect("the selected session detaches normally");
+    assert!(wait_for_exit(&mut process).success());
+    assert!(
+        !is_raw(&tty.slave),
+        "the switched client restores the terminal"
+    );
+    assert!(
+        std::os::unix::net::UnixStream::connect(&main_socket).is_ok(),
+        "switching never kills the old daemon"
+    );
+    assert!(
+        std::os::unix::net::UnixStream::connect(&review_socket).is_ok(),
+        "detaching never kills the selected daemon"
+    );
+    main.stop();
+    review.stop();
 }
 
 #[test]

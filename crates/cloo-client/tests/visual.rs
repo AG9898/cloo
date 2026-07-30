@@ -20,10 +20,12 @@ mod harness;
 mod scenes;
 
 use cloo_client::chrome::{PaneChrome, PrefixHint};
+use cloo_client::overlay::{Overlay, SessionEntry, overlay_spans};
 use cloo_client::renderer::Span;
 use cloo_client::theme::{Theme, ThemeToken};
 use cloo_core::{ThemeChoice, ThemeName};
-use cloo_proto::{Cell, CellAttrs, Color, PaneId, Point, Size, TermCaps};
+use cloo_proto::{Cell, CellAttrs, Color, PaneId, Point, SessionSummary, Size, TermCaps};
+use std::path::PathBuf;
 
 use harness::{ExpectedFrame, FrameMatrix, Paint, SemanticStyle, assert_frame, check_frame};
 use scenes::{Scene, ScenePane};
@@ -288,6 +290,113 @@ fn the_one_pane_workspace_matches_the_same_golden_in_sixteen_colors() {
     );
     let scene = workspace();
     assert_frame(&scene.frame(theme), &workspace_golden(), theme);
+}
+
+// ---------------------------------------------------------------------------
+// Card 05 — the real session switcher
+// ---------------------------------------------------------------------------
+
+fn session_switcher() -> Overlay {
+    let entry = |socket: &str, name: &str, tabs, panes, clients| {
+        SessionEntry::new(
+            PathBuf::from(socket),
+            SessionSummary {
+                name: name.to_owned(),
+                tabs,
+                panes,
+                clients,
+                uptime_secs: 12,
+            },
+        )
+    };
+    Overlay::sessions(vec![
+        entry("/run/cloo/main.sock", "main", 2, 3, 1).attached(true),
+        entry("/run/cloo/review.sock", "review", 1, 1, 0),
+    ])
+}
+
+fn session_switcher_golden() -> ExpectedFrame {
+    let raised = Paint::Token(ThemeToken::RaisedSurface);
+    let mut selected = "AAAAAAmSSSSSSSS".to_owned();
+    selected.push_str(&"m".repeat(24));
+    selected.push('d');
+    ExpectedFrame::new()
+        .style(
+            'A',
+            SemanticStyle::new(Paint::Token(ThemeToken::Accent), raised).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'P',
+            SemanticStyle::new(Paint::Token(ThemeToken::Primary), raised).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'S',
+            SemanticStyle::new(Paint::Token(ThemeToken::Success), raised),
+        )
+        .style(
+            'm',
+            SemanticStyle::new(Paint::Token(ThemeToken::Muted), raised),
+        )
+        .style(
+            'r',
+            SemanticStyle::new(Paint::Token(ThemeToken::Border), raised),
+        )
+        .style(
+            'd',
+            SemanticStyle::new(Paint::Token(ThemeToken::DefaultText), raised),
+        )
+        .row(
+            "  sessions 1/2                          ",
+            "rrAAAAAAAAmmmmdddddddddddddddddddddddddd",
+        )
+        .row("> main attached 2 tabs 3 panes 1 client ", &selected)
+        .row(
+            "  review 1 tab 1 pane 0 clients         ",
+            "rrPPPPPPmmmmmmmmmmmmmmmmmmmmmmmddddddddd",
+        )
+        .row(
+            "  esc close enter switch j/k move       ",
+            "rrmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmddddddd",
+        )
+}
+
+#[test]
+fn session_switcher_card_matches_truecolor_and_sixteen_color_goldens() {
+    let overlay = session_switcher();
+    let size = Size::new(40, 4);
+    for theme in [Theme::storm(), sixteen_color(ThemeName::Storm)] {
+        let frame = FrameMatrix::capture(
+            size,
+            &overlay_spans(Point::new(0, 0), &overlay, size, theme),
+        );
+        assert_frame(&frame, &session_switcher_golden(), theme);
+    }
+}
+
+#[test]
+fn session_switcher_card_has_legible_empty_and_narrow_frames() {
+    let theme = Theme::storm();
+    let empty = Overlay::sessions(Vec::new());
+    let empty = FrameMatrix::capture(
+        Size::new(30, 3),
+        &overlay_spans(Point::new(0, 0), &empty, Size::new(30, 3), theme),
+    );
+    assert_eq!(empty.text_row(0).trim_end(), "  sessions");
+    assert!(empty.text_row(1).trim().is_empty());
+    assert!(empty.text_row(2).contains("esc close"));
+
+    let narrow = FrameMatrix::capture(
+        Size::new(12, 3),
+        &overlay_spans(
+            Point::new(0, 0),
+            &session_switcher(),
+            Size::new(12, 3),
+            theme,
+        ),
+    );
+    assert_eq!(narrow.text_row(0), "  sessions  ");
+    assert_eq!(narrow.text_row(1), "> main      ");
+    assert_eq!(narrow.text_row(2), "  esc close ");
 }
 
 #[test]

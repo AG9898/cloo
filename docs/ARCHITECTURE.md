@@ -639,6 +639,29 @@ The palette also draws a third chrome row — the `/` query line between the tit
 yields before the title and the hints do, and a query matching nothing replaces the title's position
 counter with `no matches` rather than leaving a blank box.
 
+##### The session switcher (M9-18)
+
+The switcher is `OverlayKind::Sessions`, but its identity is a verified socket path rather than a
+`SessionId`: daemon-local IDs are not names in the catalog and are not meaningful across two daemon
+processes. `SessionEntry` pairs that typed switch target with the `SessionSummary` returned by its
+inspection. The row draws the reported name and tab/pane/client counts, and marks the entry whose
+socket is the current attachment; no filename or current-grid fallback can construct a row.
+
+Opening the surface starts `session_catalog::discover_sessions` on a client task. An open surface is
+refreshed at a one-second cadence, while discovery keeps M9-09's concurrent per-candidate 500ms
+deadline. `Overlay::refresh_sessions` anchors selection by socket, clamps after a disappearance, and
+leaves a failed catalog refresh at the preceding verified answer. Input and `SIGWINCH` receivers are
+owned outside the per-attachment loop, so changing sockets cannot leave an old stdin thread stealing
+keys or lose the latest outer-terminal size.
+
+Confirmation is a two-attachment handoff. The client performs the selected socket's normal attach
+and version handshake while its current attachment is still healthy; only a successful target is
+allowed to consume the current `Attached` through its ordinary detach path. The already-attached
+target then becomes the next live loop under the same raw-mode guard and outer reporting modes. If
+the target vanished after inspection, its row is removed and the current switcher stays open. The
+handoff therefore neither strands the terminal between sessions nor sends a switcher key to a child,
+and dropping either client connection never kills either daemon.
+
 Two properties are types rather than rules. A `LaunchRequest` carries a `ProfileId` and has no
 constructor but confirming a launcher row, and a launcher row has no constructor but a validated
 `cloo_core::Profile` — so a launch cannot name anything the configuration did not define, and
@@ -1234,10 +1257,10 @@ The inspection connection sends no size or capabilities, enters no client table 
 subscription, and rejects attach, damage, or other replies without interpreting them as catalog
 data.
 
-There is still one daemon per session and no new global authority. The session switcher composes
-the independently verified summaries client-side and attaches through the selected session's
-ordinary socket. Inspection creates no client attachment, does not resize a session, and exposes
-no child transcript.
+There is still one daemon per session and no new global authority. As of M9-18 the live session
+switcher composes those independently verified summaries client-side, refreshes them while open,
+and attaches through a selected session's ordinary socket before releasing the current attachment.
+Inspection creates no client attachment, does not resize a session, and exposes no child transcript.
 
 The clock, effective prefix, selected theme, overlay query/selection, and optional repository label
 are client-local. Repository information may be derived asynchronously from the focused pane's
