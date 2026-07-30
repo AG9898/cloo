@@ -1641,9 +1641,12 @@ impl LiveState {
             }
         }
         let hint = self.prefix_hint();
-        let mut status_bar = StatusBar::new(&self.tabs, &self.queue, &hint);
+        let mut status_bar =
+            StatusBar::new(&self.tabs, &self.queue, &hint).mode(self.visual.status);
         if let Some(status) = &self.status {
-            status_bar = status_bar.clients(status.clients);
+            status_bar = status_bar
+                .clients(status.clients)
+                .effective_size(status.effective_size);
             if !status.name.is_empty() {
                 status_bar = status_bar.session(&status.name);
             }
@@ -4231,6 +4234,56 @@ mod tests {
         assert!(!state.chrome_options().dim_unfocused);
         assert_eq!(state.motion_settings(), MotionSettings::reduced());
         assert_eq!(state.config_revision, 7);
+    }
+
+    #[test]
+    fn powerline_preference_switch_changes_only_the_live_status_chrome() {
+        let mut state = overlay_state(8, "C-b").preferences(
+            TermCaps {
+                truecolor: true,
+                ..TermCaps::default()
+            },
+            VisualConfig::defaults(),
+        );
+        state
+            .apply(ServerMessage::WorkspaceStatus(WorkspaceStatus {
+                name: "main".to_owned(),
+                clients: 2,
+                effective_size: Size::new(80, 22),
+            }))
+            .expect("workspace status applies");
+        let status_text = |state: &LiveState| {
+            let row = state.outer_size.rows.saturating_sub(1);
+            state
+                .spans()
+                .into_iter()
+                .find(|span| span.at == Point::new(0, row) && span.cells.len() == 40)
+                .map(|span| span.cells.iter().map(|cell| cell.ch).collect::<String>())
+                .expect("the frame has one complete status row")
+        };
+        let grids = state.grids.clone();
+        let panes = state.panes.clone();
+        let minimal = status_text(&state);
+        assert!(!minimal.contains("NORMAL") && !minimal.contains('\u{e0b0}'));
+
+        assert!(state.reload_visual(
+            1,
+            Some(VisualConfig {
+                status: cloo_core::StatusMode::Powerline,
+                ..VisualConfig::defaults()
+            }),
+        ));
+        let powerline = status_text(&state);
+        assert!(powerline.contains("NORMAL"), "{powerline:?}");
+        assert!(powerline.contains('\u{e0b0}'), "{powerline:?}");
+        assert_eq!(
+            state.grids, grids,
+            "a status preference never touches grids"
+        );
+        assert_eq!(
+            state.panes, panes,
+            "a status preference never touches pane identity"
+        );
     }
 
     #[test]

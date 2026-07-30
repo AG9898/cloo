@@ -1239,7 +1239,9 @@ from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake
   so each keeps its provenance. A field the daemon has not published is absent from the bar and
   therefore omitted from the row. M9-13 makes the minimal status row a second consumer: the
   logical name and client count enter `chrome::StatusBar` directly, and the internal numeric
-  `SessionId` is no longer presented as though it were the display name.
+  `SessionId` is no longer presented as though it were the display name. M9-14 supplies that same
+  status value with `effective_size` and the client-local presentation preference; powerline can
+  render the daemon answer, while changing variants mutates no server projection or pane cache.
 - `SessionSummary { name, tabs: u16, panes: u16, clients: u16, uptime_secs: u64 }` is a read-only
   inspection response. `ClientMessage::InspectSession { protocol_version }` is the request: a first
   frame in its own right, carrying its own version and neither a size nor capabilities, because the
@@ -1286,7 +1288,10 @@ grid or transcript, and neither value crosses the wire or enters session state. 
 cached values into the pure frame composer, which formats no value it was not handed and performs
 no I/O. The resulting minimal row resolves every semantic segment through this client's theme and
 yields clock, client/repository detail, inactive tabs, and titles before its required markers.
-Tabs, pane metadata, attention, client counts, and effective sizing remain server projections.
+M9-14's powerline variant is a second composition over that same model: it prefers repository data
+when present and otherwise uses attention, consumes the projected effective size, and can replace
+its private-use separators with flat background boundaries without changing any field. Tabs, pane
+metadata, attention, client counts, and effective sizing remain server projections.
 No status segment may display placeholder data as though it were authoritative.
 
 Visual preferences remain client-local even though the foreground/background daemon is the process

@@ -34,6 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
+use cloo_core::StatusMode;
 use cloo_proto::{Cell, CellAttrs, Color, Direction, Point, Size, TabSummary};
 
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
@@ -1293,7 +1294,7 @@ impl Default for PrefixHint {
     }
 }
 
-/// The truthful values available to the minimal status row.
+/// The truthful values available to either status-row composition.
 ///
 /// Server projections (`session`, `tabs`, `clients`, and `queue`) stay distinct
 /// from client-local values (`repository`, `clock`, and `hint`) until the final
@@ -1306,8 +1307,11 @@ pub struct StatusBar<'a> {
     hint: &'a PrefixHint,
     session: Option<&'a str>,
     clients: Option<u16>,
+    effective_size: Option<Size>,
     repository: Option<&'a RepositoryStatus>,
     clock: Option<&'a str>,
+    mode: StatusMode,
+    powerline_separators: bool,
 }
 
 impl<'a> StatusBar<'a> {
@@ -1324,8 +1328,11 @@ impl<'a> StatusBar<'a> {
             hint,
             session: None,
             clients: None,
+            effective_size: None,
             repository: None,
             clock: None,
+            mode: StatusMode::Minimal,
+            powerline_separators: false,
         }
     }
 
@@ -1343,6 +1350,13 @@ impl<'a> StatusBar<'a> {
         self
     }
 
+    /// Supplies the daemon-projected effective minimum terminal size.
+    #[must_use]
+    pub const fn effective_size(mut self, size: Size) -> Self {
+        self.effective_size = Some(size);
+        self
+    }
+
     /// Supplies the focused pane's bounded client-local repository answer.
     #[must_use]
     pub const fn repository(mut self, repository: &'a RepositoryStatus) -> Self {
@@ -1356,19 +1370,50 @@ impl<'a> StatusBar<'a> {
         self.clock = Some(clock);
         self
     }
+
+    /// Selects the client-local status composition.
+    ///
+    /// Powerline is an explicit opt-in, so selecting it also opts into its font
+    /// separator. A caller that knows the glyph is unavailable can retain the
+    /// composition and request flat boundaries with
+    /// [`Self::powerline_separators`].
+    #[must_use]
+    pub const fn mode(mut self, mode: StatusMode) -> Self {
+        self.mode = mode;
+        self.powerline_separators = matches!(mode, StatusMode::Powerline);
+        self
+    }
+
+    /// Enables or disables the optional powerline separator glyph.
+    ///
+    /// Disabling it changes only the boundary cells. Fields, their order, and
+    /// their semantic backgrounds remain the same.
+    #[must_use]
+    pub const fn powerline_separators(mut self, supported: bool) -> Self {
+        self.powerline_separators = supported;
+        self
+    }
 }
 
-/// Builds the always-on high-fidelity minimal status row, exactly `width` cells
+/// Builds the configured always-on status composition, exactly `width` cells
 /// wide.
 ///
 /// The reference form is a flat sequence of styled segments: logical session,
 /// ordered tabs, attention, then right-aligned repository/client detail,
 /// prefix, and clock. Width first spends first-attach guidance, then removes
 /// clock, client and repository detail, inactive tabs, and tab/session titles.
-/// Required session, active-tab, attention, and prefix markers remain as the
-/// compact ASCII `s>!b` form at the physical limit.
+/// In minimal mode, required session, active-tab, attention, and prefix markers
+/// remain as the compact ASCII `s>!b` form at the physical limit. Powerline's
+/// corresponding rules are documented by [`StatusBar::mode`].
 #[must_use]
 pub fn status_bar_cells(bar: StatusBar<'_>, width: u16, options: ChromeOptions) -> Vec<Cell> {
+    match bar.mode {
+        StatusMode::Minimal => minimal_status_bar_cells(bar, width, options),
+        StatusMode::Powerline => powerline_status_bar_cells(bar, width, options),
+    }
+}
+
+fn minimal_status_bar_cells(bar: StatusBar<'_>, width: u16, options: ChromeOptions) -> Vec<Cell> {
     let width = usize::from(width);
     if width == 0 {
         return Vec::new();
@@ -1484,6 +1529,294 @@ pub fn status_bar_cells(bar: StatusBar<'_>, width: u16, options: ChromeOptions) 
     cells.truncate(width);
     pad_status_row(&mut cells, width);
     options.theme.map_storm_cells(cells)
+}
+
+/// Builds the opt-in powerline composition from the same [`StatusBar`] values.
+///
+/// The wide form is mode, logical session, active tab, repository (or attention
+/// when no repository answer exists), client/effective-size detail, and clock.
+/// It spends width in that reverse order before reducing the data-bearing left
+/// fields. At the physical limit one ASCII marker per left field remains.
+fn powerline_status_bar_cells(bar: StatusBar<'_>, width: u16, options: ChromeOptions) -> Vec<Cell> {
+    let width = usize::from(width);
+    if width == 0 {
+        return Vec::new();
+    }
+
+    let mode_full = status_segment("NORMAL", SURFACE, ACCENT, CellAttrs::BOLD);
+    let mode_mark = powerline_segment(text_cells("N", SURFACE, CellAttrs::BOLD), ACCENT);
+    let session_full = bar.session.filter(|name| !name.is_empty()).map_or_else(
+        || status_segment("s", PRIMARY, BORDER, CellAttrs::BOLD),
+        |name| status_segment(&format!("s {name}"), PRIMARY, BORDER, CellAttrs::BOLD),
+    );
+    let session_mark = powerline_segment(text_cells("s", PRIMARY, CellAttrs::BOLD), BORDER);
+
+    let active = bar.tabs.iter().position(|tab| tab.active).unwrap_or(0);
+    let tab_full = powerline_segment(
+        status_tab_cells(bar.tabs.get(active), active + 1, true),
+        RAISED_SURFACE,
+    );
+    let tab_short = powerline_segment(
+        status_tab_cells(bar.tabs.get(active), active + 1, false),
+        RAISED_SURFACE,
+    );
+    let tab_mark = powerline_segment(text_cells(">", ACCENT, CellAttrs::BOLD), RAISED_SURFACE);
+
+    let (detail_full, detail_short, detail_mark) = if let Some(repository) = bar.repository {
+        let mut short = Vec::new();
+        push_str(&mut short, "git", SUCCESS, CellAttrs::BOLD);
+        if repository.changes > 0 {
+            push_str(
+                &mut short,
+                &format!(" +{}", repository.changes),
+                WARNING,
+                CellAttrs::NONE,
+            );
+        }
+        (
+            powerline_segment(repository_cells(repository), SURFACE),
+            powerline_segment(short, SURFACE),
+            powerline_segment(text_cells("g", SUCCESS, CellAttrs::BOLD), SURFACE),
+        )
+    } else {
+        (
+            powerline_segment(
+                status_segment_cells(status_attention_cells(bar.queue)),
+                SURFACE,
+            ),
+            powerline_segment(
+                text_cells(
+                    &format!("{}!", bar.queue.count()),
+                    if bar.queue.is_empty() { MUTED } else { WARNING },
+                    CellAttrs::BOLD,
+                ),
+                SURFACE,
+            ),
+            powerline_segment(text_cells("!", WARNING, CellAttrs::BOLD), SURFACE),
+        )
+    };
+
+    let client_full = powerline_client_cells(bar.clients, bar.effective_size, false);
+    let client_short = powerline_client_cells(bar.clients, bar.effective_size, true);
+    let clock = bar
+        .clock
+        .filter(|clock| !clock.is_empty())
+        .map(|clock| status_segment(clock, SURFACE, ACCENT, CellAttrs::BOLD));
+
+    let forms = [
+        (
+            &mode_full,
+            &session_full,
+            &tab_full,
+            &detail_full,
+            client_full.as_deref(),
+            clock.as_deref(),
+        ),
+        (
+            &mode_full,
+            &session_full,
+            &tab_full,
+            &detail_full,
+            client_full.as_deref(),
+            None,
+        ),
+        (
+            &mode_full,
+            &session_full,
+            &tab_full,
+            &detail_full,
+            client_short.as_deref(),
+            None,
+        ),
+        (
+            &mode_full,
+            &session_full,
+            &tab_full,
+            &detail_full,
+            None,
+            None,
+        ),
+        (
+            &mode_full,
+            &session_full,
+            &tab_full,
+            &detail_short,
+            None,
+            None,
+        ),
+        (
+            &mode_full,
+            &session_full,
+            &tab_short,
+            &detail_short,
+            None,
+            None,
+        ),
+        (
+            &mode_full,
+            &session_mark,
+            &tab_short,
+            &detail_short,
+            None,
+            None,
+        ),
+        (
+            &mode_full,
+            &session_mark,
+            &tab_mark,
+            &detail_short,
+            None,
+            None,
+        ),
+        (
+            &mode_mark,
+            &session_mark,
+            &tab_mark,
+            &detail_mark,
+            None,
+            None,
+        ),
+    ];
+    for (mode, session, tab, detail, clients, clock) in forms {
+        let left = [
+            mode.as_slice(),
+            session.as_slice(),
+            tab.as_slice(),
+            detail.as_slice(),
+        ];
+        let right = [clients.unwrap_or_default(), clock.unwrap_or_default()];
+        if let Some(cells) = fit_powerline_row(&left, &right, width, bar.powerline_separators) {
+            return options.theme.map_storm_cells(cells);
+        }
+    }
+
+    let mut cells = Vec::with_capacity(width);
+    push_str(&mut cells, "N", ACCENT, CellAttrs::BOLD);
+    push_str(&mut cells, "s", PRIMARY, CellAttrs::BOLD);
+    push_str(&mut cells, ">", ACCENT, CellAttrs::BOLD);
+    if bar.repository.is_some() {
+        push_str(&mut cells, "g", SUCCESS, CellAttrs::BOLD);
+    } else {
+        push_str(&mut cells, "!", WARNING, CellAttrs::BOLD);
+    }
+    cells.truncate(width);
+    pad_status_row(&mut cells, width);
+    options.theme.map_storm_cells(cells)
+}
+
+fn powerline_client_cells(
+    clients: Option<u16>,
+    effective_size: Option<Size>,
+    compact: bool,
+) -> Option<Vec<Cell>> {
+    if clients.is_none() && effective_size.is_none() {
+        return None;
+    }
+    let mut text = String::new();
+    if let Some(clients) = clients {
+        if compact {
+            text.push_str(&format!("{clients}c"));
+        } else {
+            text.push_str(&plural(usize::from(clients), "client"));
+        }
+    }
+    if let Some(size) = effective_size {
+        if !text.is_empty() {
+            text.push_str(if compact { " " } else { " · " });
+        }
+        if !compact {
+            text.push_str("min ");
+        }
+        text.push_str(&format!("{}x{}", size.cols, size.rows));
+    }
+    Some(status_segment(
+        &text,
+        MUTED,
+        RAISED_SURFACE,
+        CellAttrs::NONE,
+    ))
+}
+
+/// Applies one powerline segment background while preserving semantic text.
+fn powerline_segment(mut cells: Vec<Cell>, background: Color) -> Vec<Cell> {
+    if cells.is_empty() {
+        return cells;
+    }
+    for cell in &mut cells {
+        cell.bg = background;
+    }
+    if cells.first().is_some_and(|cell| cell.ch != ' ') {
+        cells.insert(
+            0,
+            Cell {
+                ch: ' ',
+                fg: Color::Default,
+                bg: background,
+                attrs: CellAttrs::NONE,
+            },
+        );
+    }
+    if cells.last().is_some_and(|cell| cell.ch != ' ') {
+        cells.push(Cell {
+            ch: ' ',
+            fg: Color::Default,
+            bg: background,
+            attrs: CellAttrs::NONE,
+        });
+    }
+    cells
+}
+
+/// Joins powerline fields and right-aligns the optional group.
+fn fit_powerline_row(
+    left: &[&[Cell]],
+    right: &[&[Cell]],
+    width: usize,
+    separators: bool,
+) -> Option<Vec<Cell>> {
+    let left = left
+        .iter()
+        .copied()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let right = right
+        .iter()
+        .copied()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let group_len = |parts: &[&[Cell]]| {
+        parts.iter().map(|part| part.len()).sum::<usize>()
+            + usize::from(separators) * parts.len().saturating_sub(1)
+    };
+    let left_len = group_len(&left);
+    let right_len = group_len(&right);
+    if left_len + right_len > width {
+        return None;
+    }
+
+    let mut cells = Vec::with_capacity(width);
+    push_powerline_group(&mut cells, &left, separators);
+    while cells.len() + right_len < width {
+        push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
+    }
+    push_powerline_group(&mut cells, &right, separators);
+    Some(cells)
+}
+
+fn push_powerline_group(cells: &mut Vec<Cell>, parts: &[&[Cell]], separators: bool) {
+    for (index, part) in parts.iter().enumerate() {
+        if separators && index > 0 {
+            let previous = cells.last().map_or(SURFACE, |cell| cell.bg);
+            let next = part.first().map_or(SURFACE, |cell| cell.bg);
+            cells.push(Cell {
+                ch: '\u{e0b0}',
+                fg: previous,
+                bg: next,
+                attrs: CellAttrs::NONE,
+            });
+        }
+        cells.extend_from_slice(part);
+    }
 }
 
 /// Positions the always-on status row for the chrome renderer.
@@ -2899,6 +3232,155 @@ mod tests {
         );
         assert_eq!(span.at, Point::new(4, 23));
         assert_eq!(span.cells.len(), 20);
+    }
+
+    #[test]
+    fn powerline_status_reference_width_renders_every_available_field() {
+        let tabs = status_tabs();
+        let queue = status_queue();
+        let hint = PrefixHint::default();
+        let repository = RepositoryStatus {
+            branch: Some("feature/status".to_owned()),
+            changes: 2,
+        };
+        let row = status_bar_cells(
+            StatusBar::new(&tabs, &queue, &hint)
+                .mode(StatusMode::Powerline)
+                .session("main")
+                .clients(2)
+                .effective_size(Size::new(132, 38))
+                .repository(&repository)
+                .clock("14:38"),
+            96,
+            ChromeOptions::default(),
+        );
+        let text = text_of(&row);
+        for field in [
+            "NORMAL",
+            "s main",
+            ">2 build",
+            "git feature/status +2",
+            "2 clients · min 132x38",
+            "14:38",
+        ] {
+            assert!(text.contains(field), "missing {field:?} in {text:?}");
+        }
+        assert_eq!(
+            text.matches('\u{e0b0}').count(),
+            4,
+            "one glyph per boundary"
+        );
+        assert_eq!(bg_of(&row, 'N'), ACCENT);
+        assert_eq!(fg_of(&row, '>'), ACCENT);
+        let separator = cell_of(&row, '\u{e0b0}');
+        assert_eq!(separator.fg, ACCENT);
+        assert_eq!(separator.bg, BORDER);
+    }
+
+    #[test]
+    fn powerline_status_uses_attention_when_repository_data_is_unavailable() {
+        let tabs = status_tabs();
+        let queue = status_queue();
+        let hint = PrefixHint::default();
+        let text = text_of(&status_bar_cells(
+            StatusBar::new(&tabs, &queue, &hint)
+                .mode(StatusMode::Powerline)
+                .session("main"),
+            50,
+            ChromeOptions::default(),
+        ));
+        assert!(
+            text.contains("2! 1x"),
+            "attention is the truthful fallback: {text:?}"
+        );
+        assert!(
+            !text.contains("git"),
+            "no repository answer was supplied: {text:?}"
+        );
+    }
+
+    #[test]
+    fn powerline_status_flat_fallback_keeps_field_truth_and_order() {
+        let tabs = status_tabs();
+        let queue = status_queue();
+        let hint = PrefixHint::default();
+        let repository = RepositoryStatus {
+            branch: Some("main".to_owned()),
+            changes: 2,
+        };
+        let base = StatusBar::new(&tabs, &queue, &hint)
+            .mode(StatusMode::Powerline)
+            .session("main")
+            .repository(&repository);
+        let glyph = text_of(&status_bar_cells(base, 50, ChromeOptions::default()));
+        let flat = text_of(&status_bar_cells(
+            base.powerline_separators(false),
+            50,
+            ChromeOptions::default(),
+        ));
+
+        assert!(glyph.contains('\u{e0b0}'));
+        assert!(!flat.contains('\u{e0b0}'));
+        let positions = ["NORMAL", "s main", ">2 build", "git main +2"].map(|field| {
+            flat.find(field)
+                .unwrap_or_else(|| panic!("missing {field:?} in {flat:?}"))
+        });
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn powerline_status_has_exact_narrow_goldens_and_ascii_floor() {
+        let tabs = status_tabs();
+        let queue = status_queue();
+        let hint = PrefixHint::default();
+        let repository = RepositoryStatus {
+            branch: Some("main".to_owned()),
+            changes: 2,
+        };
+        let bar = StatusBar::new(&tabs, &queue, &hint)
+            .mode(StatusMode::Powerline)
+            .session("main")
+            .repository(&repository);
+        for (width, expected) in [
+            (
+                42,
+                " NORMAL \u{e0b0} s main \u{e0b0} >2 build \u{e0b0} git main +2 ",
+            ),
+            (
+                37,
+                " NORMAL \u{e0b0} s main \u{e0b0} >2 build \u{e0b0} git +2 ",
+            ),
+            (31, " NORMAL \u{e0b0} s main \u{e0b0} >2 \u{e0b0} git +2 "),
+            (26, " NORMAL \u{e0b0} s \u{e0b0} >2 \u{e0b0} git +2 "),
+            (25, " NORMAL \u{e0b0} s \u{e0b0} > \u{e0b0} git +2 "),
+            (15, " N \u{e0b0} s \u{e0b0} > \u{e0b0} g "),
+            (4, "Ns>g"),
+        ] {
+            assert_eq!(
+                text_of(&status_bar_cells(bar, width, ChromeOptions::default())),
+                expected,
+                "width {width}"
+            );
+        }
+        let floor = status_bar_cells(bar, 4, ChromeOptions::default());
+        assert_eq!(floor[0].fg, ACCENT, "the mode marker remains visible");
+    }
+
+    #[test]
+    fn powerline_status_sixteen_color_golden_keeps_text_and_uses_indexed_roles() {
+        let tabs = status_tabs();
+        let queue = status_queue();
+        let hint = PrefixHint::default();
+        let bar = StatusBar::new(&tabs, &queue, &hint)
+            .mode(StatusMode::Powerline)
+            .session("main");
+        let reference = status_bar_cells(bar, 40, ChromeOptions::default());
+        let ansi_theme = Theme::named(cloo_core::ThemeName::Storm, cloo_proto::TermCaps::default());
+        let ansi = status_bar_cells(bar, 40, ChromeOptions::default().with_theme(ansi_theme));
+        assert_eq!(text_of(&ansi), text_of(&reference));
+        assert!(ansi.iter().all(|cell| !matches!(cell.fg, Color::Rgb(..))));
+        assert!(ansi.iter().all(|cell| !matches!(cell.bg, Color::Rgb(..))));
+        assert_eq!(bg_of(&ansi, 'N'), Color::Indexed(13));
     }
 
     // -- First-attach shortcut hints ---------------------------------------

@@ -37,10 +37,11 @@ titles — it is the session-aware composition described under [Tab row](#tab-ro
 is no longer a static help list either: it is the searchable command palette card 04 asks for, though
 that card's golden frames are still M9-21's. The session switcher now uses the verified local daemon
 catalog and can move the live client between those sockets. Keyboard and mouse resizing now light
-the changed divider and show its visible ratio as card 08 requires. The default status row is now
-the flat segmented minimal composition from cards 01 and 07, with live local repository and clock
-data; the powerline variant and configuration preview still need their card-specific passes. A
-helper being byte-tested does not by itself establish that the attached frame matches the handoff.
+the changed divider and show its visible ratio as card 08 requires. The status row now provides both
+card-07 compositions over the same live local repository and clock data: minimal remains the flat
+default, while the configured powerline preference selects the rich segmented variant described
+below. The configuration preview still needs its card-specific pass. A helper being byte-tested does
+not by itself establish that the attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
 
@@ -64,7 +65,7 @@ A card is asserted as a complete cell matrix in `crates/cloo-client/tests/visual
 names the roles below rather than literal colors, so one expectation is checked against a truecolor
 theme and its 16-color resolution. Chrome that a card has not yet routed through the client theme is
 expected at its *reference* Storm value instead, which keeps the remaining gap visible in the
-fixture. Pane headers, pane bodies, the tab row, and the minimal status row all resolve through the
+fixture. Pane headers, pane bodies, the tab row, and both status variants all resolve through the
 client theme. A tab-row golden is one complete row of a live composed frame, which is what lets the
 whole width ladder be asserted without re-authoring the pane and status rows beneath it at each
 width.
@@ -226,14 +227,22 @@ never read as a broken template.
 
 ### Status bar
 
-The always-on bottom row has two reference compositions. The minimal form is live as of M9-13;
-powerline remains the following status-variant stage:
+The always-on bottom row has two live reference compositions. Minimal is the default as of M9-13;
+M9-14 adds powerline as the configured opt-in over the same status values:
 
 - **Minimal:** accent logical-session segment, active and inactive tab summaries, explicit
   attention, then right-aligned repository/client detail, prefix, and clock. Segment backgrounds
   and cell spacing provide flat boundaries without requiring a powerline font.
 - **Powerline:** mode, session, active tab, branch/attention, client count and effective minimum
   size, then the clock, joined by powerline separators when supported.
+
+The powerline reference shape is `NORMAL`, logical session, the marked active tab, repository branch
+and change count (or the actionable-attention tally when no repository answer exists), then
+right-aligned attached-client/effective-size detail and clock. It reads only the same daemon and
+client caches as minimal; changing `[visual].status` therefore changes chrome and no session, pane,
+or grid value. The explicit `powerline` preference opts into the U+E0B0 font separator. A caller that
+knows that private-use glyph is unavailable disables only those separator cells: adjacent semantic
+backgrounds remain as flat boundaries, with every field and its order unchanged.
 
 The active tab's `>` and every attention glyph are textual signals; colour supplements them but
 never carries the meaning alone. An empty attention queue is rendered as `0!`, so the count remains
@@ -245,7 +254,8 @@ The attached client caches the daemon's `WorkspaceStatus` projection for the log
 attached-client count, and effective minimum size. That cache is the only source for those fields:
 an outer-terminal resize is merely reported until the daemon answers, and neither pane geometry nor
 pane text may be used as a substitute. M9-13 uses the logical name and client count in the minimal
-bar; an unpublished or empty name is not replaced with the internal numeric session ID.
+bar; M9-14 additionally uses the projected effective size in powerline. An unpublished or empty name
+is not replaced with the internal numeric session ID.
 
 Clock text comes from the client's local wall clock. Repository branch and change count come only
 from a bounded asynchronous Git query against the focused pane's reported working directory; a detached
@@ -261,6 +271,13 @@ prefix is client configuration, so two clients attached to one session may legit
 different hints. Below four cells the row truncates that compact form rather than inventing a
 different layout. The same characters and attributes are used after semantic colors resolve to the
 16-color table, so active selection and pending-prefix brackets never depend on RGB.
+
+Powerline follows that same optional-to-required discipline without introducing a second data
+model: clock yields first, client/effective-size detail compacts and then disappears, repository or
+attention detail compacts, and active-tab and session titles shorten. Its physical floor is the four
+ASCII markers `Ns>g` when repository data is present or `Ns>!` when attention is the available
+answer. Separator glyphs disappear before any field does in the flat fallback. Truecolor and
+16-color change only token resolution, not characters or ordering.
 
 ### First attachment and command discovery
 
@@ -556,8 +573,8 @@ key names one appearance. `motion` and `reduce_motion` are separate keys and one
 As of M9-05, an attached client keeps that complete typed value in its `LiveState` from the first
 frame onward. The selected theme is resolved against that terminal's capabilities, `dim_unfocused`
 drives the existing pane treatment, and `motion` plus `reduce_motion` construct the live motion
-model; the status choice is retained for the minimal/powerline composition stages rather than
-guessed from terminal output. A successful daemon reload revision makes each client reload its own
+model; the status choice selects the minimal or powerline composition without changing their data.
+A successful daemon reload revision makes each client reload its own
 resolved file and replace the visual value as one unit. A rejected local document keeps the
 preceding appearance, and no palette or accessibility choice enters session state, so two clients
 on one workspace may intentionally look different.
