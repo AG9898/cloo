@@ -32,8 +32,9 @@ named here.
 
 The live renderer is still short of the complete M9 handoff, but pane geometry is no longer the
 header-only scaffold: every attached pane has a complete one-cell top, side, and bottom frame, and
-adjacent framed allocations do not overlap. The remaining overlays and status variants still need
-their card-specific passes. A helper being byte-tested does not by itself establish that the
+adjacent framed allocations do not overlap. The top row is likewise no longer a bare list of tab
+titles — it is the session-aware composition described under [Tab row](#tab-row). The remaining
+overlays and status variants still need their card-specific passes. A helper being byte-tested does not by itself establish that the
 attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
@@ -58,9 +59,11 @@ A card is asserted as a complete cell matrix in `crates/cloo-client/tests/visual
 names the roles below rather than literal colors, so one expectation is checked against a truecolor
 theme and its 16-color resolution. Chrome that a card has not yet routed through the client theme is
 expected at its *reference* Storm value instead, which keeps the remaining gap visible in the
-fixture. The tab row and the status row are still authored that way at the start of M9: they draw
-the reference palette at every color depth, while pane headers already resolve through the client
-theme and pane bodies still carry the child's untouched default cell.
+fixture. The status row is still authored that way: it draws the reference palette at every color
+depth. Pane headers, pane bodies, and — as of M9-11 — the tab row all resolve through the client
+theme instead. A tab-row golden is one complete row of a live composed frame, which is what lets the
+whole width ladder be asserted without re-authoring the pane and status rows beneath it at each
+width.
 
 ## Visual Decisions
 
@@ -185,6 +188,37 @@ At a narrow width the row keeps a contiguous window around the active tab, yield
 from the far right and then the far left. Right-side metadata yields before tabs, and the session
 badge may reduce to its glyph before disappearing. If only the active chip fits, its title
 truncates before the `>` or its index do; at the smallest widths the marker is what remains.
+
+M9-11 implements that row through the live frame composer, and it resolves through the client theme
+at every colour depth. Its shape at a reference width is:
+
+```
+ dev  1 edit >2 build  3 logs              2 panes  1 client
+^^^^^ ^^^^^^ ^^^^^^^^                      ^^^^^^^^^^^^^^^^^
+|     |      active chip: raised surface, accent, bold, and
+|     |      underlined, with its `>` marker retained
+|     inactive chip: muted text on the base surface
+session badge: the daemon's projected name, dark on the accent
+                                           right-aligned workspace metadata
+```
+
+The underline *is* the lower-edge treatment: a one-row bar has no second row to draw an edge on, so
+the cell attribute carries it, and it survives on a terminal with no colour at all. The badge
+reduces to `s` — the same session marker the narrowest status row keeps — before it disappears.
+
+Width yields in one fixed order, which is what makes a narrowing terminal deterministic and lets the
+whole ladder be a golden:
+
+1. metadata compacts (`2 panes  1 client` becomes `2p 1c`) and then disappears;
+2. inactive tabs yield from the far right and then the far left;
+3. the badge reduces to its glyph and then disappears;
+4. the active chip's title truncates, and below that `>2 `, `>2`, and finally `>` remain.
+
+The session name and the attached-client count are the daemon's `WorkspaceStatus` projection; the
+pane count is the layout this client is already drawing. A field the daemon has not published yet is
+omitted — an unnamed session gets no badge and an unknown client count no segment — rather than
+shown as a placeholder. Counts are written out with their nouns (`1 pane`, `2 panes`) so a value can
+never read as a broken template.
 
 ### Status bar
 

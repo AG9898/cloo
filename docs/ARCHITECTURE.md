@@ -1140,7 +1140,11 @@ from its visible grid. The vocabulary landed in `cloo-proto` in M9-03 (handshake
   or sizing changes one of those fields. The client replaces this cache directly; reporting its
   own resize does not change the cached effective size, and pane cells are never consulted. It is
   separate from `Hello` because `Hello` happens once while attachment and sizing keep moving
-  underneath it.
+  underneath it. M9-11 makes the tab row its first consumer: `cloo-client::chrome::TabBar` carries
+  the projected session name and client count alongside the tab ordering and the client's own
+  visible pane count, and `compose_frame` takes that one value rather than reassembling the fields,
+  so each keeps its provenance. A field the daemon has not published is absent from the bar and
+  therefore omitted from the row.
 - `SessionSummary { name, tabs: u16, panes: u16, clients: u16, uptime_secs: u64 }` is a read-only
   inspection response. `ClientMessage::InspectSession { protocol_version }` is the request: a first
   frame in its own right, carrying its own version and neither a size nor capabilities, because the

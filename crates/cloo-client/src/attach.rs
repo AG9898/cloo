@@ -36,7 +36,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::UnixStream;
 
 use crate::capabilities::{CapsError, detect_attach_caps};
-use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint};
+use crate::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TabBar};
 use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
@@ -1139,9 +1139,19 @@ impl LiveState {
                 Some(FramePane::new(area, grid, header))
             })
             .collect::<Vec<_>>();
+        // The badge and the client count are the daemon's projection; the pane
+        // count is the layout this client is already drawing. A field the
+        // daemon has not published yet stays absent rather than invented.
+        let mut bar = TabBar::new(&self.tabs).panes(panes.len());
+        if let Some(status) = &self.status {
+            bar = bar.clients(status.clients);
+            if !status.name.is_empty() {
+                bar = bar.session(&status.name);
+            }
+        }
         let mut spans = compose_frame(
             self.outer_size,
-            &self.tabs,
+            bar,
             self.session,
             &panes,
             &self.queue,
@@ -2060,6 +2070,55 @@ mod tests {
             .iter()
             .map(|cell| cell.ch)
             .collect()
+    }
+
+    /// The text of the frame's tab row.
+    fn tab_row_text(state: &LiveState) -> String {
+        state
+            .spans()
+            .first()
+            .expect("a tab row")
+            .cells
+            .iter()
+            .map(|cell| cell.ch)
+            .collect()
+    }
+
+    #[test]
+    fn the_attached_tab_row_draws_the_daemon_projection_and_invents_nothing() {
+        let mut state = hinted_state(60, 2, "C-b");
+
+        let row = tab_row_text(&state);
+        assert!(
+            row.starts_with(">1 shell"),
+            "no badge before a projection arrives: {row:?}"
+        );
+        assert!(
+            row.contains("2 panes"),
+            "the pane count is the layout this client drew: {row:?}"
+        );
+        assert!(
+            !row.contains("client"),
+            "an unprojected client count is omitted, never invented: {row:?}"
+        );
+
+        state
+            .apply(ServerMessage::WorkspaceStatus(WorkspaceStatus {
+                name: "agents".into(),
+                clients: 3,
+                effective_size: Size::new(60, 6),
+            }))
+            .expect("the projection applies");
+
+        let row = tab_row_text(&state);
+        assert!(
+            row.starts_with(" agents >1 shell"),
+            "the badge names the session the daemon projected: {row:?}"
+        );
+        assert!(
+            row.contains("2 panes  3 clients"),
+            "the client count is the daemon's, not a pane-cell guess: {row:?}"
+        );
     }
 
     #[test]

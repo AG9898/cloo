@@ -26,11 +26,11 @@
 use std::fmt;
 
 use cloo_proto::{
-    Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, SessionId, Size, TabSummary, TermCaps,
+    Cell, CellAttrs, Color, CursorShape, Point, RowUpdate, SessionId, Size, TermCaps,
 };
 
 use crate::chrome::{
-    AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, body_span, bottom_frame_cells,
+    AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TabBar, body_span, bottom_frame_cells,
     side_frame_cell, status_bar_span, tab_row_span, top_frame_cells,
 };
 use crate::input::PaneArea;
@@ -250,6 +250,11 @@ impl<'a> FramePane<'a> {
 /// reader's sake rather than for correctness. A zero-width or zero-height frame,
 /// which a violent resize can produce, composes nothing rather than panicking.
 ///
+/// `bar` carries the tab ordering plus the workspace metadata the top row may
+/// spend spare width on. It is passed in whole rather than reassembled here, so
+/// the session name and client count keep their daemon provenance and the pane
+/// count keeps the client's own.
+///
 /// `hint` is passed through to the status row verbatim rather than derived here:
 /// the configured prefix and whether one is pending are the attached client's to
 /// know, and a frame that recomputed either would be a second answer to a
@@ -257,7 +262,7 @@ impl<'a> FramePane<'a> {
 #[must_use]
 pub fn compose_frame(
     size: Size,
-    tabs: &[TabSummary],
+    bar: TabBar<'_>,
     session: SessionId,
     panes: &[FramePane<'_>],
     queue: &AttentionQueue,
@@ -269,8 +274,8 @@ pub fn compose_frame(
         return spans;
     }
 
-    if !tabs.is_empty() {
-        spans.push(tab_row_span(Point::new(0, 0), tabs, size.cols));
+    if !bar.tabs().is_empty() {
+        spans.push(tab_row_span(Point::new(0, 0), bar, size.cols, options));
     }
 
     for pane in panes {
@@ -321,7 +326,7 @@ pub fn compose_frame(
     spans.push(status_bar_span(
         Point::new(0, size.rows - 1),
         session,
-        tabs,
+        bar.tabs(),
         queue,
         hint,
         size.cols,
@@ -1323,7 +1328,7 @@ mod tests {
 
     // -- Frame composition ------------------------------------------------
 
-    use cloo_proto::{PaneId, SessionId, TabId};
+    use cloo_proto::{PaneId, SessionId, TabId, TabSummary};
 
     use crate::chrome::Attention;
 
@@ -1379,7 +1384,7 @@ mod tests {
 
         let spans = compose_frame(
             size,
-            &tabs,
+            TabBar::new(&tabs),
             SessionId::new(1),
             &panes,
             &queue,
@@ -1469,9 +1474,10 @@ mod tests {
                 PaneChrome::new(3, "lower").attention(Attention::Ready),
             ),
         ];
+        let tabs = one_tab();
         let spans = compose_frame(
             Size::new(20, 10),
-            &one_tab(),
+            TabBar::new(&tabs),
             SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
@@ -1512,7 +1518,7 @@ mod tests {
             )];
             compose_frame(
                 Size::new(6, 4),
-                &[],
+                TabBar::default(),
                 SessionId::new(1),
                 &panes,
                 &crate::chrome::AttentionQueue::new(),
@@ -1557,7 +1563,7 @@ mod tests {
         )];
         let spans = compose_frame(
             Size::new(4, 3),
-            &[],
+            TabBar::default(),
             SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
@@ -1581,7 +1587,7 @@ mod tests {
         )];
         let spans = compose_frame(
             size,
-            &[],
+            TabBar::default(),
             SessionId::new(1),
             &panes,
             &crate::chrome::AttentionQueue::new(),
@@ -1614,7 +1620,7 @@ mod tests {
         assert!(
             compose_frame(
                 Size::new(0, 0),
-                &one_tab(),
+                TabBar::new(&one_tab()),
                 SessionId::new(1),
                 &panes,
                 &crate::chrome::AttentionQueue::new(),

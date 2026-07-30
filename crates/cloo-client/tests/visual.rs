@@ -34,6 +34,122 @@ fn sixteen_color(name: ThemeName) -> Theme {
 }
 
 // ---------------------------------------------------------------------------
+// The session-aware tab row
+// ---------------------------------------------------------------------------
+
+/// The tab row's legend: badge, active chip, inactive chip, padding, metadata.
+///
+/// Every entry is a [`Paint::Token`], because the row resolves through the
+/// client theme rather than drawing the reference palette at every colour depth.
+fn tab_row_styles(frame: ExpectedFrame) -> ExpectedFrame {
+    let surface = Paint::Token(ThemeToken::Surface);
+    let muted = SemanticStyle::new(Paint::Token(ThemeToken::Muted), surface);
+    frame
+        .style(
+            'S',
+            SemanticStyle::new(surface, Paint::Token(ThemeToken::Accent)).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'T',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Accent),
+                Paint::Token(ThemeToken::RaisedSurface),
+            )
+            .attrs(CellAttrs::BOLD.union(CellAttrs::UNDERLINE)),
+        )
+        // An inactive chip and the right-side metadata share one style; they are
+        // separate keys so the picture stays readable.
+        .style('i', muted)
+        .style('w', muted)
+        .style(',', SemanticStyle::new(Paint::Terminal, surface))
+}
+
+/// A three-tab workspace whose complete top row is the fixture under test.
+///
+/// The two panes below row zero are headerless and one cell each: they exist so
+/// the pane count the row reports comes from the composed layout rather than
+/// from a number the fixture asserted about itself.
+fn tab_bar(width: u16) -> Scene {
+    let pane = |id: u16, x: u16| {
+        ScenePane::new(
+            PaneId::new(u64::from(id)),
+            x,
+            1,
+            Size::new(1, 1),
+            PaneChrome::new(id, "sh"),
+        )
+        .headerless()
+    };
+    Scene::new(Size::new(width, 3))
+        .named("dev")
+        .clients(1)
+        .tab("edit", false)
+        .tab("build", true)
+        .tab("logs", false)
+        .pane(pane(1, 0))
+        .pane(pane(2, 1))
+}
+
+/// The documented width ladder: terminal width, the complete row, its styles.
+///
+/// Read top to bottom this is the yield order from `docs/STYLEGUIDE.md`: the
+/// right-side metadata compacts and then disappears, then inactive tabs yield
+/// from the far right and then the far left, then the session badge reduces to
+/// its glyph and disappears, and only then does the active title truncate.
+const TAB_ROW_LADDER: [(u16, &str, &str); 8] = [
+    (
+        60,
+        " dev  1 edit >2 build  3 logs              2 panes  1 client",
+        "SSSSSiiiiiiiiTTTTTTTTiiiiiiii,,,,,,,,,,,,,,wwwwwwwwwwwwwwwww",
+    ),
+    (
+        40,
+        " dev  1 edit >2 build  3 logs      2p 1c",
+        "SSSSSiiiiiiiiTTTTTTTTiiiiiiii,,,,,,wwwww",
+    ),
+    (
+        32,
+        " dev  1 edit >2 build  3 logs   ",
+        "SSSSSiiiiiiiiTTTTTTTTiiiiiiii,,,",
+    ),
+    (24, " dev  1 edit >2 build   ", "SSSSSiiiiiiiiTTTTTTTT,,,"),
+    (16, " dev >2 build   ", "SSSSSTTTTTTTT,,,"),
+    (12, " s >2 build ", "SSSTTTTTTTT,"),
+    (8, ">2 build", "TTTTTTTT"),
+    (5, ">2 bu", "TTTTT"),
+];
+
+#[test]
+fn the_tab_row_matches_its_truecolor_goldens_at_every_documented_width() {
+    for (width, text, keys) in TAB_ROW_LADDER {
+        let scene = tab_bar(width);
+        assert_frame(
+            &scene.frame(Theme::storm()).only_row(0),
+            &tab_row_styles(ExpectedFrame::new()).row(text, keys),
+            Theme::storm(),
+        );
+    }
+}
+
+#[test]
+fn the_tab_row_matches_the_same_goldens_in_sixteen_colors() {
+    let theme = sixteen_color(ThemeName::Storm);
+    assert_ne!(
+        theme.color(ThemeToken::RaisedSurface),
+        Theme::storm().color(ThemeToken::RaisedSurface),
+        "the 16-colour fixture must not resolve to the truecolor palette"
+    );
+    for (width, text, keys) in TAB_ROW_LADDER {
+        let scene = tab_bar(width);
+        assert_frame(
+            &scene.frame(theme).only_row(0),
+            &tab_row_styles(ExpectedFrame::new()).row(text, keys),
+            theme,
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Card 01 — the daily one-pane workspace
 // ---------------------------------------------------------------------------
 
@@ -41,6 +157,8 @@ fn sixteen_color(name: ThemeName) -> Theme {
 fn workspace() -> Scene {
     Scene::new(Size::new(40, 8))
         .session(1)
+        .named("dev")
+        .clients(1)
         .tab("main", true)
         .hint(PrefixHint::new("C-b"))
         .pane(
@@ -57,18 +175,17 @@ fn workspace() -> Scene {
 
 /// The complete expected frame for [`workspace`], role by role.
 ///
-/// `A`/`.` are the tab row and `P`/`-`/`M`/`p` the status row; both are still
-/// authored against the reference palette, so they are expected as
-/// [`Paint::Reference`]. The pane header (`a`, `m`, `B`, `s`) already resolves
-/// through the client theme, and the pane body (`~`) maps the child's default
-/// colours to the selected pane text and surface roles at composition time.
+/// `P`/`-`/`M`/`p`/`.` are the status row, still authored against the reference
+/// palette and so expected as [`Paint::Reference`]. The tab row (`S`, `T`, `,`,
+/// `w`), the pane header (`a`, `m`, `B`, `s`), and the pane body (`~`) all
+/// resolve through the client theme.
 fn workspace_golden() -> ExpectedFrame {
     let reference = |token| Paint::Reference(token);
     let chrome_bg = Paint::Reference(ThemeToken::Surface);
     let pane_bg = Paint::Token(ThemeToken::Surface);
     let frame_bg = Paint::Token(ThemeToken::Frame);
 
-    ExpectedFrame::new()
+    tab_row_styles(ExpectedFrame::new())
         .style(
             'A',
             SemanticStyle::new(reference(ThemeToken::Accent), chrome_bg).attrs(CellAttrs::BOLD),
@@ -115,8 +232,8 @@ fn workspace_golden() -> ExpectedFrame {
             ),
         )
         .row(
-            ">1 main                                 ",
-            "AAAAAAA.................................",
+            " dev >1 main            1 pane  1 client",
+            "SSSSSTTTTTTT,,,,,,,,,,,,wwwwwwwwwwwwwwww",
         )
         .row(
             "┌> 1 shell                    ? unknown┐",

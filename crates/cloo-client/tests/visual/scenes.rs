@@ -15,7 +15,9 @@
 // expected here.
 #![allow(dead_code)]
 
-use cloo_client::chrome::{Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint};
+use cloo_client::chrome::{
+    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TabBar,
+};
 use cloo_client::input::PaneArea;
 use cloo_client::renderer::{FramePane, Grid, Span, compose_frame};
 use cloo_client::theme::Theme;
@@ -113,6 +115,11 @@ impl ScenePane {
 pub struct Scene {
     size: Size,
     session: SessionId,
+    /// The daemon-projected session name the tab row's badge draws, when one has
+    /// been received. `None` is the honest pre-`WorkspaceStatus` state.
+    name: Option<String>,
+    /// The daemon-projected attached-client count, when one has been received.
+    clients: Option<u16>,
     tabs: Vec<TabSummary>,
     panes: Vec<ScenePane>,
     queue: AttentionQueue,
@@ -127,6 +134,8 @@ impl Scene {
         Self {
             size,
             session: SessionId::new(1),
+            name: None,
+            clients: None,
             tabs: Vec::new(),
             panes: Vec::new(),
             queue: AttentionQueue::new(),
@@ -139,6 +148,20 @@ impl Scene {
     #[must_use]
     pub fn session(mut self, session: u64) -> Self {
         self.session = SessionId::new(session);
+        self
+    }
+
+    /// Supplies the daemon's projected session name, as `WorkspaceStatus` does.
+    #[must_use]
+    pub fn named(mut self, name: &str) -> Self {
+        self.name = Some(name.to_owned());
+        self
+    }
+
+    /// Supplies the daemon's projected attached-client count.
+    #[must_use]
+    pub fn clients(mut self, clients: u16) -> Self {
+        self.clients = Some(clients);
         self
     }
 
@@ -199,9 +222,16 @@ impl Scene {
             .iter()
             .map(|pane| FramePane::new(pane.area, &pane.grid, pane.header.clone()))
             .collect();
+        let mut bar = TabBar::new(&self.tabs).panes(panes.len());
+        if let Some(name) = &self.name {
+            bar = bar.session(name);
+        }
+        if let Some(clients) = self.clients {
+            bar = bar.clients(clients);
+        }
         compose_frame(
             self.size,
-            &self.tabs,
+            bar,
             self.session,
             &panes,
             &self.queue,

@@ -46,6 +46,8 @@ use crate::theme::{Theme, ThemeToken};
 pub const FRAME: Color = Color::Rgb(0x0f, 0x0f, 0x16);
 /// The chrome and pane base surface.
 pub const SURFACE: Color = Color::Rgb(0x1a, 0x1b, 0x26);
+/// The raised surface behind active tabs and overlays.
+pub const RAISED_SURFACE: Color = Color::Rgb(0x24, 0x28, 0x3b);
 /// The border of an unfocused pane.
 pub const BORDER: Color = Color::Rgb(0x2a, 0x2e, 0x42);
 /// Focus, selection, and active controls.
@@ -263,83 +265,273 @@ impl PaneChrome {
 // Tab row
 // ---------------------------------------------------------------------------
 
-/// Builds the compact top tab row, exactly `width` cells wide.
+/// The one character a session badge reduces to before it disappears.
 ///
-/// Each tab is shown as a one-based bar position and title. The active tab is
-/// marked with `>` as well as the accent treatment, so a 16-colour or
-/// monochrome terminal still has an unambiguous answer. When the bar is too
-/// narrow for every tab, it yields inactive tabs from the far right and then
-/// the far left, keeping a contiguous window around the active tab. If even
-/// that does not fit, the active title truncates before its marker or index.
+/// The same marker the narrowest status row keeps for the session field, so the
+/// two rows never disagree about which glyph means "session".
+const SESSION_GLYPH: char = 's';
+
+/// Everything the top row describes about one workspace.
+///
+/// The tabs are the layout's own ordering. `session` and `clients` come from the
+/// daemon's [`WorkspaceStatus`](cloo_proto::WorkspaceStatus) projection and
+/// `panes` from the layout the client is already drawing, so every field on the
+/// row has a named source. Each optional field is `None` when nothing
+/// authoritative has been received; the row then omits it rather than showing a
+/// placeholder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TabBar<'a> {
+    tabs: &'a [TabSummary],
+    session: Option<&'a str>,
+    clients: Option<u16>,
+    panes: Option<usize>,
+}
+
+impl<'a> TabBar<'a> {
+    /// A bar over one tab ordering, with no workspace metadata yet.
+    #[must_use]
+    pub const fn new(tabs: &'a [TabSummary]) -> Self {
+        Self {
+            tabs,
+            session: None,
+            clients: None,
+            panes: None,
+        }
+    }
+
+    /// Names the session the badge draws — the daemon's display name, verbatim.
+    #[must_use]
+    pub const fn session(mut self, name: &'a str) -> Self {
+        self.session = Some(name);
+        self
+    }
+
+    /// Sets the attached-client count the right-side metadata may show.
+    #[must_use]
+    pub const fn clients(mut self, clients: u16) -> Self {
+        self.clients = Some(clients);
+        self
+    }
+
+    /// Sets the visible pane count the right-side metadata may show.
+    #[must_use]
+    pub const fn panes(mut self, panes: usize) -> Self {
+        self.panes = Some(panes);
+        self
+    }
+
+    /// The tab ordering this bar was built over.
+    #[must_use]
+    pub const fn tabs(&self) -> &'a [TabSummary] {
+        self.tabs
+    }
+
+    /// The badge forms, widest first, always ending in "no badge at all".
+    ///
+    /// An absent or empty name yields only the empty form: a session whose name
+    /// the client has not been told is not given an invented one.
+    fn badge_forms(self) -> Vec<Vec<Cell>> {
+        let Some(name) = self.session.filter(|name| !name.is_empty()) else {
+            return vec![Vec::new()];
+        };
+        vec![
+            badge_cells(name),
+            badge_cells(&SESSION_GLYPH.to_string()),
+            Vec::new(),
+        ]
+    }
+
+    /// The right-side metadata forms, widest first, always ending in nothing.
+    fn metadata_forms(self) -> Vec<Vec<Cell>> {
+        let mut full = Vec::new();
+        let mut short = Vec::new();
+        if let Some(panes) = self.panes {
+            push_str(&mut full, &plural(panes, "pane"), MUTED, CellAttrs::NONE);
+            push_str(&mut short, &format!("{panes}p"), MUTED, CellAttrs::NONE);
+        }
+        if let Some(clients) = self.clients {
+            if !full.is_empty() {
+                push_str(&mut full, "  ", MUTED, CellAttrs::NONE);
+                push_str(&mut short, " ", MUTED, CellAttrs::NONE);
+            }
+            push_str(
+                &mut full,
+                &plural(usize::from(clients), "client"),
+                MUTED,
+                CellAttrs::NONE,
+            );
+            push_str(&mut short, &format!("{clients}c"), MUTED, CellAttrs::NONE);
+        }
+        if full.is_empty() {
+            vec![Vec::new()]
+        } else {
+            vec![full, short, Vec::new()]
+        }
+    }
+}
+
+/// Builds the session-aware top tab row, exactly `width` cells wide.
+///
+/// The row is a session badge, the ordered tab chips, and right-aligned
+/// workspace metadata. Each tab is a one-based bar position and title, never a
+/// stable id. The active chip is raised, accented, bold, and underlined — the
+/// one-row terminal reading of the handoff's lower-edge treatment — and keeps
+/// its `>` marker, so a 16-colour or monochrome terminal still has an
+/// unambiguous answer.
+///
+/// Width is spent in one fixed order, which is what makes a narrowing terminal
+/// deterministic:
+///
+/// 1. right-side metadata drops to its compact form and then disappears;
+/// 2. inactive tabs yield from the far right and then the far left, keeping a
+///    contiguous window around the active tab;
+/// 3. the session badge reduces to its glyph and then disappears;
+/// 4. the active chip's title truncates, and below that the marker and index are
+///    what remain.
 #[must_use]
-pub fn tab_row_cells(tabs: &[TabSummary], width: u16) -> Vec<Cell> {
+pub fn tab_row_cells(bar: TabBar<'_>, width: u16, options: ChromeOptions) -> Vec<Cell> {
     let width = usize::from(width);
     if width == 0 {
         return Vec::new();
     }
 
+    let tabs = bar.tabs;
     let active = tabs.iter().position(|tab| tab.active).unwrap_or(0);
-    let mut first = 0;
-    let mut last = tabs.len();
-    while first < last && tab_row_len(&tabs[first..last], first) > width {
-        if last.saturating_sub(1) != active {
-            last -= 1;
-        } else if first != active {
-            first += 1;
-        } else {
-            break;
+    let badges = bar.badge_forms();
+    let widest_badge = badges.first().map_or(&[][..], Vec::as_slice);
+    let nothing: &[Cell] = &[];
+
+    // 1. Metadata is the cheapest thing on the row, so it goes first while every
+    //    tab and the full badge are still at their widest.
+    for metadata in bar.metadata_forms() {
+        if let Some(cells) = fit_tab_row(widest_badge, tabs, 0, tabs.len(), &metadata, width) {
+            return options.theme.map_storm_cells(cells);
         }
     }
 
-    let visible = &tabs[first..last];
+    // 2. Then inactive tabs yield around the active one.
+    let mut window = (0usize, tabs.len());
+    loop {
+        if let Some(cells) = fit_tab_row(widest_badge, tabs, window.0, window.1, nothing, width) {
+            return options.theme.map_storm_cells(cells);
+        }
+        match narrower_window(window, active) {
+            Some(next) => window = next,
+            None => break,
+        }
+    }
+
+    // 3. Only then does the badge reduce, and then disappear.
+    for badge in badges.iter().skip(1) {
+        if let Some(cells) = fit_tab_row(badge, tabs, window.0, window.1, nothing, width) {
+            return options.theme.map_storm_cells(cells);
+        }
+    }
+
+    // 4. The active chip alone, with its title truncated into whatever is left.
     let mut cells = Vec::with_capacity(width);
-    for (offset, tab) in visible.iter().enumerate() {
+    if let Some(tab) = tabs.get(active) {
+        let budget = width.saturating_sub(len(&chip_prefix(tab, active + 1)));
+        cells.extend(chip_cells(tab, active + 1, Some(budget)));
+        cells.truncate(width);
+    }
+    pad_status_row(&mut cells, width);
+    options.theme.map_storm_cells(cells)
+}
+
+/// Positions a tab row for [`Renderer::render_spans`](crate::renderer::Renderer::render_spans).
+#[must_use]
+pub fn tab_row_span(at: Point, bar: TabBar<'_>, width: u16, options: ChromeOptions) -> Span {
+    Span::new(at, tab_row_cells(bar, width, options))
+}
+
+/// One candidate row, or `None` when that combination does not fit `width`.
+fn fit_tab_row(
+    badge: &[Cell],
+    tabs: &[TabSummary],
+    first: usize,
+    last: usize,
+    metadata: &[Cell],
+    width: usize,
+) -> Option<Vec<Cell>> {
+    let mut cells = badge.to_vec();
+    for (offset, tab) in tabs.get(first..last)?.iter().enumerate() {
         if offset > 0 {
             push_str(&mut cells, " ", MUTED, CellAttrs::NONE);
         }
-        let index = first + offset + 1;
-        let marker = if tab.active { ">" } else { " " };
-        let prefix = format!("{marker}{index} ");
-        let remaining = width.saturating_sub(cells.len());
-        if remaining == 0 {
-            break;
-        }
-        let title_budget = remaining.saturating_sub(len(&prefix));
-        let title = truncate(&tab.title, title_budget);
-        let (fg, attrs) = if tab.active {
-            (ACCENT, CellAttrs::BOLD)
-        } else {
-            (MUTED, CellAttrs::NONE)
-        };
-        push_str(&mut cells, &prefix, fg, attrs);
-        push_str(&mut cells, title, fg, attrs);
+        cells.extend(chip_cells(tab, first + offset + 1, None));
     }
-    cells.truncate(width);
-    while cells.len() < width {
+    // One space keeps the metadata from touching the last chip.
+    let gap = usize::from(!metadata.is_empty());
+    if cells.len() + gap + metadata.len() > width {
+        return None;
+    }
+    while cells.len() + metadata.len() < width {
         push_str(&mut cells, " ", Color::Default, CellAttrs::NONE);
     }
+    cells.extend_from_slice(metadata);
+    Some(cells)
+}
+
+/// The next narrower contiguous window around `active`, or `None` at one tab.
+///
+/// Inactive tabs are given up from the far right first, then the far left, so a
+/// narrowing bar never reorders itself or hides the tab the user is on.
+fn narrower_window(window: (usize, usize), active: usize) -> Option<(usize, usize)> {
+    let (first, last) = window;
+    if last.saturating_sub(first) <= 1 {
+        return None;
+    }
+    if last - 1 != active {
+        Some((first, last - 1))
+    } else if first != active {
+        Some((first + 1, last))
+    } else {
+        None
+    }
+}
+
+/// One tab chip's leading marker and one-based bar position.
+fn chip_prefix(tab: &TabSummary, index: usize) -> String {
+    let marker = if tab.active { '>' } else { ' ' };
+    format!("{marker}{index} ")
+}
+
+/// One tab chip, optionally with its title truncated into `budget` cells.
+fn chip_cells(tab: &TabSummary, index: usize, budget: Option<usize>) -> Vec<Cell> {
+    let prefix = chip_prefix(tab, index);
+    let title = budget.map_or(tab.title.as_str(), |budget| truncate(&tab.title, budget));
+    let (fg, bg, attrs) = if tab.active {
+        (
+            ACCENT,
+            RAISED_SURFACE,
+            CellAttrs::BOLD.union(CellAttrs::UNDERLINE),
+        )
+    } else {
+        (MUTED, SURFACE, CellAttrs::NONE)
+    };
+    let mut cells = Vec::with_capacity(len(&prefix) + len(title));
+    push_styled(&mut cells, &prefix, fg, bg, attrs);
+    push_styled(&mut cells, title, fg, bg, attrs);
     cells
 }
 
-/// Positions a compact tab row for [`Renderer::render_spans`](crate::renderer::Renderer::render_spans).
-#[must_use]
-pub fn tab_row_span(at: Point, tabs: &[TabSummary], width: u16) -> Span {
-    Span::new(at, tab_row_cells(tabs, width))
+/// The session badge: `text` on the accent, padded on both sides.
+fn badge_cells(text: &str) -> Vec<Cell> {
+    let mut cells = Vec::with_capacity(len(text) + 2);
+    push_styled(&mut cells, " ", SURFACE, ACCENT, CellAttrs::BOLD);
+    push_styled(&mut cells, text, SURFACE, ACCENT, CellAttrs::BOLD);
+    push_styled(&mut cells, " ", SURFACE, ACCENT, CellAttrs::BOLD);
+    cells
 }
 
-fn tab_row_len(tabs: &[TabSummary], start: usize) -> usize {
-    tabs.iter()
-        .enumerate()
-        .map(|(offset, tab)| {
-            len(&format!(
-                "{}{} {}",
-                if tab.active { ">" } else { " " },
-                start + offset + 1,
-                tab.title
-            ))
-        })
-        .sum::<usize>()
-        + tabs.len().saturating_sub(1)
+/// `1 pane` / `2 panes`, so a count never reads as a broken template.
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("{count} {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -618,13 +810,17 @@ fn frame_cell(ch: char, focused: bool, options: ChromeOptions) -> Cell {
 
 /// Appends `text` as styled cells over the chrome surface.
 fn push_str(cells: &mut Vec<Cell>, text: &str, fg: Color, attrs: CellAttrs) {
+    push_styled(cells, text, fg, SURFACE, attrs);
+}
+
+/// Appends `text` as styled cells over an explicit background.
+///
+/// Only chrome that is deliberately raised off the base surface — an active tab
+/// chip, the session badge — needs this; everything else uses [`push_str`] so a
+/// chrome row has one background by default.
+fn push_styled(cells: &mut Vec<Cell>, text: &str, fg: Color, bg: Color, attrs: CellAttrs) {
     for ch in text.chars() {
-        cells.push(Cell {
-            ch,
-            fg,
-            bg: SURFACE,
-            attrs,
-        });
+        cells.push(Cell { ch, fg, bg, attrs });
     }
 }
 
@@ -1397,13 +1593,23 @@ mod tests {
         cells.iter().map(|c| c.ch).collect()
     }
 
-    /// The foreground of the cell holding `ch`.
-    fn fg_of(cells: &[Cell], ch: char) -> Color {
+    /// The first cell holding `ch`.
+    fn cell_of(cells: &[Cell], ch: char) -> Cell {
         cells
             .iter()
+            .copied()
             .find(|cell| cell.ch == ch)
-            .map(|cell| cell.fg)
             .expect("the glyph is present")
+    }
+
+    /// The foreground of the cell holding `ch`.
+    fn fg_of(cells: &[Cell], ch: char) -> Color {
+        cell_of(cells, ch).fg
+    }
+
+    /// The background of the cell holding `ch`.
+    fn bg_of(cells: &[Cell], ch: char) -> Color {
+        cell_of(cells, ch).bg
     }
 
     fn wide() -> u16 {
@@ -1768,12 +1974,12 @@ mod tests {
         assert_eq!(span.cells.len(), 12);
     }
 
-    #[test]
-    fn tab_row_marks_the_active_tab_without_reordering_the_bar() {
-        let tabs = vec![
+    /// Three tabs with the middle one active — the shape every yield rule needs.
+    fn bar_tabs() -> Vec<TabSummary> {
+        vec![
             TabSummary {
                 tab: cloo_proto::TabId::new(3),
-                title: "shell".into(),
+                title: "edit".into(),
                 active: false,
             },
             TabSummary {
@@ -1781,36 +1987,136 @@ mod tests {
                 title: "build".into(),
                 active: true,
             },
-        ];
+            TabSummary {
+                tab: cloo_proto::TabId::new(9),
+                title: "logs".into(),
+                active: false,
+            },
+        ]
+    }
 
-        let row = tab_row_cells(&tabs, 20);
-        assert_eq!(text_of(&row), " 1 shell >2 build   ");
-        assert_eq!(row.len(), 20);
-        assert_eq!(fg_of(&row, '>'), ACCENT);
+    fn tab_row_text(bar: TabBar<'_>, width: u16) -> String {
+        text_of(&tab_row_cells(bar, width, ChromeOptions::default()))
     }
 
     #[test]
-    fn a_narrow_tab_row_keeps_the_active_marker_and_index() {
-        let tabs = vec![
-            TabSummary {
-                tab: cloo_proto::TabId::new(0),
-                title: "shell".into(),
-                active: false,
-            },
-            TabSummary {
-                tab: cloo_proto::TabId::new(1),
-                title: "build".into(),
-                active: true,
-            },
-        ];
+    fn tab_row_marks_the_active_tab_without_reordering_the_bar() {
+        let tabs = bar_tabs();
+        let row = tab_row_cells(
+            TabBar::new(&tabs).session("dev"),
+            32,
+            ChromeOptions::default(),
+        );
 
-        assert_eq!(text_of(&tab_row_cells(&tabs, 8)), ">2 build");
-        assert_eq!(text_of(&tab_row_cells(&tabs, 3)), ">2 ");
+        assert_eq!(text_of(&row), " dev  1 edit >2 build  3 logs   ");
+        assert_eq!(row.len(), 32);
+        assert_eq!(fg_of(&row, '>'), ACCENT);
+        assert_eq!(fg_of(&row, 'd'), SURFACE, "the badge sits on the accent");
+        assert_eq!(bg_of(&row, 'd'), ACCENT);
+    }
+
+    #[test]
+    fn the_active_tab_chip_is_raised_and_underlined_as_well_as_marked() {
+        let tabs = bar_tabs();
+        let row = tab_row_cells(TabBar::new(&tabs), 32, ChromeOptions::default());
+
+        let active = cell_of(&row, 'b');
+        assert_eq!(active.bg, RAISED_SURFACE);
+        assert!(active.attrs.contains(CellAttrs::UNDERLINE));
+        assert!(active.attrs.contains(CellAttrs::BOLD));
+
+        let inactive = cell_of(&row, 'e');
+        assert_eq!(inactive.bg, SURFACE);
+        assert_eq!(inactive.attrs, CellAttrs::NONE);
+        assert_eq!(inactive.fg, MUTED);
+    }
+
+    #[test]
+    fn the_active_tab_row_marker_survives_without_colour() {
+        let tabs = bar_tabs();
+        let bar = TabBar::new(&tabs).session("dev").panes(2).clients(1);
+        let reference = tab_row_text(bar, 60);
+
+        for theme in [
+            Theme::storm(),
+            Theme::named(cloo_core::ThemeName::Storm, cloo_proto::TermCaps::default()),
+            Theme::terminal(),
+        ] {
+            let options = ChromeOptions::default().with_theme(theme);
+            let row = tab_row_cells(bar, 60, options);
+            assert_eq!(
+                text_of(&row),
+                reference,
+                "no theme may change which characters the row draws"
+            );
+            let active = cell_of(&row, 'b');
+            assert!(
+                active.attrs.contains(CellAttrs::UNDERLINE),
+                "the lower-edge treatment must not depend on colour"
+            );
+            assert!(reference.contains(">2 build"));
+        }
+    }
+
+    #[test]
+    fn tab_row_metadata_is_right_aligned_and_yields_before_any_tab() {
+        let tabs = bar_tabs();
+        let bar = TabBar::new(&tabs).session("dev").panes(2).clients(1);
+
+        // Widest: badge, every chip, and the spelled-out metadata.
+        assert_eq!(
+            tab_row_text(bar, 60),
+            " dev  1 edit >2 build  3 logs              2 panes  1 client"
+        );
+        // Metadata compacts before a tab is given up.
+        assert_eq!(
+            tab_row_text(bar, 40),
+            " dev  1 edit >2 build  3 logs      2p 1c"
+        );
+        // Then disappears, still before a tab is given up.
+        assert_eq!(tab_row_text(bar, 32), " dev  1 edit >2 build  3 logs   ");
+    }
+
+    #[test]
+    fn a_narrow_tab_row_yields_tabs_then_the_badge_then_the_title() {
+        let tabs = bar_tabs();
+        let bar = TabBar::new(&tabs).session("dev").panes(2).clients(1);
+
+        // The far-right inactive tab goes first, then the far-left one.
+        assert_eq!(tab_row_text(bar, 24), " dev  1 edit >2 build   ");
+        assert_eq!(tab_row_text(bar, 16), " dev >2 build   ");
+        // Only then does the badge reduce to its glyph, and then disappear.
+        assert_eq!(tab_row_text(bar, 12), " s >2 build ");
+        assert_eq!(tab_row_text(bar, 8), ">2 build");
+        // Below that the title truncates, and the marker is the last thing left.
+        assert_eq!(tab_row_text(bar, 5), ">2 bu");
+        assert_eq!(tab_row_text(bar, 3), ">2 ");
+        assert_eq!(tab_row_text(bar, 1), ">");
+    }
+
+    #[test]
+    fn a_tab_row_omits_metadata_the_daemon_has_not_published() {
+        let tabs = bar_tabs();
+        // No session name and no client count: nothing is invented for either.
+        let row = tab_row_text(TabBar::new(&tabs).panes(1), 40);
+        assert_eq!(row, " 1 edit >2 build  3 logs          1 pane");
+        assert!(!row.contains("client"));
+
+        // An empty projected name is absent, not a zero-width badge.
+        assert_eq!(
+            tab_row_text(TabBar::new(&tabs).session(""), 30),
+            " 1 edit >2 build  3 logs      "
+        );
     }
 
     #[test]
     fn a_tab_row_span_keeps_the_caller_position() {
-        let span = tab_row_span(Point::new(2, 0), &[], 10);
+        let span = tab_row_span(
+            Point::new(2, 0),
+            TabBar::default(),
+            10,
+            ChromeOptions::default(),
+        );
         assert_eq!(span.at, Point::new(2, 0));
         assert_eq!(span.cells.len(), 10);
     }

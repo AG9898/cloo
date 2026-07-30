@@ -173,6 +173,20 @@ impl FrameMatrix {
             .collect()
     }
 
+    /// One complete row of this frame, as a frame of its own.
+    ///
+    /// A row of a live composed frame is still every cell of that row, so a
+    /// single-row golden is a complete expectation rather than a partial one.
+    /// It is what lets the tab row be asserted at many widths without also
+    /// re-authoring the pane and status rows beneath it at each one.
+    #[must_use]
+    pub fn only_row(&self, row: u16) -> Self {
+        Self {
+            size: Size::new(self.size.cols, 1),
+            cells: (0..self.size.cols).map(|col| self.cell(col, row)).collect(),
+        }
+    }
+
     fn set(&mut self, col: u16, row: u16, cell: Cell) {
         let Some(index) = self.index(col, row) else {
             return;
