@@ -36,9 +36,10 @@ adjacent framed allocations do not overlap. The top row is likewise no longer a 
 titles — it is the session-aware composition described under [Tab row](#tab-row). The prefix surface
 is no longer a static help list either: it is the searchable command palette card 04 asks for, though
 that card's golden frames are still M9-21's. The session switcher now uses the verified local daemon
-catalog and can move the live client between those sockets. The remaining configuration and status
-variants still need their card-specific passes. A helper being byte-tested does not by itself
-establish that the attached frame matches the handoff.
+catalog and can move the live client between those sockets. Keyboard and mouse resizing now light
+the changed divider and show its visible ratio as card 08 requires. The remaining configuration and
+status variants still need their card-specific passes. A helper being byte-tested does not by
+itself establish that the attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
 
@@ -313,10 +314,13 @@ dragging a gutter can never also focus a pane.
 
 While a keyboard or mouse resize is active, the divider uses the accent color and carries a compact
 `resize · ratio 0.62` label in the nearest safe header or status segment. The affordance clears
-when the gesture or resize mode ends. Its geometry comes from the same client layout used for
-hit-testing, and only the resulting ratio change crosses to session state. The default prefix
-keeps `h/j/k/l` for focus and resolves arrow chords as one-cell divider resizes around the focused
-pane; terminals without mouse reporting therefore retain the same operation.
+on mouse release; a keyboard resize clears on the next non-resize input or after 750ms. Its geometry
+comes from the same client layout used for hit-testing, and only the existing cell-delta resize
+action crosses to session state. The label reconstructs the visible ratio from the framed
+allocations after the daemon's layout answer — stored ratios still never cross the wire. The default
+prefix keeps `h/j/k/l` for focus and resolves arrow chords as one-cell divider resizes around the
+focused pane; an arrow aimed at an outer edge does nothing. Terminals without mouse reporting
+therefore retain the same operation.
 
 A wheel focuses the pane it is over before it scrolls, because scrollback is the focused pane's, and
 a wheel over the tab row or the status bar does nothing at all: there is no scrollback under those

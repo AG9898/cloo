@@ -904,7 +904,7 @@ it returns `Action`s the keyboard sends too.
 | Gesture | `ChromeAction` | Commands | Keyboard equivalent |
 |---|---|---|---|
 | Click a pane body or its header | `Focus(pane)` | `FocusPane` | `focus-left` and its three siblings |
-| Drag a divider | `Resize { pane, dir, delta }` | `ResizePane` | — (a drag is a pointer distance) |
+| Drag a divider | `Resize { pane, dir, delta }` | `ResizePane` | prefixed arrows move an applicable divider one cell |
 | Wheel over a pane | `Scroll { pane, up, lines }` | `FocusPane`, `EnterCopyMode`, `CopyMotion` ×3 | `enter-copy-mode`, `copy-up`/`copy-down` |
 
 `FocusPane` and `ResizePane` name a *pane*, which a keypress cannot supply, so neither has a keymap
@@ -935,6 +935,15 @@ a message about a pane the user can no longer see.
 The local smoke path draws no chrome and has one full-screen pane, so click-to-focus and a drag have
 nothing to move there; the wheel does, and it goes through the same `ChromeAction::commands` list
 rather than a path of its own.
+
+M9-19 adds the active-resize projection without adding session state or a wire type. A mouse press
+retains `ChromeMouse`'s exact `Divider`; a prefixed arrow asks `ScreenLayout::divider_toward` for the
+focused pane's edge and does nothing when that edge is outermost. Both send the existing
+`Action::ResizePane { pane, dir, delta }`, so ratio mutation remains in `Layout::resize`. The client
+lights `ScreenLayout::divider_points` — the same cells mouse hit-testing claims — and reconstructs
+the visible ratio from the framed allocations after each `Layout` answer. Mouse release clears the
+treatment; keyboard activity clears on the next input or its bounded 750ms linger. The ratio and
+deadline are transient client chrome, never authoritative layout data.
 
 ##### Keys and the prefix
 
@@ -1480,10 +1489,13 @@ alive and pumping, preserving their grids and child processes for a later return
   (`RenameTab`, `CopySearch`, `LaunchProfile`) has **no spelling at all**, so a binding cannot name
   a command the keypress could not supply an argument for; those are reached from a surface that
   can ask — a profile identifier is selected in the launcher, not written in a binding.
-- **`Keymap`** — the prefix chord plus the table reached after it. The defaults are tmux's, with
-  `C-b` as the prefix ([DECISIONS.md](DECISIONS.md) RESOLVED-04): `%` and `"` split, `x` closes,
-  `hjkl` and the arrows move focus, `z` zooms, `c`/`&`/`n`/`p` are tabs, `[` enters copy mode, and
-  `d` detaches.
+- **`Keymap`** — the prefix chord plus the table reached after it. The defaults are tmux-shaped,
+  with `C-b` as the prefix ([DECISIONS.md](DECISIONS.md) RESOLVED-04): `%` and `"` split, `x`
+  closes, `hjkl` move focus, the arrows resize the focused pane's applicable divider by one cell,
+  `z` zooms, `c`/`&`/`n`/`p` are tabs, `[` enters copy mode, and `d` detaches. Arrow entries retain
+  their directional focus actions in the configurable table; `Keymap::resize_side` identifies an
+  unmodified default for the client before it emits that action, so overriding or unbinding an
+  arrow still wins normally while `h/j/k/l` remain focus chords.
 
 Conflict resolution is one rule: `bind` replaces a key's action **in place** and returns what it
 displaced. In place, because the order of the table is the order a user reads it in; returning the

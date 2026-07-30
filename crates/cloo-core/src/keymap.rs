@@ -49,6 +49,7 @@
 
 use core::fmt;
 
+use crate::layout::Side;
 use cloo_proto::{Action, ClipboardTarget, CopyMotion, SearchDirection};
 
 // ---------------------------------------------------------------------------
@@ -538,6 +539,11 @@ pub const DEFAULT_PREFIX: Key = Key::ctrl('b');
 
 impl Keymap {
     /// The tmux-shaped defaults: `C-b` and the table below it.
+    ///
+    /// Arrow chords retain their directional focus actions in the public table
+    /// so configuration can override or remove them like every other default.
+    /// [`resize_side`](Self::resize_side) distinguishes those four defaults for
+    /// the client, where the focused pane and drawn divider are available.
     #[must_use]
     pub fn defaults() -> Self {
         let bindings = vec![
@@ -609,6 +615,23 @@ impl Keymap {
             .iter()
             .find(|(bound, _)| *bound == key)
             .map(|(_, action)| action)
+    }
+
+    /// The one-cell resize direction represented by a default arrow binding.
+    ///
+    /// A resize names the focused pane's divider, which this pure keymap cannot
+    /// know. The client asks this before emitting the bound focus action. An
+    /// override to any other action, or an unbind, disables the implicit resize;
+    /// `h/j/k/l` never match because their key codes are characters.
+    #[must_use]
+    pub fn resize_side(&self, key: Key) -> Option<Side> {
+        match (key.code, self.action(key)) {
+            (KeyCode::Left, Some(Action::FocusLeft)) => Some(Side::Left),
+            (KeyCode::Right, Some(Action::FocusRight)) => Some(Side::Right),
+            (KeyCode::Up, Some(Action::FocusUp)) => Some(Side::Up),
+            (KeyCode::Down, Some(Action::FocusDown)) => Some(Side::Down),
+            _ => None,
+        }
     }
 
     /// Every binding, in the order a reader of the configuration would list
@@ -800,6 +823,27 @@ mod tests {
             assert_eq!(keys.action(key(text)), Some(&action), "{text}");
         }
         assert_eq!(keys.action(key("Q")), None, "an unbound chord is unbound");
+    }
+
+    #[test]
+    fn default_arrows_are_resize_chords_while_hjkl_remain_focus() {
+        let mut keys = Keymap::defaults();
+        for (arrow, side) in [
+            ("left", Side::Left),
+            ("right", Side::Right),
+            ("up", Side::Up),
+            ("down", Side::Down),
+        ] {
+            assert_eq!(keys.resize_side(key(arrow)), Some(side), "{arrow}");
+        }
+        for chord in ["h", "j", "k", "l"] {
+            assert_eq!(keys.resize_side(key(chord)), None, "{chord} keeps focus");
+        }
+
+        keys.bind(key("left"), Action::ClosePane);
+        keys.unbind(key("right"));
+        assert_eq!(keys.resize_side(key("left")), None, "an override wins");
+        assert_eq!(keys.resize_side(key("right")), None, "an unbind wins");
     }
 
     #[test]

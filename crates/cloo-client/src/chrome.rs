@@ -34,7 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use cloo_proto::{Cell, CellAttrs, Color, Point, SessionId, Size, TabSummary};
+use cloo_proto::{Cell, CellAttrs, Color, Direction, Point, SessionId, Size, TabSummary};
 
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
 use crate::renderer::Span;
@@ -808,6 +808,82 @@ fn frame_cell(ch: char, focused: bool, options: ChromeOptions) -> Cell {
         cell = dim_cell_with_theme(cell, options.theme);
     }
     cell
+}
+
+// ---------------------------------------------------------------------------
+// Active resize
+// ---------------------------------------------------------------------------
+
+/// Draws a lit divider and its resulting visible ratio.
+///
+/// `points` come from the same `ScreenLayout::divider_points` geometry used by
+/// mouse hit-testing. Each point is painted independently because nested layouts
+/// can split a divider into disjoint segments. The final span is the compact
+/// right-aligned status label from card 08.
+#[must_use]
+pub fn resize_affordance_spans(
+    points: &[Point],
+    dir: Direction,
+    ratio: f32,
+    outer: Size,
+    theme: Theme,
+) -> Vec<Span> {
+    if points.is_empty() || outer.cols == 0 || outer.rows == 0 {
+        return Vec::new();
+    }
+    let glyph = match dir {
+        Direction::Horizontal => '│',
+        Direction::Vertical => '─',
+    };
+    let divider = Cell {
+        ch: glyph,
+        fg: theme.color(ThemeToken::Accent),
+        bg: theme.color(ThemeToken::Frame),
+        attrs: CellAttrs::BOLD,
+    };
+    let mut spans = points
+        .iter()
+        .copied()
+        .map(|point| Span::new(point, vec![divider]))
+        .collect::<Vec<_>>();
+
+    let label = format!("resize · ratio {:.2}", ratio.clamp(0.0, 1.0));
+    let width = usize::from(outer.cols);
+    let shown = if label.chars().count() > width {
+        label
+            .chars()
+            .skip(label.chars().count() - width)
+            .collect::<String>()
+    } else {
+        label
+    };
+    let mut cells = Vec::with_capacity(shown.chars().count());
+    let ratio_at = shown.find("0.").unwrap_or(shown.len());
+    for (byte, ch) in shown.char_indices() {
+        cells.push(Cell {
+            ch,
+            fg: if byte >= ratio_at {
+                theme.color(ThemeToken::Accent)
+            } else {
+                theme.color(ThemeToken::Muted)
+            },
+            bg: theme.color(ThemeToken::Surface),
+            attrs: if byte >= ratio_at {
+                CellAttrs::BOLD
+            } else {
+                CellAttrs::NONE
+            },
+        });
+    }
+    let label_width = u16::try_from(cells.len()).unwrap_or(outer.cols);
+    spans.push(Span::new(
+        Point::new(
+            outer.cols.saturating_sub(label_width),
+            outer.rows.saturating_sub(1),
+        ),
+        cells,
+    ));
+    spans
 }
 
 /// Appends `text` as styled cells over the chrome surface.
@@ -2133,6 +2209,46 @@ mod tests {
         assert_eq!(span.cells[0].bg, theme.color(ThemeToken::Surface));
         assert_eq!(span.cells[1], cells[1]);
         assert_eq!(cells, original, "render-time mapping must not alter input");
+    }
+
+    #[test]
+    fn active_resize_lights_only_its_divider_and_labels_the_ratio() {
+        let points = [Point::new(10, 2), Point::new(10, 3)];
+        let spans = resize_affordance_spans(
+            &points,
+            Direction::Horizontal,
+            0.625,
+            Size::new(40, 8),
+            Theme::storm(),
+        );
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[0].at, points[0]);
+        assert_eq!(spans[1].at, points[1]);
+        for span in &spans[..2] {
+            assert_eq!(text_of(&span.cells), "│");
+            assert_eq!(span.cells[0].fg, ACCENT);
+            assert!(span.cells[0].attrs.contains(CellAttrs::BOLD));
+        }
+        assert_eq!(spans[2].at.row, 7);
+        assert_eq!(text_of(&spans[2].cells), "resize · ratio 0.62");
+    }
+
+    #[test]
+    fn active_resize_uses_the_sixteen_colour_theme_without_losing_text() {
+        let theme = Theme::named(cloo_core::ThemeName::Storm, cloo_proto::TermCaps::default());
+        let spans = resize_affordance_spans(
+            &[Point::new(3, 2)],
+            Direction::Vertical,
+            0.4,
+            Size::new(24, 6),
+            theme,
+        );
+        assert_eq!(spans[0].cells[0].ch, '─');
+        assert_eq!(spans[0].cells[0].fg, Color::Indexed(13));
+        assert_eq!(
+            text_of(&spans.last().expect("a ratio label").cells),
+            "resize · ratio 0.40"
+        );
     }
 
     #[test]

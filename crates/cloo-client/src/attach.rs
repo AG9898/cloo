@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cloo_core::keymap::Keymap;
+use cloo_core::layout::Side;
 use cloo_core::{Config, Profile, VisualConfig};
 use cloo_proto::{
     Action, AttentionState, ClientMessage, CopyModeState, CursorShape, FrameStream, LayoutSnapshot,
@@ -38,13 +39,14 @@ use tokio::net::UnixStream;
 use crate::capabilities::{CapsError, detect_attach_caps};
 use crate::chrome::{
     Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, TOAST_CAPACITY, TabBar,
-    ToastDeck, toast_rows, toast_stack_span,
+    ToastDeck, resize_affordance_spans, toast_rows, toast_stack_span,
 };
 use crate::copy_mode::{highlight_spans, status_span as copy_status_span};
 use crate::effects::{EffectPolicy, apply_effect};
 use crate::input::{
-    ChromeAction, ChromeMouse, InputDecoder, InputEvent, KeyRoute, KeyRouter, MouseRoute,
-    OuterModes, PaneArea, ScreenLayout, overlay_action, palette_actions, queue_action, route_mouse,
+    ChromeAction, ChromeMouse, ChromeTarget, Divider, InputDecoder, InputEvent, KeyRoute,
+    KeyRouter, MouseRoute, OuterModes, PaneArea, ScreenLayout, overlay_action, palette_actions,
+    queue_action, route_mouse,
 };
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase, phase_span};
 use crate::outer::current_size;
@@ -72,6 +74,8 @@ const SESSION_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 /// A healthy detach acknowledgement should be immediate; dropping the socket
 /// after this bound still removes the old attachment without touching its daemon.
 const SWITCH_DETACH_DEADLINE: Duration = Duration::from_secs(2);
+/// How long one keyboard resize remains visible after its layout answer.
+const KEYBOARD_RESIZE_LINGER: Duration = Duration::from_millis(750);
 
 type CatalogResult = Result<Vec<SessionCatalogEntry>, SessionCatalogError>;
 
@@ -876,6 +880,7 @@ where
                 }
                 dirty |= state.tick_launch(now);
                 dirty |= state.tick_toasts(now);
+                dirty |= state.tick_resize(now);
                 if dirty {
                     draw(&mut out, &mut renderer, &state, phase)?;
                     dirty = false;
@@ -970,6 +975,23 @@ struct LiveState {
     caps: TermCaps,
     /// The newest daemon reload revision this client has attempted locally.
     config_revision: u64,
+    /// The client-local card-08 treatment. The session still owns the ratio;
+    /// this remembers only which drawn divider is active and its visible share.
+    resize: Option<ResizeActivity>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResizeSource {
+    Keyboard,
+    Mouse,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResizeActivity {
+    divider: Divider,
+    ratio: f32,
+    source: ResizeSource,
+    until: Option<Instant>,
 }
 
 impl LiveState {
@@ -1002,6 +1024,7 @@ impl LiveState {
             theme: Theme::new(VisualConfig::defaults().theme, TermCaps::default()),
             caps: TermCaps::default(),
             config_revision: 0,
+            resize: None,
         }
     }
 
@@ -1153,6 +1176,7 @@ impl LiveState {
             }
             ServerMessage::Layout(layout) => {
                 self.set_layout(layout);
+                self.refresh_resize_ratio(now);
                 Ok(true)
             }
             ServerMessage::Panes(panes) => {
@@ -1291,6 +1315,77 @@ impl LiveState {
             .and_then(|layout| layout.focused)
             .and_then(|pane| self.modes.get(&pane).copied())
             .unwrap_or_default()
+    }
+
+    /// Resolves a prefixed arrow against the focused pane's drawn edge.
+    ///
+    /// The divider is found from `ScreenLayout`, so an outer edge has no action
+    /// and the highlighted cells are exactly those mouse dragging would claim.
+    fn keyboard_resize(&mut self, side: Side, now: Instant) -> Option<Action> {
+        let focused = self.screen.focused()?;
+        let divider = self.screen.divider_toward(focused, side)?;
+        let delta = match side {
+            Side::Left | Side::Up => -1,
+            Side::Right | Side::Down => 1,
+        };
+        self.begin_resize(divider, ResizeSource::Keyboard, now);
+        Some(Action::ResizePane {
+            pane: divider.pane,
+            dir: divider.dir,
+            delta,
+        })
+    }
+
+    fn begin_resize(&mut self, divider: Divider, source: ResizeSource, now: Instant) {
+        let ratio = self.screen.divider_ratio(divider).unwrap_or(0.5);
+        self.resize = Some(ResizeActivity {
+            divider,
+            ratio,
+            source,
+            until: (source == ResizeSource::Keyboard).then_some(now + KEYBOARD_RESIZE_LINGER),
+        });
+    }
+
+    fn sync_mouse_resize(&mut self, divider: Option<Divider>, now: Instant) {
+        match divider {
+            Some(divider) => self.begin_resize(divider, ResizeSource::Mouse, now),
+            None if self
+                .resize
+                .is_some_and(|resize| resize.source == ResizeSource::Mouse) =>
+            {
+                self.resize = None;
+            }
+            None => {}
+        }
+    }
+
+    fn refresh_resize_ratio(&mut self, now: Instant) {
+        let Some(resize) = self.resize.as_mut() else {
+            return;
+        };
+        if let Some(ratio) = self.screen.divider_ratio(resize.divider) {
+            resize.ratio = ratio;
+            if resize.source == ResizeSource::Keyboard {
+                resize.until = Some(now + KEYBOARD_RESIZE_LINGER);
+            }
+        } else {
+            self.resize = None;
+        }
+    }
+
+    fn clear_resize(&mut self) -> bool {
+        self.resize.take().is_some()
+    }
+
+    fn tick_resize(&mut self, now: Instant) -> bool {
+        if self
+            .resize
+            .and_then(|resize| resize.until)
+            .is_some_and(|until| now >= until)
+        {
+            return self.clear_resize();
+        }
+        false
     }
 
     /// Draws an attention queue only from the complete server projection.
@@ -1498,6 +1593,16 @@ impl LiveState {
                 Point::new(0, self.outer_size.rows.saturating_sub(1)),
                 notice,
                 self.outer_size.cols,
+                self.theme,
+            ));
+        }
+        if let Some(resize) = self.resize {
+            let points = self.screen.divider_points(resize.divider);
+            spans.extend(resize_affordance_spans(
+                &points,
+                resize.divider.dir,
+                resize.ratio,
+                self.outer_size,
                 self.theme,
             ));
         }
@@ -1839,9 +1944,11 @@ async fn route(
                 }
             }
             InputEvent::Paste(text) => {
+                state.clear_resize();
                 attached.send_paste(text).await.map_err(AttachError::from)?
             }
             InputEvent::Focus(focused) => {
+                state.clear_resize();
                 if !focused {
                     keys.reset();
                 }
@@ -1851,6 +1958,23 @@ async fn route(
                     .map_err(AttachError::from)?;
             }
             InputEvent::Mouse(report) => {
+                state.clear_resize();
+                if chrome.is_dragging() {
+                    let action = chrome.feed(&state.screen, ChromeTarget::Gutter, &report);
+                    state.sync_mouse_resize(chrome.active_divider(), Instant::now());
+                    if let Some(action) = action {
+                        if apply_chrome(
+                            attached,
+                            action,
+                            state.copy_mode.as_ref().map(|copy_mode| copy_mode.pane),
+                        )
+                        .await?
+                        {
+                            return Ok(RouteOutcome::Detach);
+                        }
+                    }
+                    continue;
+                }
                 match route_mouse(&state.screen, state.focused_modes(), &report) {
                     MouseRoute::Application(event) => {
                         attached
@@ -1859,7 +1983,9 @@ async fn route(
                             .map_err(AttachError::from)?;
                     }
                     MouseRoute::Chrome(target) => {
-                        if let Some(action) = chrome.feed(&state.screen, target, &report) {
+                        let action = chrome.feed(&state.screen, target, &report);
+                        state.sync_mouse_resize(chrome.active_divider(), Instant::now());
+                        if let Some(action) = action {
                             if apply_chrome(
                                 attached,
                                 action,
@@ -1885,6 +2011,7 @@ async fn route_keys(
     state: &mut LiveState,
     bytes: Vec<u8>,
 ) -> Result<RouteOutcome, AttachRunError> {
+    state.clear_resize();
     if state.overlay.is_some() {
         keys.reset();
         // Everything that leaves the client from an overlay is typed: a profile
@@ -1938,6 +2065,14 @@ async fn route_keys(
                 .send_command(action)
                 .await
                 .map_err(AttachError::from)?,
+            KeyRoute::Resize(side) => {
+                if let Some(action) = state.keyboard_resize(side, Instant::now()) {
+                    attached
+                        .send_command(action)
+                        .await
+                        .map_err(AttachError::from)?;
+                }
+            }
             KeyRoute::Unbound(chord) => {
                 let _ = state.open_overlay(&chord, keys.keymap());
             }
@@ -2586,6 +2721,115 @@ mod tests {
             pending.contains("[C-b] split % stack \" help ?"),
             "a held prefix says what the next key can be: {pending:?}"
         );
+    }
+
+    fn resize_state() -> LiveState {
+        let mut state = LiveState::new(
+            Size::new(40, 10),
+            SessionId::new(1),
+            hello_tabs(),
+            "C-b".to_owned(),
+        );
+        state
+            .apply(ServerMessage::Layout(LayoutSnapshot {
+                tab: TabId::new(1),
+                panes: vec![
+                    PaneRect {
+                        pane: PaneId::new(1),
+                        x: 1,
+                        y: 1,
+                        size: Size::new(18, 6),
+                    },
+                    PaneRect {
+                        pane: PaneId::new(2),
+                        x: 21,
+                        y: 1,
+                        size: Size::new(18, 6),
+                    },
+                ],
+                focused: Some(PaneId::new(1)),
+                zoomed: None,
+            }))
+            .expect("the split applies");
+        state
+    }
+
+    #[test]
+    fn keyboard_resize_uses_the_focused_divider_and_an_edge_is_a_noop() {
+        let now = Instant::now();
+        let mut state = resize_state();
+        assert_eq!(state.keyboard_resize(Side::Left, now), None);
+        assert!(state.resize.is_none(), "an outer edge lights nothing");
+        assert_eq!(
+            state.keyboard_resize(Side::Right, now),
+            Some(Action::ResizePane {
+                pane: PaneId::new(1),
+                dir: cloo_proto::Direction::Horizontal,
+                delta: 1,
+            })
+        );
+        assert_eq!(state.resize.map(|resize| resize.ratio), Some(0.5));
+    }
+
+    #[test]
+    fn keyboard_and_mouse_resize_affordances_show_the_result_and_clear_at_their_boundary() {
+        let now = Instant::now();
+        let mut state = resize_state();
+        let _ = state.keyboard_resize(Side::Right, now);
+        state
+            .apply_at(
+                ServerMessage::Layout(LayoutSnapshot {
+                    tab: TabId::new(1),
+                    panes: vec![
+                        PaneRect {
+                            pane: PaneId::new(1),
+                            x: 1,
+                            y: 1,
+                            size: Size::new(23, 6),
+                        },
+                        PaneRect {
+                            pane: PaneId::new(2),
+                            x: 26,
+                            y: 1,
+                            size: Size::new(13, 6),
+                        },
+                    ],
+                    focused: Some(PaneId::new(1)),
+                    zoomed: None,
+                }),
+                now,
+            )
+            .expect("the resized layout applies");
+        let drawn = frame_text(&state);
+        assert!(drawn.iter().any(|row| row == "resize · ratio 0.62"));
+        let spans = state.spans();
+        let lit = spans
+            .iter()
+            .filter(|span| {
+                span.cells
+                    .as_slice()
+                    .first()
+                    .is_some_and(|cell| cell.ch == '│' && cell.attrs.contains(CellAttrs::BOLD))
+            })
+            .collect::<Vec<_>>();
+        assert!(!lit.is_empty(), "the changed divider must be lit");
+        assert!(
+            lit.iter()
+                .all(|span| span.at.col == 24 || span.at.col == 25),
+            "only the changed divider is lit: {lit:?}"
+        );
+        assert!(!state.tick_resize(now + KEYBOARD_RESIZE_LINGER - Duration::from_millis(1)));
+        assert!(state.tick_resize(now + KEYBOARD_RESIZE_LINGER));
+        assert!(state.resize.is_none());
+
+        let divider = Divider {
+            pane: PaneId::new(1),
+            dir: cloo_proto::Direction::Horizontal,
+        };
+        state.sync_mouse_resize(Some(divider), now);
+        assert!(state.resize.is_some());
+        state.sync_mouse_resize(None, now);
+        assert!(state.resize.is_none(), "mouse release ends the affordance");
     }
 
     #[test]

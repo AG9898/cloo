@@ -49,6 +49,7 @@
 //! is the whole reason a multiplexer can sit under a full-screen program.
 
 use cloo_core::keymap::{Key, KeyCode, KeyMods, Keymap};
+use cloo_core::layout::Side;
 use cloo_proto::{
     Action, CopyMotion, Direction, MouseButton, MouseEvent, MouseKind, MouseMods, MouseTracking,
     PaneId, PaneModes, Point, Size, TermCaps,
@@ -799,6 +800,129 @@ impl ScreenLayout {
             dir: Direction::Vertical,
         })
     }
+
+    /// The divider immediately on `side` of `pane`, if that edge is shared.
+    ///
+    /// This walks the same cells [`divider`](Self::divider) uses for mouse
+    /// dragging. A keyboard resize therefore lights and mutates the divider the
+    /// frame actually shows, while an outer edge has no answer and is a no-op.
+    #[must_use]
+    pub fn divider_toward(&self, pane: PaneId, side: Side) -> Option<Divider> {
+        let area = self.panes.iter().find(|area| area.pane == pane)?;
+        match side {
+            Side::Left => {
+                let col = area.x.checked_sub(1)?;
+                (area.y..area.y.saturating_add(area.size.rows))
+                    .find_map(|row| self.divider(col, row))
+            }
+            Side::Right => {
+                let col = area.x.saturating_add(area.size.cols);
+                (area.y..area.y.saturating_add(area.size.rows))
+                    .find_map(|row| self.divider(col, row))
+            }
+            Side::Up => {
+                let row = area.y.checked_sub(1)?;
+                (area.x..area.x.saturating_add(area.size.cols))
+                    .find_map(|col| self.divider(col, row))
+            }
+            Side::Down => {
+                let row = area.y.saturating_add(area.size.rows);
+                (area.x..area.x.saturating_add(area.size.cols))
+                    .find_map(|col| self.divider(col, row))
+            }
+        }
+    }
+
+    /// Every drawn cell belonging to `divider`, in screen order.
+    #[must_use]
+    pub fn divider_points(&self, divider: Divider) -> Vec<Point> {
+        let mut points = Vec::new();
+        for row in 0..self.size.rows {
+            for col in 0..self.size.cols {
+                if self.divider(col, row) == Some(divider) {
+                    points.push(Point::new(col, row));
+                }
+            }
+        }
+        points
+    }
+
+    /// The divider's visible ratio, reconstructed from the framed allocations.
+    ///
+    /// Ratios remain server-owned and never cross the wire. This is the exact
+    /// cell ratio the user sees: the split coordinate divided by the allocation
+    /// spanned by the panes touching that divider.
+    #[must_use]
+    pub fn divider_ratio(&self, divider: Divider) -> Option<f32> {
+        let points = self.divider_points(divider);
+        points.first()?;
+        match divider.dir {
+            Direction::Horizontal => {
+                let split = points.iter().map(|point| point.col).max()?;
+                let rows = (
+                    points.iter().map(|point| point.row).min()?,
+                    points
+                        .iter()
+                        .map(|point| point.row)
+                        .max()?
+                        .saturating_add(1),
+                );
+                let left = self.panes.iter().filter(|area| {
+                    area.x.saturating_add(area.size.cols).saturating_add(1) == split
+                        && area.y < rows.1
+                        && rows.0 < area.y.saturating_add(area.size.rows)
+                });
+                let right = self.panes.iter().filter(|area| {
+                    area.x.saturating_sub(1) == split
+                        && area.y < rows.1
+                        && rows.0 < area.y.saturating_add(area.size.rows)
+                });
+                ratio_from_bounds(
+                    split,
+                    left.map(|area| area.x.saturating_sub(1)).min()?,
+                    right
+                        .map(|area| area.x.saturating_add(area.size.cols).saturating_add(1))
+                        .max()?,
+                )
+            }
+            Direction::Vertical => {
+                let split = points.iter().map(|point| point.row).max()?;
+                let cols = (
+                    points.iter().map(|point| point.col).min()?,
+                    points
+                        .iter()
+                        .map(|point| point.col)
+                        .max()?
+                        .saturating_add(1),
+                );
+                let above = self.panes.iter().filter(|area| {
+                    area.y.saturating_add(area.size.rows).saturating_add(1) == split
+                        && area.x < cols.1
+                        && cols.0 < area.x.saturating_add(area.size.cols)
+                });
+                let below = self.panes.iter().filter(|area| {
+                    area.y.saturating_sub(1) == split
+                        && area.x < cols.1
+                        && cols.0 < area.x.saturating_add(area.size.cols)
+                });
+                ratio_from_bounds(
+                    split,
+                    above.map(|area| area.y.saturating_sub(1)).min()?,
+                    below
+                        .map(|area| area.y.saturating_add(area.size.rows).saturating_add(1))
+                        .max()?,
+                )
+            }
+        }
+    }
+}
+
+fn ratio_from_bounds(split: u16, start: u16, end: u16) -> Option<f32> {
+    let extent = end.checked_sub(start)?;
+    if extent == 0 {
+        return None;
+    }
+    Some(f32::from(split.saturating_sub(start)) / f32::from(extent))
 }
 
 /// Whether two pane rectangles share any row.
@@ -1073,6 +1197,15 @@ impl ChromeMouse {
         self.drag.is_some()
     }
 
+    /// The divider held by the current drag, if any.
+    #[must_use]
+    pub const fn active_divider(&self) -> Option<Divider> {
+        match self.drag {
+            Some(drag) => Some(drag.divider),
+            None => None,
+        }
+    }
+
     /// Interprets one chrome-owned report against the screen it landed on.
     ///
     /// `target` must be the [`ChromeTarget`] [`route_mouse`] answered with, which
@@ -1344,6 +1477,10 @@ pub enum KeyRoute {
     Pending,
     /// A bound command. The client sends this as `ClientMessage::Command`.
     Command(Action),
+    /// A default prefixed arrow. The live client resolves `side` against the
+    /// focused pane and sends the existing pane-resize action only when that
+    /// drawn edge has a divider.
+    Resize(Side),
     /// A chord after the prefix that no binding names. It is *consumed*: the
     /// user meant it for cloo, and passing it to the child instead is how a
     /// mistyped command ends up in a shell. The unchanged bytes let client-only
@@ -1426,7 +1563,9 @@ impl KeyRouter {
                 self.pending = false;
                 match decoded {
                     Some((key, len)) => {
-                        if let Some(action) = self.keymap.action(key) {
+                        if let Some(side) = self.keymap.resize_side(key) {
+                            routes.push(KeyRoute::Resize(side));
+                        } else if let Some(action) = self.keymap.action(key) {
                             routes.push(KeyRoute::Command(action.clone()));
                         } else if key == self.keymap.prefix() {
                             routes.push(KeyRoute::Pane(keys[index..index + len].to_vec()));
@@ -2356,6 +2495,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn keyboard_resize_resolves_the_focused_edge_and_visible_ratio() {
+        let screen = stacked();
+        let vertical = Divider {
+            pane: PaneId::new(1),
+            dir: Direction::Horizontal,
+        };
+        assert_eq!(
+            screen.divider_toward(PaneId::new(1), Side::Right),
+            Some(vertical)
+        );
+        assert_eq!(
+            screen.divider_toward(PaneId::new(1), Side::Left),
+            None,
+            "an outer edge has no resize action"
+        );
+        assert_eq!(screen.divider_ratio(vertical), Some(0.5));
+        let points = screen.divider_points(vertical);
+        assert!(points.contains(&Point::new(9, 3)));
+        assert!(points.contains(&Point::new(10, 3)));
+        assert!(
+            points.iter().all(|point| point.col == 9 || point.col == 10),
+            "only the shared divider is lit: {points:?}"
+        );
+
+        let horizontal = Divider {
+            pane: PaneId::new(2),
+            dir: Direction::Vertical,
+        };
+        assert_eq!(
+            screen.divider_toward(PaneId::new(3), Side::Up),
+            Some(horizontal)
+        );
+        assert_eq!(screen.divider_ratio(horizontal), Some(0.5));
+    }
+
     /// A drag is the acceptance criterion in one test: every command it produces
     /// is a resize, the deltas are relative rather than cumulative, and nothing
     /// about it focuses, splits, or closes anything.
@@ -2740,9 +2915,13 @@ mod tests {
     }
 
     #[test]
-    fn an_escape_sequence_after_the_prefix_resolves_as_a_chord() {
+    fn a_prefixed_arrow_resolves_as_resize_while_hjkl_keep_focus() {
         assert_eq!(
             router().feed(b"\x02\x1b[D"),
+            vec![KeyRoute::Pending, KeyRoute::Resize(Side::Left)]
+        );
+        assert_eq!(
+            router().feed(b"\x02h"),
             vec![KeyRoute::Pending, KeyRoute::Command(Action::FocusLeft)]
         );
     }

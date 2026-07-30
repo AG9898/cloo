@@ -197,6 +197,11 @@ fn is_raw(fd: &OwnedFd) -> bool {
 
 /// Runs the binary attached to `socket` with all its stdio on `tty`.
 fn spawn_attached_on(tty: &Tty, socket: &Path) -> std::process::Child {
+    spawn_attached_with_term(tty, socket, "xterm-256color")
+}
+
+/// Runs the binary with an explicit outer-terminal capability baseline.
+fn spawn_attached_with_term(tty: &Tty, socket: &Path, term: &str) -> std::process::Child {
     let stdio = || {
         Stdio::from(
             tty.slave
@@ -210,7 +215,7 @@ fn spawn_attached_on(tty: &Tty, socket: &Path) -> std::process::Child {
         .stdout(stdio())
         .stderr(stdio())
         .env("CLOO_SOCKET", socket)
-        .env("TERM", "xterm-256color")
+        .env("TERM", term)
         .env_remove("COLORTERM")
         .spawn()
         .expect("the cloo binary is built before its integration tests")
@@ -1107,6 +1112,55 @@ fn cli_attach_composes_the_frame_and_detaches_without_losing_the_session() {
             .await
             .expect("the reattached client reaches the child");
     });
+    daemon.stop();
+}
+
+#[test]
+fn keyboard_resize_lights_the_live_divider_without_mouse_support() {
+    let dir = TempDir::new("keyboard-resize-live");
+    let socket = dir.socket();
+    let daemon = spawn_daemon_thread(socket.clone(), "printf resize-ready; read _");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .enable_time()
+        .build()
+        .expect("the setup runtime builds");
+    runtime.block_on(async {
+        let mut setup = client(&socket).await;
+        setup
+            .send_command(Action::SplitVertical)
+            .await
+            .expect("the setup split reaches the daemon");
+        let split = await_layout(&mut setup, |layout| layout.panes.len() == 2).await;
+        assert_eq!(split.panes.len(), 2);
+        setup.detach().await.expect("the setup client detaches");
+    });
+
+    let tty = open_tty();
+    // vt100 negotiates no SGR mouse reporting. The prefixed arrow must remain a
+    // complete keyboard fallback rather than depending on a pointer mode.
+    let mut process = spawn_attached_with_term(&tty, &socket, "vt100");
+    read_until(&tty.master, "resize-ready")
+        .unwrap_or_else(|seen| panic!("the split workspace never rendered; saw:\n{seen}"));
+    let mut master = unsafe {
+        // SAFETY: `tty.master` outlives this wrapper, which never closes it.
+        std::mem::ManuallyDrop::new(std::fs::File::from_raw_fd(tty.master.as_raw_fd()))
+    };
+    master
+        .write_all(b"\x02\x1b[D")
+        .expect("the prefixed left arrow reaches the client");
+    let seen = read_until(&tty.master, "resize · ratio")
+        .unwrap_or_else(|seen| panic!("the active resize never rendered; saw:\n{seen}"));
+    assert!(
+        seen.contains("0.49"),
+        "the resulting one-cell ratio is shown: {seen}"
+    );
+
+    master
+        .write_all(b"\x02d")
+        .expect("the client detaches normally");
+    assert!(wait_for_exit(&mut process).success());
+    assert!(!is_raw(&tty.slave), "the resize path restores the terminal");
     daemon.stop();
 }
 
