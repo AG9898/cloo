@@ -113,9 +113,19 @@ Code without inferring their state from terminal text.
 - [V1 implementation workboard](docs/workboard.json)
 - [UI handoff and source mock](references/design_handoff_cloo_ui/README.md)
 
-## <img src="docs/assets/brand/cloo-command.svg" alt="cloo command mark: a compact prompt and underscore" width="24"> Build locally
+## <img src="docs/assets/brand/cloo-command.svg" alt="cloo command mark: a compact prompt and underscore" width="24"> Install
 
-cloo is not published yet, but the current runtime can be built and run from this repository:
+```sh
+npm install -g clooterminal   # prebuilt Linux x64 binary, no install hook
+```
+
+The npm package is named `clooterminal` because npm rejects `cloo` through its package-name
+similarity filter; the installed command is still `cloo`. Publishing to crates.io as `cloo` is
+planned but has not happened yet.
+
+## Build locally
+
+The current runtime can also be built and run from this repository:
 
 ```sh
 cargo run -p cloo                          # open the default workspace
@@ -123,22 +133,11 @@ cargo run -p cloo -- --profile codex       # one local pane, no daemon
 cargo run -p cloo -- server default        # the same daemon in the foreground, for diagnostics
 ```
 
-The planned release channels are:
-
-```sh
-npm install -g clooterminal   # prebuilt binaries
-cargo install cloo            # build from source
-```
-
-No supported release install is available yet. The published 0.0.1 `clooterminal` package is a
-name reservation; the prepared 0.0.4 Linux x64 package awaits maintainer publication. It installs
-the `cloo` command without a downloader or install hook. The npm package uses `clooterminal`
-because npm rejects `cloo` through its package-name similarity filter.
-
 ## Platforms
 
-The npm distribution currently supports Linux x64 only. macOS and Linux ARM builds remain
-source-only; Windows is out of scope for v1.
+The npm distribution supports Linux x64 with glibc 2.34 or newer (Ubuntu 22.04, Debian 12, RHEL 9,
+and later). Older glibc distributions, macOS, and Linux ARM remain source-only; Windows is out of
+scope for v1.
 
 ## License
 

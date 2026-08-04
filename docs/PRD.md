@@ -1,10 +1,10 @@
 # PRD — cloo
 
-> **Status** (2026-07-28)
+> **Status** (2026-08-04)
 >
 > | Track | State |
 > |---|---|
-> | Shipped | `clooterminal` 0.0.1 is a name-reservation placeholder. The Linux x64 0.0.4 package is prepared for maintainer publication; `cloo` 0.0.1 on crates.io is also a placeholder. |
+> | Shipped | `clooterminal` 0.0.4 installs a working Linux x64 `cloo` command (glibc 2.34+); 0.0.1 was a name-reservation placeholder. `cloo` 0.0.1 on crates.io is still a placeholder. |
 > | Implemented in the tree | M0–M9: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, external brand application, and the complete eight-card high-fidelity terminal UI are built and tested. |
 > | Current CLI | `cloo` attaches to the persistent `default` workspace, creating its background daemon when none is listening (M8-01); `cloo <program> [args…]` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
 > | Next | M9 is complete: every handoff card is live in the attached client and asserted by a reviewed cell golden and an outer-pseudoterminal fixture. Manual release validation and registry publishing remain maintainer-owned actions. |

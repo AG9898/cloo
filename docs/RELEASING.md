@@ -52,6 +52,31 @@ npm rejects `cloo` under its similarity policy. Installing it provides the `cloo
    manifest, README, and product-mark asset; the launcher contains its resolver, manifest, README,
    and product-mark asset. Neither package may include an install hook or downloader.
 
+4. Rehearse the install from the local tarballs, which exercises the launcher's optional-dependency
+   resolution without touching the registry:
+
+   ```bash
+   work_dir="$(mktemp -d)"
+   npm install --prefix "$work_dir" --ignore-scripts \
+     dist/npm/clooterminal-linux-x64-0.0.4.tgz dist/npm/clooterminal-0.0.4.tgz
+   "$work_dir/node_modules/.bin/cloo" --version
+   rm -rf "$work_dir"
+   ```
+
+### Compatibility floor
+
+The release binary links glibc dynamically, so the build host sets the floor for every user. Check
+it before publishing:
+
+```bash
+objdump -T target/x86_64-unknown-linux-gnu/release/cloo | grep -oE 'GLIBC_[0-9.]+' | sort -uV | tail -1
+```
+
+Weak symbols such as `pidfd_spawnp` resolve to null on older systems and do not raise the floor;
+the highest *strong* requirement does. The 0.0.4 build requires glibc 2.34, which covers Ubuntu
+22.04, Debian 12, RHEL 9, and later. Building on a newer distribution silently raises that floor
+and breaks installs that previously worked, so any change here belongs in both READMEs.
+
 ## Publish from the maintainer terminal
 
 Authenticate the maintainer's terminal with npm. Do not print, commit, or persist a token in this
