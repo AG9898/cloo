@@ -143,12 +143,58 @@ same fields remain in the same order. Finally, `attach.rs` switches a live clien
 preference from minimal to powerline, observes the composed status row change, and compares pane
 identity and grid caches against their pre-switch clones.
 
+M9-21 closes the set. `tests/visual.rs` now carries a reviewed truecolor cell golden and its
+16-color resolution for every one of the eight cards, and `crates/cloo/tests/visual_attach.rs`
+drives the shipped binary into each of those states over a real pseudoterminal.
+
+The client-side half adds four things to the harness. `SemanticStyle::dimmed` expresses the
+unfocused-pane treatment as the production policy applied to the *resolved* cell rather than as a
+second set of literal colours, which is the only way one golden can describe an unfocused pane at
+both colour depths — a 24-bit role blends toward the frame and keeps its hue, while a palette index
+takes the terminal's `DIM` with its colour untouched. `Paint::Swatch` names a role of a theme the
+surface is *previewing* rather than drawing with, resolved at the depth the theme under test
+negotiated, so card 06's chips say "night's warning at its own value" in truecolor and "the one
+bright yellow every theme collapses to" at sixteen. `Scene` gained the status mode, clock,
+repository, effective-size, notice-stack, cursor-row, and active-resize inputs the remaining cards
+need, and layers the notice and resize spans over `compose_frame` in the order the attached loop
+does. And one shared `workspace_styles` legend covers cards 02, 03, 07, and 08 — a role that means
+one thing on the split card has to mean the same thing on the nested one, and a single legend makes
+that checkable rather than conventional.
+
+The cards themselves: 02 is a 40x9 split whose unfocused, waiting neighbour proves a dimmed amber
+`needs input` stays distinct from a dimmed grey `quiet` and that the no-dim configuration removes the
+treatment without removing focus; 03 is a 40x12 nested workspace with two live notices, asserting the
+placement rule as well as the geometry; 04 is the 40x5 palette after typing `spl`, plus its
+`no matches` position claim and its 18- and 24-column ladder; 06 is the complete 40x17 surface with
+all twenty swatch chips; 07 is both status compositions at 72 and 40 cells over one scene, plus the
+`s>!b` and `Ns>g` ASCII floors; and 08 is card 02 mid-resize, plus the proof that clearing the
+affordance restores the untouched frame exactly. The goldens were confirmed non-vacuous by disabling
+`chrome::dim_cells` and watching eight fixtures fail on the dimmed cells, and the toast theming fix
+by reverting it and watching the 16-colour toast unit test fail.
+
+`crates/cloo/tests/visual_attach.rs` is the other half, and deliberately the coarse one. Each fixture
+starts a real daemon on its own runtime thread, spawns `CARGO_BIN_EXE_cloo attach` with its stdio on
+a 80x24 pseudoterminal, types chords into the master side, and matches against the *visible* text
+with positioning and styling sequences stripped — a composed frame interleaves an SGR run with almost
+every field, so byte-adjacency matching would assert about the renderer's run-splitting rather than
+about the picture, and colour is the cell goldens' claim, not this file's. Matching waits for *all*
+of a fixture's needles, because a surface arrives over several writes and stopping at the first one
+would make every later check a race. Seven fixtures cover the one-pane workspace, the vertical split
+and its nested third pane, the command palette and its live filtering, the verified session catalog,
+the configuration surface, an adapter-reported notification and the queue overlay that lists the same
+projection, and a keyboard resize under `TERM=vt100` where no mouse reporting exists. Every fixture
+ends by detaching with the prefix and asserting the outer terminal is no longer raw. Dismissing an
+overlay always waits for the frame beneath to repaint before the next chord: a lone Escape is flushed
+on a frame tick, so a prefix typed straight after it can be swallowed as the tail of an escape
+sequence, and the fixture would then blame detach for an input race.
+
 Golden updates require an intentional review against
 [`STYLEGUIDE.md`](STYLEGUIDE.md#acceptance-contract-and-delivery-state); regenerating expected
 frames until a failing implementation passes is not an acceptance process. Font rasterization,
-rounded corners, and shadows are outside cell tests. Before M9 is declared complete, capture the
-reference states manually in a truecolor terminal and confirm that the documented cell adaptation
-is recognizably equivalent to the handoff.
+rounded corners, and shadows are outside cell tests. The M9-21 review captured every card at
+reference geometry from the live `visual_attach` fixtures and confirmed each against the handoff;
+the adaptations that review accepted are enumerated in
+[`STYLEGUIDE.md`](STYLEGUIDE.md#intentional-terminal-adaptations).
 
 ---
 
@@ -1056,8 +1102,9 @@ itself. `tests/visual.rs` captures card 06 as complete 40x17 frames in Storm tru
 16-color resolution (where no cell may fall past index 15), and `terminal` palette inheritance
 (default foreground and background throughout, the terminal's own `DIM` for the unfocused pane, and
 named swatches still at their real values), plus the 22- and 18-column narrow ladder where the
-preview yields to the settings and the dismissal hint is last standing. Card 06's reviewed cell
-golden, like card 04's, is M9-21's.
+preview yields to the settings and the dismissal hint is last standing. M9-21 adds card 06's
+reviewed complete-frame golden on top of those, with each swatch chip named as the theme and role it
+previews rather than as a colour.
 
 Typed outer-terminal effects are unit tested in `src/effects.rs`: the policy begins deny-all, a
 permitted title and a capable, permitted OSC 52 store produce their exact terminal bytes once,

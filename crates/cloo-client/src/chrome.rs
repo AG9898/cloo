@@ -2309,7 +2309,11 @@ pub fn toast_cells_in(toast: &Toast, width: u16, theme: Theme) -> Vec<Cell> {
         );
     }
     cells.truncate(width);
-    cells
+    // The text above is pushed over the reference surface, like every other
+    // chrome helper; translating those roles here is what keeps a notice on the
+    // client's own ground at 16 colours instead of leaving one RGB rectangle
+    // floating over an otherwise indexed frame.
+    theme.map_storm_cells(cells)
 }
 
 /// A toast as a positioned span.
@@ -3777,6 +3781,14 @@ mod tests {
             Attention::Failed.color_in(ansi),
             "the state still resolves through the client theme"
         );
+        let cells = toast_cells_in(&toast, 40, ansi);
+        assert!(
+            cells.iter().all(
+                |cell| !matches!(cell.fg, Color::Rgb(..)) && !matches!(cell.bg, Color::Rgb(..))
+            ),
+            "a notice must not leave one RGB rectangle over an indexed frame"
+        );
+        assert_eq!(cells[0].bg, ansi.color(ThemeToken::Surface));
     }
 
     #[test]

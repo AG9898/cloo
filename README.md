@@ -26,9 +26,11 @@
 > handling; and `cloo server [session]` / `cloo attach [session]` remain the explicit halves. This
 > is not a released package or a replacement for tmux yet.
 
-> **Visual status:** the images in this README are the approved destination, not captures of the
-> current sparse attached renderer. M9 is the active fidelity pass that aligns the live terminal
-> frame and all eight handoff states with that target.
+> **Visual status:** the images in this README are the approved handoff. As of M9 all eight of its
+> states are implemented in the live attached client, each asserted by a reviewed cell golden and by
+> a fixture that drives the shipped binary over a real pseudoterminal. Where a terminal cell cannot
+> express a treatment — rounded corners, shadows, pixel gaps, a chosen typeface — cloo draws the
+> documented [cell equivalent](docs/STYLEGUIDE.md#intentional-terminal-adaptations) instead.
 
 ## The idea
 
@@ -97,7 +99,7 @@ Code without inferring their state from terminal text.
 | Product and identity | Settled—the high-fidelity handoff is the terminal UI acceptance contract, and the external [brand system](docs/BRANDING.md) remains separate from terminal chrome. |
 | Core and workspace model | Implemented and tested—PTY ownership, daemon/socket lifecycle, layouts, profiles, attention data, tabs, copy mode, mouse behavior, attached rendering, compatibility fixtures, and supported-target packaging are in place. |
 | What runs today | Plain `cloo` create-or-attaches the global `default` workspace; `cloo <program>` launches one local pane; `cloo server [session]` owns a foreground daemon; `cloo attach [session]` joins one with composed chrome, input routing, resize handling, and layout controls. |
-| Active runtime work | M9 aligns the live attached UI with the eight-card handoff: complete frames, status/tab composition, notifications, command/session surfaces, resize affordance, and runtime visual preferences. |
+| Terminal UI | Implemented and tested—M9 delivers the eight-card handoff: complete pane frames, session-aware tabs, both status compositions, live notifications, the command palette and session switcher, the active-resize affordance, and runtime visual preferences with a truthful theme preview. |
 | Compatibility and release | Reconnect/capability hardening, deterministic fixtures, supported-target packaging, and the external brand system are in place. |
 
 ## Follow the build

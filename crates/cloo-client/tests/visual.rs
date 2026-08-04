@@ -19,12 +19,15 @@ mod harness;
 #[path = "visual/scenes.rs"]
 mod scenes;
 
-use cloo_client::chrome::{PaneChrome, PrefixHint};
+use cloo_client::chrome::{Attention, PaneChrome, PrefixHint};
+use cloo_client::input::PaletteAction;
 use cloo_client::overlay::{ConfigPreview, Overlay, SessionEntry, overlay_spans};
 use cloo_client::renderer::Span;
 use cloo_client::theme::{Theme, ThemeToken};
-use cloo_core::{ThemeChoice, ThemeName, VisualConfig};
-use cloo_proto::{Cell, CellAttrs, Color, PaneId, Point, SessionSummary, Size, TermCaps};
+use cloo_core::{Keymap, StatusMode, ThemeChoice, ThemeName, VisualConfig};
+use cloo_proto::{
+    Cell, CellAttrs, Color, Direction, PaneId, Point, SessionSummary, Size, TermCaps,
+};
 use std::path::PathBuf;
 
 use harness::{ExpectedFrame, FrameMatrix, Paint, SemanticStyle, assert_frame, check_frame};
@@ -321,6 +324,774 @@ fn the_one_pane_workspace_matches_the_same_golden_in_sixteen_colors() {
 }
 
 // ---------------------------------------------------------------------------
+// The shared workspace legend
+// ---------------------------------------------------------------------------
+
+/// Every role a composed workspace frame draws, as one legend.
+///
+/// Cards 02, 03, 07, and 08 share it, which is the point: a role that means one
+/// thing on the split card has to mean the same thing on the nested one, and a
+/// single legend is what makes that checkable rather than conventional. Upper
+/// case is chrome that sits on a raised or framed ground, lower case is chrome
+/// and content on the base surface, and every key whose style is
+/// [`SemanticStyle::dimmed`] belongs to an unfocused pane.
+fn workspace_styles(frame: ExpectedFrame) -> ExpectedFrame {
+    let surface = Paint::Token(ThemeToken::Surface);
+    let raised = Paint::Token(ThemeToken::RaisedSurface);
+    let frame_bg = Paint::Token(ThemeToken::Frame);
+    let border = Paint::Token(ThemeToken::Border);
+    let accent = Paint::Token(ThemeToken::Accent);
+    let primary = Paint::Token(ThemeToken::Primary);
+    let muted = Paint::Token(ThemeToken::Muted);
+    let warning = Paint::Token(ThemeToken::Warning);
+    let error = Paint::Token(ThemeToken::Error);
+    let bold_underline = CellAttrs::BOLD.union(CellAttrs::UNDERLINE);
+
+    frame
+        // -- always-on chrome on a raised or bordered ground ----------------
+        .style(
+            'S',
+            SemanticStyle::new(surface, accent).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'T',
+            SemanticStyle::new(accent, raised).attrs(bold_underline),
+        )
+        .style(
+            'V',
+            SemanticStyle::new(primary, raised).attrs(bold_underline),
+        )
+        .style(
+            'N',
+            SemanticStyle::new(Paint::Token(ThemeToken::Info), raised).attrs(bold_underline),
+        )
+        .style('U', SemanticStyle::new(muted, raised).attrs(bold_underline))
+        .style('K', SemanticStyle::new(muted, raised))
+        .style('Q', SemanticStyle::new(accent, border))
+        .style(
+            'R',
+            SemanticStyle::new(primary, border).attrs(CellAttrs::BOLD),
+        )
+        .style('D', SemanticStyle::new(border, raised))
+        .style('G', SemanticStyle::new(raised, surface))
+        // -- chrome and content on the base surface -------------------------
+        .style(',', SemanticStyle::new(Paint::Terminal, surface))
+        .style('m', SemanticStyle::new(muted, surface))
+        .style('p', SemanticStyle::new(primary, surface))
+        .style('a', SemanticStyle::new(accent, surface))
+        .style(
+            'B',
+            SemanticStyle::new(accent, surface).attrs(CellAttrs::BOLD),
+        )
+        .style('F', SemanticStyle::new(accent, frame_bg))
+        .style(
+            'L',
+            SemanticStyle::new(accent, frame_bg).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'g',
+            SemanticStyle::new(Paint::Token(ThemeToken::Success), surface).attrs(CellAttrs::BOLD),
+        )
+        .style('w', SemanticStyle::new(warning, surface))
+        .style(
+            'W',
+            SemanticStyle::new(warning, surface).attrs(CellAttrs::BOLD),
+        )
+        .style('X', SemanticStyle::new(error, surface))
+        .style(
+            'Y',
+            SemanticStyle::new(error, surface).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'c',
+            SemanticStyle::new(primary, surface).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            '~',
+            SemanticStyle::new(Paint::Token(ThemeToken::DefaultText), surface),
+        )
+        // -- the same roles after the unfocused-pane treatment --------------
+        .style('f', SemanticStyle::new(border, frame_bg).dimmed())
+        .style('b', SemanticStyle::new(border, surface).dimmed())
+        .style('k', SemanticStyle::new(muted, surface).dimmed())
+        .style('P', SemanticStyle::new(primary, surface).dimmed())
+        .style('x', SemanticStyle::new(Paint::Terminal, surface).dimmed())
+        .style('H', SemanticStyle::new(warning, surface).dimmed())
+        .style('Z', SemanticStyle::new(error, surface).dimmed())
+        .style(
+            'y',
+            SemanticStyle::new(Paint::Token(ThemeToken::DefaultText), surface).dimmed(),
+        )
+        // -- the gutter no span paints --------------------------------------
+        .style('_', SemanticStyle::new(Paint::Terminal, Paint::Terminal))
+}
+
+// ---------------------------------------------------------------------------
+// Card 02 — the vertical split
+// ---------------------------------------------------------------------------
+
+/// Two equal panes with a one-cell gutter and card 07's rich status row.
+///
+/// The right pane is unfocused *and* waiting, which is the pair card 02 exists
+/// to prove: dimming reduces contrast toward the frame without turning an amber
+/// `needs input` into the same grey as a quiet neighbour.
+fn vertical_split() -> Scene {
+    Scene::new(Size::new(40, 9))
+        .named("dev")
+        .clients(1)
+        .tab("main", true)
+        .hint(PrefixHint::new("C-b"))
+        .status(StatusMode::Powerline)
+        .repository("main", 2)
+        .pane(
+            ScenePane::new(
+                PaneId::new(1),
+                1,
+                2,
+                Size::new(17, 5),
+                PaneChrome::new(1, "shell").focused(true),
+            )
+            .text(&["$ cargo test"]),
+        )
+        .pane(
+            ScenePane::new(
+                PaneId::new(2),
+                21,
+                2,
+                Size::new(18, 5),
+                PaneChrome::new(2, "claude").attention(Attention::NeedsInput),
+            )
+            .text(&["apply the patch?"]),
+        )
+        .attention(2, "claude", Attention::NeedsInput)
+}
+
+// ---------------------------------------------------------------------------
+// Card 03 — the nested agent workspace
+// ---------------------------------------------------------------------------
+
+/// A left column beside a stacked right column, with two live notices over it.
+///
+/// The notices are the reason this card is composed rather than assembled from
+/// helpers: `toast_rows` places them between the two always-on chrome rows and
+/// skips the focused pane's cursor row, so the golden is where the client
+/// actually put them.
+fn nested_workspace() -> Scene {
+    Scene::new(Size::new(40, 12))
+        .named("dev")
+        .clients(2)
+        .tab("edit", false)
+        .tab("agents", true)
+        .hint(PrefixHint::new("C-b"))
+        .cursor_row(2)
+        .pane(
+            ScenePane::new(
+                PaneId::new(1),
+                1,
+                2,
+                Size::new(17, 8),
+                PaneChrome::new(1, "shell").focused(true),
+            )
+            .text(&["$ cargo test", "running 12 tests"]),
+        )
+        .pane(
+            ScenePane::new(
+                PaneId::new(2),
+                21,
+                2,
+                Size::new(18, 3),
+                PaneChrome::new(2, "claude").attention(Attention::NeedsInput),
+            )
+            .text(&["apply the patch?"]),
+        )
+        .pane(
+            ScenePane::new(
+                PaneId::new(3),
+                21,
+                7,
+                Size::new(18, 3),
+                PaneChrome::new(3, "build").attention(Attention::Failed),
+            )
+            .text(&["error[E0308]"]),
+        )
+        .attention(2, "claude", Attention::NeedsInput)
+        .attention(3, "build", Attention::Failed)
+        .toast(2, "claude", Attention::NeedsInput)
+        .toast(3, "build", Attention::Failed)
+}
+
+// ---------------------------------------------------------------------------
+// Card 07 — the two status compositions
+// ---------------------------------------------------------------------------
+
+/// A workspace with every optional status value available, so the two
+/// compositions differ only in how they spend one row.
+///
+/// Both variants read the same caches: the daemon's projected session name,
+/// client count, and effective minimum size, this client's own attention queue
+/// and prefix, and its bounded local clock and Git answers. Changing the mode
+/// therefore changes chrome and nothing else, which is what a pair of goldens
+/// over one scene can show and a pair of separately built rows cannot.
+fn status_variant(mode: StatusMode, width: u16) -> Scene {
+    Scene::new(Size::new(width, 5))
+        .named("dev")
+        .clients(2)
+        .tab("edit", false)
+        .tab("build", true)
+        .hint(PrefixHint::new("C-b"))
+        .status(mode)
+        .repository("main", 2)
+        .clock("14:38")
+        .effective_size(Size::new(132, 38))
+        .pane({
+            let body = width.saturating_sub(2).max(1);
+            let pane = ScenePane::new(
+                PaneId::new(1),
+                1,
+                2,
+                Size::new(body, 1),
+                PaneChrome::new(1, "shell").focused(true),
+            );
+            // A floor-width scene has no room for a transcript, and inventing
+            // one would only be asserting about the fixture.
+            if body >= 12 {
+                pane.text(&["$ cargo test"])
+            } else {
+                pane
+            }
+        })
+        .attention(2, "claude", Attention::NeedsInput)
+}
+
+/// The status row of [`status_variant`], which is the whole card.
+fn status_row(mode: StatusMode, width: u16, theme: Theme) -> FrameMatrix {
+    status_variant(mode, width).frame(theme).only_row(4)
+}
+
+// ---------------------------------------------------------------------------
+// Card 08 — the active pane resize
+// ---------------------------------------------------------------------------
+
+/// Card 02's workspace mid-resize: the divider column is lit for exactly the
+/// rows the two framed allocations share, and the label reports the ratio those
+/// allocations reconstruct.
+fn resizing_split() -> Scene {
+    let divider = (1..=7).map(|row| Point::new(19, row)).collect();
+    vertical_split().resizing(divider, Direction::Horizontal, 0.47)
+}
+
+// ---------------------------------------------------------------------------
+// Cards 02, 03, 07, and 08 — the reviewed goldens
+// ---------------------------------------------------------------------------
+
+/// Card 02's complete frame: gutter, focus, dimming, and the powerline row.
+fn vertical_split_golden() -> ExpectedFrame {
+    let body = "│                 │ │                  │";
+    let body_keys = "F~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyf";
+    workspace_styles(ExpectedFrame::new())
+        .row(
+            " dev >1 main           2 panes  1 client",
+            "SSSSSTTTTTTT,,,,,,,,,,,mmmmmmmmmmmmmmmmm",
+        )
+        .row(
+            "┌> 1 shell       ?┐ ┌  2 claude       !┐",
+            "FaammBBBBB,,,,,,,mF_fbbkkPPPPPPxxxxxxxHf",
+        )
+        .row(
+            "│$ cargo test     │ │apply the patch?  │",
+            "F~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyf",
+        )
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(
+            "└─────────────────┘ └──────────────────┘",
+            "FFFFFFFFFFFFFFFFFFF_ffffffffffffffffffff",
+        )
+        .row(
+            " NORMAL \u{e0b0} s dev \u{e0b0} >1 main \u{e0b0} git main +2 ",
+            "SSSSSSSSQRRRRRRRDUTNUVVVVUG,gggmppppmww,",
+        )
+}
+
+#[test]
+fn the_vertical_split_card_matches_its_truecolor_golden() {
+    assert_frame(
+        &vertical_split().frame(Theme::storm()),
+        &vertical_split_golden(),
+        Theme::storm(),
+    );
+}
+
+#[test]
+fn the_vertical_split_card_matches_the_same_golden_in_sixteen_colors() {
+    let theme = sixteen_color(ThemeName::Storm);
+    assert_frame(
+        &vertical_split().frame(theme),
+        &vertical_split_golden(),
+        theme,
+    );
+}
+
+/// Dimming has to reduce contrast without erasing meaning, and that is a claim
+/// about *pairs* of cells rather than about any one of them.
+#[test]
+fn the_unfocused_pane_recedes_without_losing_its_waiting_state() {
+    let theme = Theme::storm();
+    let frame = vertical_split().frame(theme);
+    let waiting = frame.cell(38, 1);
+    let quiet = frame.cell(26, 1);
+    assert_eq!(waiting.ch, '!', "the glyph survives the treatment");
+    assert_ne!(
+        waiting.fg, quiet.fg,
+        "a dimmed amber `needs input` must not become the dimmed grey of a quiet neighbour"
+    );
+
+    // The focused pane keeps its accent frame and the neighbour does not, at
+    // both colour depths, which is the signal a user without colour still reads
+    // from the `>` marker beside it.
+    for theme in [theme, sixteen_color(ThemeName::Storm)] {
+        let frame = vertical_split().frame(theme);
+        assert_eq!(frame.cell(0, 1).fg, theme.color(ThemeToken::Accent));
+        assert_ne!(frame.cell(20, 1).fg, theme.color(ThemeToken::Accent));
+        assert_eq!(frame.cell(1, 1).ch, '>');
+        assert_eq!(frame.cell(21, 1).ch, ' ');
+    }
+}
+
+/// The no-dim accessibility configuration turns the whole treatment off and
+/// leaves focus to the accent frame and the marker.
+#[test]
+fn the_no_dim_configuration_leaves_focus_to_the_accent_and_the_marker() {
+    let theme = Theme::storm();
+    let frame = vertical_split().no_dim().frame(theme);
+    assert_eq!(
+        frame.cell(38, 1).fg,
+        theme.color(ThemeToken::Warning),
+        "an undimmed waiting pane is the warning colour itself"
+    );
+    assert_eq!(frame.cell(21, 2).bg, theme.color(ThemeToken::Surface));
+    assert_eq!(
+        frame.cell(0, 1).fg,
+        theme.color(ThemeToken::Accent),
+        "focus is still the accent frame"
+    );
+    assert_ne!(frame.cell(20, 1).fg, theme.color(ThemeToken::Accent));
+}
+
+/// Card 03's complete frame, notices included.
+fn nested_workspace_golden() -> ExpectedFrame {
+    let body = "│                 │ │                  │";
+    let body_keys = "F~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyf";
+    workspace_styles(ExpectedFrame::new())
+        .row(
+            " dev  1 edit >2 agents             3p 2c",
+            "SSSSSmmmmmmmmTTTTTTTTT,,,,,,,,,,,,,mmmmm",
+        )
+        // The first notice floats in the upper-right safe area, which on a frame
+        // this small is the right pane's own top frame row. That is the
+        // documented placement, not a collision: a notice may pass in front of a
+        // harness, and only the focused pane's cursor row is protected.
+        .row(
+            "┌> 1 shell       ?┐claude ! needs input┐",
+            "FaammBBBBB,,,,,,,mFpppppp,wwwwwwwwwwwwwf",
+        )
+        .row(
+            "│$ cargo test     │ │apply the patch?  │",
+            "F~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyf",
+        )
+        .row(
+            "│running 12 tests │ │    build x failed│",
+            "F~~~~~~~~~~~~~~~~~F_fyyyyppppp,XXXXXXXXf",
+        )
+        .row(body, body_keys)
+        .row(
+            "│                 │ └──────────────────┘",
+            "F~~~~~~~~~~~~~~~~~F_ffffffffffffffffffff",
+        )
+        .row(
+            "│                 │ ┌  3 build x failed┐",
+            "F~~~~~~~~~~~~~~~~~F_fbbkkPPPPPxZZZZZZZZf",
+        )
+        .row(
+            "│                 │ │error[E0308]      │",
+            "F~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyf",
+        )
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(
+            "└─────────────────┘ └──────────────────┘",
+            "FFFFFFFFFFFFFFFFFFF_ffffffffffffffffffff",
+        )
+        .row(
+            " s dev   1 edit  >2 agents  1! 1x   C-b ",
+            "SSSSSSSmmmmmmmmmUTNUVVVVVVU,Ww,YX,,,ppp,",
+        )
+}
+
+#[test]
+fn the_nested_workspace_card_matches_its_truecolor_golden() {
+    assert_frame(
+        &nested_workspace().frame(Theme::storm()),
+        &nested_workspace_golden(),
+        Theme::storm(),
+    );
+}
+
+#[test]
+fn the_nested_workspace_card_matches_the_same_golden_in_sixteen_colors() {
+    let theme = sixteen_color(ThemeName::Storm);
+    assert_frame(
+        &nested_workspace().frame(theme),
+        &nested_workspace_golden(),
+        theme,
+    );
+}
+
+/// The notice stack is bounded by the frame as well as by its own capacity, and
+/// it never takes a row the chrome owns.
+#[test]
+fn the_notice_stack_stays_inside_the_frame_and_off_the_cursor_row() {
+    let theme = Theme::storm();
+    let frame = nested_workspace().frame(theme);
+    // Row 2 is the declared cursor row, so the second notice landed on row 3.
+    assert!(
+        !frame.text_row(2).contains("build"),
+        "{:?}",
+        frame.text_row(2)
+    );
+    assert!(frame.text_row(3).contains("build x failed"));
+    // Neither always-on chrome row was taken.
+    assert!(frame.text_row(0).contains("agents"));
+    assert!(frame.text_row(11).contains("C-b"));
+}
+
+/// The two status compositions, at the reference width and at the narrow one.
+///
+/// Read as a table this is the whole card: the same scene, the same caches, one
+/// configuration key, and two rows that differ in composition rather than in
+/// what they claim.
+const STATUS_LADDER: [(StatusMode, u16, &str, &str); 4] = [
+    (
+        StatusMode::Minimal,
+        72,
+        " s dev   1 edit  >2 build  1!        git main +2  2 clients  C-b  14:38 ",
+        "SSSSSSSmmmmmmmmmUTNUVVVVVU,Ww,,,,,,,,gggmppppmww,mmmmmmmmmmm,ppp,ccccccc",
+    ),
+    (
+        StatusMode::Powerline,
+        72,
+        " NORMAL \u{e0b0} s dev \u{e0b0} >2 build \u{e0b0} git main +2         2 clients · min 132x38 ",
+        "SSSSSSSSQRRRRRRRDUTNUVVVVVUG,gggmppppmww,,,,,,,,KKKKKKKKKKKKKKKKKKKKKKKK",
+    ),
+    (
+        StatusMode::Minimal,
+        40,
+        " s dev   1 edit  >2 build  1!       C-b ",
+        "SSSSSSSmmmmmmmmmUTNUVVVVVU,Ww,,,,,,,ppp,",
+    ),
+    (
+        StatusMode::Powerline,
+        40,
+        " NORMAL \u{e0b0} s dev \u{e0b0} >2 build \u{e0b0} git +2     ",
+        "SSSSSSSSQRRRRRRRDUTNUVVVVVUG,gggwww,,,,,",
+    ),
+];
+
+#[test]
+fn both_status_variants_match_their_truecolor_and_sixteen_color_goldens() {
+    for theme in [Theme::storm(), sixteen_color(ThemeName::Storm)] {
+        for (mode, width, text, keys) in STATUS_LADDER {
+            assert_frame(
+                &status_row(mode, width, theme),
+                &workspace_styles(ExpectedFrame::new()).row(text, keys),
+                theme,
+            );
+        }
+    }
+}
+
+/// Below the narrow forms above, both compositions reach an ASCII floor that
+/// still names session, tab, attention or repository, and the prefix.
+#[test]
+fn both_status_variants_reach_a_documented_ascii_floor() {
+    let theme = Theme::storm();
+    let text = |mode, width| {
+        let row = status_row(mode, width, theme);
+        (0..row.size().cols)
+            .map(|col| row.cell(col, 0).ch)
+            .collect::<String>()
+    };
+    assert_eq!(text(StatusMode::Minimal, 4), "s>!b");
+    assert_eq!(text(StatusMode::Powerline, 4), "Ns>g");
+    for width in [4, 12, 20, 40, 72] {
+        assert!(
+            text(StatusMode::Minimal, width).is_ascii(),
+            "the default composition never needs a font: {:?}",
+            text(StatusMode::Minimal, width)
+        );
+    }
+    // Powerline's only non-ASCII cell is the separator the preference opted
+    // into, and it is the first thing to go: the floor is four ASCII markers.
+    assert!(text(StatusMode::Powerline, 20).contains('\u{e0b0}'));
+    assert!(
+        text(StatusMode::Powerline, 4).is_ascii(),
+        "the floor keeps the fields and drops the glyph"
+    );
+}
+
+/// Card 08's complete frame: the same split, mid-resize.
+fn resizing_split_golden() -> ExpectedFrame {
+    let body = "│                 │││                  │";
+    let body_keys = "F~~~~~~~~~~~~~~~~~FLfyyyyyyyyyyyyyyyyyyf";
+    workspace_styles(ExpectedFrame::new())
+        .row(
+            " dev >1 main           2 panes  1 client",
+            "SSSSSTTTTTTT,,,,,,,,,,,mmmmmmmmmmmmmmmmm",
+        )
+        .row(
+            "┌> 1 shell       ?┐│┌  2 claude       !┐",
+            "FaammBBBBB,,,,,,,mFLfbbkkPPPPPPxxxxxxxHf",
+        )
+        .row(
+            "│$ cargo test     │││apply the patch?  │",
+            "F~~~~~~~~~~~~~~~~~FLfyyyyyyyyyyyyyyyyyyf",
+        )
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(body, body_keys)
+        .row(
+            "└─────────────────┘│└──────────────────┘",
+            "FFFFFFFFFFFFFFFFFFFLffffffffffffffffffff",
+        )
+        .row(
+            " NORMAL \u{e0b0} s dev \u{e0b0} >1 resize · ratio 0.47",
+            "SSSSSSSSQRRRRRRRDUTNUmmmmmmmmmmmmmmmBBBB",
+        )
+}
+
+#[test]
+fn the_active_resize_card_matches_its_truecolor_golden() {
+    assert_frame(
+        &resizing_split().frame(Theme::storm()),
+        &resizing_split_golden(),
+        Theme::storm(),
+    );
+}
+
+#[test]
+fn the_active_resize_card_matches_the_same_golden_in_sixteen_colors() {
+    let theme = sixteen_color(ThemeName::Storm);
+    assert_frame(
+        &resizing_split().frame(theme),
+        &resizing_split_golden(),
+        theme,
+    );
+}
+
+/// The affordance is additive: clearing it restores card 02 exactly, so nothing
+/// about a resize can leave a mark once the gesture ends.
+#[test]
+fn clearing_the_resize_affordance_restores_the_untouched_split() {
+    for theme in [Theme::storm(), sixteen_color(ThemeName::Storm)] {
+        assert_eq!(
+            vertical_split().frame(theme),
+            vertical_split().frame(theme),
+            "the scene itself is deterministic"
+        );
+        assert_ne!(resizing_split().frame(theme), vertical_split().frame(theme));
+    }
+    assert_frame(
+        &vertical_split().frame(Theme::storm()),
+        &vertical_split_golden(),
+        Theme::storm(),
+    );
+}
+
+/// A terminal too narrow for the label keeps its *ratio* rather than its
+/// prefix, and the lit divider is unaffected by that yield: the number is the
+/// thing the affordance exists to report.
+#[test]
+fn the_resize_label_truncates_from_its_head_on_a_narrow_frame() {
+    let theme = Theme::storm();
+    let narrow = Scene::new(Size::new(12, 4))
+        .tab("main", true)
+        .pane(
+            ScenePane::new(
+                PaneId::new(1),
+                0,
+                1,
+                Size::new(12, 1),
+                PaneChrome::new(1, "sh").focused(true),
+            )
+            .headerless(),
+        )
+        .resizing(vec![Point::new(5, 1)], Direction::Horizontal, 0.62)
+        .frame(theme);
+    assert_eq!(narrow.text_row(3), "· ratio 0.62");
+    assert_eq!(narrow.cell(5, 1).ch, '│');
+    assert_eq!(narrow.cell(5, 1).fg, theme.color(ThemeToken::Accent));
+    assert!(narrow.cell(5, 1).attrs.contains(CellAttrs::BOLD));
+}
+
+// ---------------------------------------------------------------------------
+// The shared overlay legend
+// ---------------------------------------------------------------------------
+
+/// The roles every overlay surface draws over the raised box.
+///
+/// The surfaces share one rendering model, so they share one legend: a selected
+/// row's marker is the same accent on every card, and a hint row is the same
+/// muted text. A card that needs more — card 06's swatches and its live preview
+/// panes — extends this rather than replacing it.
+fn overlay_styles(frame: ExpectedFrame) -> ExpectedFrame {
+    let raised = Paint::Token(ThemeToken::RaisedSurface);
+    frame
+        .style(
+            'r',
+            SemanticStyle::new(Paint::Token(ThemeToken::Border), raised),
+        )
+        .style(
+            'A',
+            SemanticStyle::new(Paint::Token(ThemeToken::Accent), raised).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'e',
+            SemanticStyle::new(Paint::Token(ThemeToken::Accent), raised),
+        )
+        .style(
+            'm',
+            SemanticStyle::new(Paint::Token(ThemeToken::Muted), raised),
+        )
+        .style(
+            'd',
+            SemanticStyle::new(Paint::Token(ThemeToken::DefaultText), raised),
+        )
+        .style(
+            'v',
+            SemanticStyle::new(Paint::Token(ThemeToken::Primary), raised),
+        )
+        .style(
+            'V',
+            SemanticStyle::new(Paint::Token(ThemeToken::Primary), raised).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            's',
+            SemanticStyle::new(Paint::Token(ThemeToken::Success), raised),
+        )
+}
+
+// ---------------------------------------------------------------------------
+// Card 04 — the searchable prefix palette
+// ---------------------------------------------------------------------------
+
+/// The palette after typing `spl`, which is the card's own illustration.
+fn command_palette() -> Overlay {
+    let mut overlay = Overlay::palette(&Keymap::defaults());
+    for ch in "spl".chars() {
+        overlay.apply_palette(PaletteAction::Insert(ch));
+    }
+    overlay
+}
+
+fn overlay_frame(overlay: &Overlay, size: Size, theme: Theme) -> FrameMatrix {
+    FrameMatrix::capture(size, &overlay_spans(Point::new(0, 0), overlay, size, theme))
+}
+
+/// The palette's complete surface: title, query line, results, hints.
+///
+/// The chord column is accented *and* bold on every row, which is the card's
+/// one non-negotiable: the thing a user opened this surface to find may not rest
+/// on colour. The rest of a row spends its width in the shared overlay order.
+fn command_palette_golden() -> ExpectedFrame {
+    overlay_styles(ExpectedFrame::new())
+        .row(
+            "  commands - prefix C-b 1/2             ",
+            "rrAAAAAAAAAAAAAAAAAAAAAmmmmddddddddddddd",
+        )
+        .row(
+            "  / spl_                                ",
+            "rrmmvvvvdddddddddddddddddddddddddddddddd",
+        )
+        .row(
+            "> % split right split-vertical          ",
+            "AAAmeeeeeeeeeeemmmmmmmmmmmmmmmdddddddddd",
+        )
+        .row(
+            "  \" split down split-horizontal         ",
+            "rrAmvvvvvvvvvvmmmmmmmmmmmmmmmmmddddddddd",
+        )
+        .row(
+            "  esc close enter run up/down move      ",
+            "rrmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmdddddd",
+        )
+}
+
+#[test]
+fn command_palette_card_matches_truecolor_and_sixteen_color_goldens() {
+    let overlay = command_palette();
+    let size = Size::new(40, 5);
+    for theme in [Theme::storm(), sixteen_color(ThemeName::Storm)] {
+        assert_frame(
+            &overlay_frame(&overlay, size, theme),
+            &command_palette_golden(),
+            theme,
+        );
+    }
+}
+
+/// The palette's own departures from the shared overlay vocabulary, each of
+/// which the card asks for: a live query, a `no matches` position claim rather
+/// than a blank box, and a hint row that says how navigation moved.
+#[test]
+fn command_palette_card_reports_its_query_state_rather_than_going_blank() {
+    let theme = Theme::storm();
+    let size = Size::new(40, 5);
+    let text = |overlay: &Overlay, row| overlay_frame(overlay, size, theme).text_row(row);
+
+    let empty = Overlay::palette(&Keymap::defaults());
+    assert!(text(&empty, 0).starts_with("  commands - prefix C-b 1/"));
+    assert_eq!(text(&empty, 1).trim_end(), "  / _");
+
+    let mut nothing = command_palette();
+    for ch in "zzz".chars() {
+        nothing.apply_palette(PaletteAction::Insert(ch));
+    }
+    assert_eq!(
+        text(&nothing, 0).trim_end(),
+        "  commands - prefix C-b no matches"
+    );
+
+    // Navigation is the arrows here, because `j` is query text; the hint row is
+    // where that departure is stated.
+    assert!(text(&empty, 4).contains("up/down move"));
+    assert!(!text(&empty, 4).contains("j/k move"));
+}
+
+/// The narrow ladder: the query line yields before the title and the hint row,
+/// so a palette too short for one still says what it is and how to leave it.
+#[test]
+fn command_palette_card_keeps_its_title_and_dismissal_on_a_narrow_surface() {
+    let theme = Theme::storm();
+    let overlay = command_palette();
+
+    let narrow = overlay_frame(&overlay, Size::new(18, 4), theme);
+    assert_eq!(narrow.text_row(0), "  commands - prefi");
+    assert_eq!(narrow.text_row(1), "  / spl_          ");
+    assert_eq!(narrow.text_row(3), "  esc close       ");
+
+    let short = overlay_frame(&overlay, Size::new(24, 3), theme);
+    assert_eq!(short.text_row(0).trim_end(), "  commands - prefix C-b");
+    assert!(
+        short.text_row(2).contains("esc close"),
+        "dismissal is the last hint standing: {:?}",
+        short.text_row(2)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Card 05 — the real session switcher
 // ---------------------------------------------------------------------------
 
@@ -474,10 +1245,193 @@ fn config_card_rows() -> Vec<String> {
     rows
 }
 
+/// Card 06's legend: the shared overlay roles, twenty swatch chips, and the
+/// live preview pair's own workspace roles.
+///
+/// The chips are the reason this card has a golden of its own. Each is a
+/// [`Paint::Swatch`] naming the theme it previews and the semantic role it
+/// stands for, so the truecolor expectation says "night's warning" where the
+/// 16-colour resolution of the *same* expectation says "the one bright-yellow
+/// every theme collapses to". The preview block below them names the ordinary
+/// focused and dimmed pane roles, because it is drawn by the production frame
+/// helpers rather than by a second mock renderer.
+fn config_card_styles(frame: ExpectedFrame) -> ExpectedFrame {
+    let raised = Paint::Token(ThemeToken::RaisedSurface);
+    let surface = Paint::Token(ThemeToken::Surface);
+    let chips = [
+        ThemeToken::Accent,
+        ThemeToken::Info,
+        ThemeToken::Success,
+        ThemeToken::Warning,
+        ThemeToken::Error,
+    ];
+    // One key per (theme, role): four rows of five, in the documented order.
+    let keys = [
+        ['1', '2', '3', '4', '5'],
+        ['6', '7', '8', '9', '0'],
+        ['!', '@', '#', '$', '%'],
+        ['^', '&', '*', '(', ')'],
+    ];
+    let mut frame = overlay_styles(frame);
+    for (name, row) in ThemeName::ALL.into_iter().zip(keys) {
+        for (token, key) in chips.into_iter().zip(row) {
+            frame = frame.style(key, SemanticStyle::new(Paint::Swatch(name, token), raised));
+        }
+    }
+    frame
+        // -- the live preview pair, drawn by the real frame helpers ---------
+        .style(
+            'F',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Accent),
+                Paint::Token(ThemeToken::Frame),
+            ),
+        )
+        .style(
+            'b',
+            SemanticStyle::new(Paint::Token(ThemeToken::Accent), surface),
+        )
+        .style(
+            'B',
+            SemanticStyle::new(Paint::Token(ThemeToken::Accent), surface).attrs(CellAttrs::BOLD),
+        )
+        .style(
+            'u',
+            SemanticStyle::new(Paint::Token(ThemeToken::Muted), surface),
+        )
+        .style(',', SemanticStyle::new(Paint::Terminal, surface))
+        .style(
+            '~',
+            SemanticStyle::new(Paint::Token(ThemeToken::DefaultText), surface),
+        )
+        .style(
+            'f',
+            SemanticStyle::new(
+                Paint::Token(ThemeToken::Border),
+                Paint::Token(ThemeToken::Frame),
+            )
+            .dimmed(),
+        )
+        .style(
+            'g',
+            SemanticStyle::new(Paint::Token(ThemeToken::Border), surface).dimmed(),
+        )
+        .style(
+            'h',
+            SemanticStyle::new(Paint::Token(ThemeToken::Muted), surface).dimmed(),
+        )
+        .style(
+            'i',
+            SemanticStyle::new(Paint::Token(ThemeToken::Primary), surface).dimmed(),
+        )
+        .style('j', SemanticStyle::new(Paint::Terminal, surface).dimmed())
+        .style(
+            'l',
+            SemanticStyle::new(Paint::Token(ThemeToken::DefaultText), surface).dimmed(),
+        )
+}
+
 fn config_text(frame: &FrameMatrix) -> Vec<String> {
     (0..frame.size().rows)
         .map(|row| frame.text_row(row).trim_end().to_owned())
         .collect()
+}
+
+/// Card 06's complete surface, role by role.
+///
+/// The four swatch rows are the point: each chip names the theme it previews and
+/// the semantic role it stands for, so this one expectation says "night's
+/// warning at its own value" against a truecolor client and "the single bright
+/// yellow every theme collapses to" against a 16-colour one.
+fn config_preview_golden() -> ExpectedFrame {
+    config_card_styles(ExpectedFrame::new())
+        .row(
+            "  configuration 1/11                    ",
+            "rrAAAAAAAAAAAAAmmmmmdddddddddddddddddddd",
+        )
+        .row(
+            "> theme  storm                          ",
+            "AAmmmmmmmeeeeedddddddddddddddddddddddddd",
+        )
+        .row(
+            "  focus  dim unfocused                  ",
+            "rrmmmmmmmvvvvvvvvvvvvvdddddddddddddddddd",
+        )
+        .row(
+            "  status minimal                        ",
+            "rrmmmmmmmvvvvvvvdddddddddddddddddddddddd",
+        )
+        .row(
+            "  motion on                             ",
+            "rrmmmmmmmvvddddddddddddddddddddddddddddd",
+        )
+        .row(
+            "  reduce off                            ",
+            "rrmmmmmmmvvvdddddddddddddddddddddddddddd",
+        )
+        .row(
+            "  keys   C-b                            ",
+            "rrmmmmmmmvvvdddddddddddddddddddddddddddd",
+        )
+        .row(
+            "  themes                                ",
+            "rrmmmmmmdddddddddddddddddddddddddddddddd",
+        )
+        .row(
+            "  * storm   # # # # #                   ",
+            "rrsmVVVVVVVm1m2m3m4m5ddddddddddddddddddd",
+        )
+        .row(
+            "    night   # # # # #                   ",
+            "rrmmVVVVVVVm6m7m8m9m0ddddddddddddddddddd",
+        )
+        .row(
+            "    gruvbox # # # # #                   ",
+            "rrmmVVVVVVVm!m@m#m$m%ddddddddddddddddddd",
+        )
+        .row(
+            "    nord    # # # # #                   ",
+            "rrmmVVVVVVVm^m&m*m(m)ddddddddddddddddddd",
+        )
+        .row(
+            "  preview                               ",
+            "rrmmmmmmmddddddddddddddddddddddddddddddd",
+        )
+        .row(
+            "┌> 1 focused     -┐ ┌  2 unfocused    -┐",
+            "FbbuuBBBBBBB,,,,,uFdfgghhiiiiiiiiijjjjhf",
+        )
+        .row(
+            "│$ cloo           │ │$ cloo            │",
+            "F~~~~~~~~~~~~~~~~~Fdfllllllllllllllllllf",
+        )
+        .row(
+            "└─────────────────┘ └──────────────────┘",
+            "FFFFFFFFFFFFFFFFFFFdffffffffffffffffffff",
+        )
+        .row(
+            "  esc close read only j/k move          ",
+            "rrmmmmmmmmmmmmmmmmmmmmmmmmmmmmdddddddddd",
+        )
+}
+
+#[test]
+fn config_preview_card_matches_its_reviewed_cell_golden_at_both_colour_depths() {
+    let truecolor = TermCaps {
+        truecolor: true,
+        ..TermCaps::default()
+    };
+    for (theme, caps) in [
+        (Theme::storm(), truecolor),
+        (sixteen_color(ThemeName::Storm), TermCaps::default()),
+    ] {
+        let overlay = config_surface(VisualConfig::defaults(), caps);
+        assert_frame(
+            &config_frame(&overlay, CONFIG_SIZE, theme),
+            &config_preview_golden(),
+            theme,
+        );
+    }
 }
 
 /// The reference truecolor capture: the whole surface, its swatch sets at their

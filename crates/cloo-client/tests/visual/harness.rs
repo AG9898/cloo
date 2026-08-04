@@ -28,8 +28,10 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
+use cloo_client::chrome::dim_cell_with_theme;
 use cloo_client::renderer::Span;
 use cloo_client::theme::{Theme, ThemeToken};
+use cloo_core::ThemeName;
 use cloo_proto::{Cell, CellAttrs, Color, Size};
 
 /// Where one expected colour comes from.
@@ -57,6 +59,15 @@ pub enum Paint {
     Ansi(u8),
     /// An explicit 24-bit colour, as an application may set.
     Rgb(u8, u8, u8),
+    /// A role of a *named* theme the surface is previewing rather than drawing
+    /// with, resolved at the colour depth the theme under test negotiated.
+    ///
+    /// Card 06's swatch chips are the only chrome that paints a palette it is not
+    /// rendering in: browsing a theme is not adopting one. Resolving at the same
+    /// depth as the theme under test is what makes the documented 16-colour
+    /// collapse — every named theme sharing one semantic swatch set — an
+    /// assertion of the golden rather than a separate cell-by-cell check.
+    Swatch(ThemeName, ThemeToken),
 }
 
 impl Paint {
@@ -69,7 +80,20 @@ impl Paint {
             Self::Terminal => Color::Default,
             Self::Ansi(index) => Color::Indexed(index),
             Self::Rgb(red, green, blue) => Color::Rgb(red, green, blue),
+            Self::Swatch(name, token) => Theme::named(name, caps_of(theme)).color(token),
         }
+    }
+}
+
+/// The capability tier `theme` was resolved for.
+///
+/// A theme does not carry its `TermCaps`, but a named palette keeps literal RGB
+/// only when true colour was negotiated, so its own accent answers the question
+/// the swatch expectation needs to ask.
+fn caps_of(theme: Theme) -> cloo_proto::TermCaps {
+    cloo_proto::TermCaps {
+        truecolor: matches!(theme.color(ThemeToken::Accent), Color::Rgb(_, _, _)),
+        ..cloo_proto::TermCaps::default()
     }
 }
 
@@ -82,6 +106,8 @@ pub struct SemanticStyle {
     pub bg: Paint,
     /// Expected rendition flags.
     pub attrs: CellAttrs,
+    /// Whether the cell is expected to have taken the unfocused-pane treatment.
+    pub dimmed: bool,
 }
 
 impl SemanticStyle {
@@ -92,6 +118,7 @@ impl SemanticStyle {
             fg,
             bg,
             attrs: CellAttrs::NONE,
+            dimmed: false,
         }
     }
 
@@ -102,14 +129,33 @@ impl SemanticStyle {
         self
     }
 
+    /// The same style after the unfocused-pane treatment.
+    ///
+    /// Dimming is expressed as the production policy applied to the *resolved*
+    /// cell rather than as a second set of literal colours, which is the only way
+    /// one golden can describe an unfocused pane at both colour depths: a 24-bit
+    /// role blends toward the theme's frame and keeps its hue, while a palette
+    /// index or the terminal's own default takes the terminal's `DIM` rendition
+    /// with its colour untouched.
+    #[must_use]
+    pub const fn dimmed(mut self) -> Self {
+        self.dimmed = true;
+        self
+    }
+
     /// The cell this style expects for `ch` under `theme`.
     #[must_use]
     pub fn cell(self, ch: char, theme: Theme) -> Cell {
-        Cell {
+        let cell = Cell {
             ch,
             fg: self.fg.resolve(theme),
             bg: self.bg.resolve(theme),
             attrs: self.attrs,
+        };
+        if self.dimmed {
+            dim_cell_with_theme(cell, theme)
+        } else {
+            cell
         }
     }
 }

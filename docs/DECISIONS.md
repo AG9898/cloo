@@ -576,3 +576,32 @@ or gradient mark into terminal chrome would violate the deliberate cell and fall
 
 **Affects:** [`BRANDING.md`](BRANDING.md), [`STYLEGUIDE.md`](STYLEGUIDE.md), public repository and
 release surfaces. Implementation is deferred to workboard task M7-05.
+
+### RESOLVED-17 — Visual acceptance is two levels, and neither substitutes for the other
+
+**Resolved:** 2026-08-04
+
+**Decision:** Each handoff card is accepted by two fixtures with different jobs. A *cell golden* in
+`crates/cloo-client/tests/visual.rs` asserts the complete composed frame — every character, semantic
+role, and rendition — for a scene assembled in memory, at both colour depths. An *outer-pseudoterminal
+fixture* in `crates/cloo/tests/visual_attach.rs` drives the shipped `cloo attach` binary against a
+real daemon and asserts only the visible text, with positioning and styling sequences stripped.
+Neither fixture is allowed to grow into the other: the golden never opens a descriptor, and the
+pseudoterminal fixture never asserts a colour.
+
+**Why:** The two failures are different and each is invisible to the other fixture. A golden proves
+composition and colour resolution but cannot prove the chord is bound, the daemon answered, or the
+surface was ever reachable from the shipped binary — a chrome helper can be perfect and never
+called. A byte stream proves reachability but is a poor colour oracle: a composed frame interleaves
+an SGR run with almost every field, so matching raw bytes asserts the renderer's run-splitting
+rather than the picture, and encoding a palette into a byte expectation duplicates the golden in a
+weaker form that then has to be kept in step with it.
+
+**Alternatives rejected:** One layer of screen-scraping over a real terminal emulator would need a
+new dependency and would still be a weaker colour oracle than a cell comparison. Goldens alone were
+the pre-M9-21 state, and were exactly the gap the card table's "delivery stage" column was tracking.
+Asserting colour in the pseudoterminal fixture was rejected as duplicated, weaker expectation.
+
+**Affects:** [`TESTING.md`](TESTING.md#m9-visual-acceptance),
+[`STYLEGUIDE.md`](STYLEGUIDE.md#acceptance-contract-and-delivery-state),
+`crates/cloo-client/tests/visual/`, `crates/cloo/tests/visual_attach.rs`.

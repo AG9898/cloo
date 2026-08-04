@@ -30,47 +30,56 @@ instead of pixel gaps, no shadows, and the user's terminal font — but they do 
 the handoff's hierarchy with an unrelated sparse composition. Every intentional adaptation must be
 named here.
 
-The live renderer is still short of the complete M9 handoff, but pane geometry is no longer the
-header-only scaffold: every attached pane has a complete one-cell top, side, and bottom frame, and
-adjacent framed allocations do not overlap. The top row is likewise no longer a bare list of tab
-titles — it is the session-aware composition described under [Tab row](#tab-row). The prefix surface
-is no longer a static help list either: it is the searchable command palette card 04 asks for, though
-that card's golden frames are still M9-21's. The session switcher now uses the verified local daemon
-catalog and can move the live client between those sockets. Keyboard and mouse resizing now light
-the changed divider and show its visible ratio as card 08 requires. The status row now provides both
-card-07 compositions over the same live local repository and clock data: minimal remains the flat
-default, while the configured powerline preference selects the rich segmented variant described
-below. The runtime configuration and theme preview card 06 asks for is now a client-local overlay,
-drawing its live pane pair with the production frame helpers. Card 06's reviewed cell golden, like
-card 04's, is still M9-21's. A helper being byte-tested does not by itself establish that the
-attached frame matches the handoff.
+**M9 is delivered.** As of M9-21 all eight cards are implemented in the live attached client and
+asserted at two levels: a reviewed cell golden for the composed frame, and an outer-pseudoterminal
+fixture that drives the shipped `cloo attach` binary into the same state. A helper being byte-tested
+never established that the attached frame matched the handoff, and it still does not — the second
+level is what closes that gap.
 
-The eight handoff cards define the staged acceptance set:
-
-| Card | Required terminal result | Delivery stage |
+| Card | Required terminal result | Delivered by |
 |---|---|---|
-| 01 · Single pane | Session-aware tab bar, fully framed focused pane, themed body, minimal status | Daily workspace |
-| 02 · Vertical split | Equal split, one-cell gutter, accent focus frame, dimmed neighbor, rich status | Daily workspace |
-| 03 · Nested workspace | Nested geometry, pane titles, application-owned content, bounded live toasts | Daily workspace |
-| 04 · Prefix palette | Searchable command surface, scrim, selected row, live keybinding hints | Interactive surfaces |
-| 05 · Session switcher | Real daemon session catalog, attachment state, counts, attach action | Interactive surfaces |
-| 06 · Config and themes | Runtime theme/focus/status/motion settings and a truthful live preview | Theme completion |
-| 07 · Status variants | High-fidelity minimal and powerline compositions with deterministic fallback | Daily workspace |
-| 08 · Pane resize | Live ratio label and lit divider while a keyboard or mouse resize is active | Interactive surfaces |
+| 01 · Single pane | Session-aware tab bar, fully framed focused pane, themed body, minimal status | M9-10, M9-11, M9-13 |
+| 02 · Vertical split | Equal split, one-cell gutter, accent focus frame, dimmed neighbor, rich status | M9-10, M9-14 |
+| 03 · Nested workspace | Nested geometry, pane titles, application-owned content, bounded live toasts | M9-10, M9-16 |
+| 04 · Prefix palette | Searchable command surface, scrim, selected row, live keybinding hints | M9-17 |
+| 05 · Session switcher | Real daemon session catalog, attachment state, counts, attach action | M9-09, M9-18 |
+| 06 · Config and themes | Runtime theme/focus/status/motion settings and a truthful live preview | M9-02, M9-05, M9-20 |
+| 07 · Status variants | High-fidelity minimal and powerline compositions with deterministic fallback | M9-13, M9-14 |
+| 08 · Pane resize | Live ratio label and lit divider while a keyboard or mouse resize is active | M9-19 |
 
-At reference geometry, truecolor captures of these states must be recognizably equivalent to the
-handoff in composition, hierarchy, spacing, and semantic color. The child transcript itself remains
+At reference geometry, truecolor captures of these states are recognizably equivalent to the handoff
+in composition, hierarchy, spacing, and semantic color. The child transcript itself remains
 application-owned: cloo supplies the pane surface and chrome, while shells, editors, and harnesses
 choose the characters and explicit colors inside their grids.
 
 A card is asserted as a complete cell matrix in `crates/cloo-client/tests/visual/`, where a golden
 names the roles below rather than literal colors, so one expectation is checked against a truecolor
 theme and its 16-color resolution. Chrome that a card has not yet routed through the client theme is
-expected at its *reference* Storm value instead, which keeps the remaining gap visible in the
-fixture. Pane headers, pane bodies, the tab row, and both status variants all resolve through the
-client theme. A tab-row golden is one complete row of a live composed frame, which is what lets the
-whole width ladder be asserted without re-authoring the pane and status rows beneath it at each
-width.
+expected at its *reference* Storm value instead, which keeps any remaining gap visible in the
+fixture; no card relies on that escape hatch today. Pane headers, pane bodies, the tab row, both
+status variants, every overlay, and the notice stack all resolve through the client theme. A
+tab-row golden is one complete row of a live composed frame, which is what lets the whole width
+ladder be asserted without re-authoring the pane and status rows beneath it at each width.
+
+### Intentional terminal adaptations
+
+The handoff is authoritative wherever a cell can express it. These are the complete set of places a
+terminal cell cannot, and what cloo draws instead. Nothing else in the handoff is adapted.
+
+| Handoff treatment | Terminal equivalent | Why |
+|---|---|---|
+| Rounded corners | `┌ ┐ └ ┘` square box-drawing corners, ASCII-degradable | A cell has no sub-cell geometry |
+| Pixel gaps between panes | One-cell gutter column or row | Spacing is quantized to cells |
+| Drop shadows behind overlays | The raised surface plus the same contrast reduction an unfocused pane takes | A cell has no alpha |
+| Alpha-blended dimming | An exact blend toward the frame background for 24-bit colour; the terminal's own `DIM` rendition for a palette index or the terminal default | cloo cannot know the appearance of a colour it did not choose |
+| A specified typeface | The user's own terminal font | The font is the terminal's, not the application's |
+| The active tab's lower-edge rule | The `UNDERLINE` cell attribute on the chip | A one-row bar has no second row to draw an edge on |
+| Powerline separator wedges | U+E0B0 when the preference opts in; adjacent semantic backgrounds as flat boundaries otherwise | The glyph is private-use and not always present |
+| A floating notice offset from the frame | The upper-right rows *between* the two always-on chrome rows, skipping the focused pane's cursor row | There is no layer above the grid; a notice occupies real cells, and on a small frame it may land on a pane's own top frame row |
+
+Card 03's golden is the honest illustration of the last row: at 40x12 the first notice occupies the
+right pane's top frame row. That is the documented safe area rather than a collision — the tab row,
+the status row, and the line being typed into are the three places a notice is never drawn.
 
 ## Visual Decisions
 
@@ -602,7 +611,9 @@ contract concrete:
   rides a pane's output clock: a notice is raised only by a new actionable attention projection and
   advanced only by the render tick. It is client chrome wherever it lands, it dims with the rest of
   the frame under an open overlay, and it owns no keys — a keystroke while a toast is showing
-  belongs to the focused pane.
+  belongs to the focused pane. Its ground is the client's own surface at every colour depth (M9-21):
+  a notice on a 16-colour terminal resolves like the chrome around it rather than leaving one RGB
+  rectangle floating over an otherwise indexed frame.
 
 ### Configuration and live preview
 

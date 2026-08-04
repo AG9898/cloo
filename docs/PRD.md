@@ -5,11 +5,11 @@
 > | Track | State |
 > |---|---|
 > | Shipped | `clooterminal` 0.0.1 is a name-reservation placeholder. The Linux x64 0.0.4 package is prepared for maintainer publication; `cloo` 0.0.1 on crates.io is also a placeholder. |
-> | Implemented in the tree | M0–M7: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, and external brand application are built and tested. |
+> | Implemented in the tree | M0–M9: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, external brand application, and the complete eight-card high-fidelity terminal UI are built and tested. |
 > | Current CLI | `cloo` attaches to the persistent `default` workspace, creating its background daemon when none is listening (M8-01); `cloo <program> [args…]` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | M9 aligns the live attached UI with the approved high-fidelity handoff. The existing sparse chrome is a functional scaffold, not the visual endpoint. Manual release validation and registry publishing remain maintainer-owned actions. |
+> | Next | M9 is complete: every handoff card is live in the attached client and asserted by a reviewed cell golden and an outer-pseudoterminal fixture. Manual release validation and registry publishing remain maintainer-owned actions. |
 > | Packaging | M7-04 supplies the package structure. The working npm distribution is published directly from a maintainer terminal and currently carries a Linux x64 native dependency only; other prebuilt targets remain deferred. M7-05 adds the approved product mark to the distribution README. |
-> | Remaining release work | M9 is active pre-release product work. Publishing to npm or crates.io still requires explicit maintainer authorization. |
+> | Remaining release work | The pre-release product work through M9 is done. Publishing to npm or crates.io still requires explicit maintainer authorization. |
 
 ---
 
@@ -131,12 +131,13 @@ restoration are all the client's, and ordinary shell text is never reinterpreted
 
 ### Phase 5 — M9: align the live UI with the approved handoff
 
-**Planned.** The high-fidelity handoff is the visual acceptance contract wherever terminal cells
-can express it. Rounded corners, shadows, pixel spacing, and a fixed font receive explicit
-terminal adaptations; they are not reasons to discard the handoff's hierarchy, framing, palette,
-or surface composition.
+**Implemented.** The high-fidelity handoff is the visual acceptance contract wherever terminal
+cells can express it. Rounded corners, shadows, pixel spacing, and a fixed font receive explicit
+terminal adaptations, enumerated in
+[`STYLEGUIDE.md`](STYLEGUIDE.md#intentional-terminal-adaptations); they were not reasons to discard
+the handoff's hierarchy, framing, palette, or surface composition.
 
-M9 is staged so each task remains reviewable and leaves enough context for verification and
+M9 was staged so each task remained reviewable and left enough context for verification and
 handoff:
 
 1. **Visual foundation.** Deterministic reference frames, named-theme default-cell mapping,
@@ -148,6 +149,9 @@ handoff:
    switcher, live attention queue, and active resize affordance.
 4. **Theme completion.** Card 06: runtime theme/focus/status/motion configuration and a preview
    rendered by the same helpers as the workspace.
+5. **Acceptance.** M9-21: a reviewed truecolor cell golden and its 16-color resolution for all
+   eight cards, outer-pseudoterminal fixtures driving the shipped binary into each state, and a
+   manual capture review at reference geometry.
 
 Storm themes map child default foreground/background cells to the selected pane surface and text
 roles. Explicit child colors remain application-owned. A terminal-inheritance option preserves

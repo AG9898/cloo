@@ -15,13 +15,20 @@
 // expected here.
 #![allow(dead_code)]
 
+use std::time::Instant;
+
 use cloo_client::chrome::{
-    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, StatusBar, TabBar,
+    Attention, AttentionQueue, ChromeOptions, PaneChrome, PrefixHint, StatusBar, TabBar, Toast,
+    resize_affordance_spans, toast_rows, toast_stack_span,
 };
 use cloo_client::input::PaneArea;
 use cloo_client::renderer::{FramePane, Grid, Span, compose_frame};
+use cloo_client::status::RepositoryStatus;
 use cloo_client::theme::Theme;
-use cloo_proto::{Cell, CellAttrs, Color, PaneId, RowUpdate, Size, TabId, TabSummary};
+use cloo_core::StatusMode;
+use cloo_proto::{
+    Cell, CellAttrs, Color, Direction, PaneId, Point, RowUpdate, Size, TabId, TabSummary,
+};
 
 use crate::harness::FrameMatrix;
 
@@ -124,6 +131,20 @@ pub struct Scene {
     queue: AttentionQueue,
     hint: PrefixHint,
     dim_unfocused: bool,
+    /// Which of card 07's two status compositions the client is configured for.
+    mode: StatusMode,
+    /// The client's own local wall-clock reading, when one was taken.
+    clock: Option<String>,
+    /// The bounded Git answer for the focused pane's working directory.
+    repository: Option<RepositoryStatus>,
+    /// The daemon's projected effective minimum size.
+    effective: Option<Size>,
+    /// The client's bounded notice stack, newest last.
+    toasts: Vec<Toast>,
+    /// The focused pane's cursor row, which a notice is never drawn over.
+    cursor_row: Option<u16>,
+    /// An in-flight divider resize: its lit cells and its visible ratio.
+    resize: Option<(Vec<Point>, Direction, f32)>,
 }
 
 impl Scene {
@@ -139,6 +160,13 @@ impl Scene {
             queue: AttentionQueue::new(),
             hint: PrefixHint::default(),
             dim_unfocused: true,
+            mode: StatusMode::Minimal,
+            clock: None,
+            repository: None,
+            effective: None,
+            toasts: Vec::new(),
+            cursor_row: None,
+            resize: None,
         }
     }
 
@@ -196,6 +224,63 @@ impl Scene {
         self
     }
 
+    /// Selects card 07's other status composition, as `[visual].status` does.
+    #[must_use]
+    pub const fn status(mut self, mode: StatusMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Supplies the client's local wall-clock reading.
+    #[must_use]
+    pub fn clock(mut self, clock: &str) -> Self {
+        self.clock = Some(clock.to_owned());
+        self
+    }
+
+    /// Supplies the bounded Git answer for the focused working directory.
+    #[must_use]
+    pub fn repository(mut self, branch: &str, changes: u32) -> Self {
+        self.repository = Some(RepositoryStatus {
+            branch: Some(branch.to_owned()),
+            changes,
+        });
+        self
+    }
+
+    /// Supplies the daemon's projected effective minimum size.
+    #[must_use]
+    pub const fn effective_size(mut self, size: Size) -> Self {
+        self.effective = Some(size);
+        self
+    }
+
+    /// Raises one notice on the client's bounded stack, oldest first.
+    ///
+    /// The notice is built settled rather than mid-entrance, because a golden
+    /// describes the chrome's own colours: the entrance is a motion contract
+    /// tested in `motion`, not a second appearance for a card to assert.
+    #[must_use]
+    pub fn toast(mut self, index: u16, title: &str, attention: Attention) -> Self {
+        self.toasts
+            .push(Toast::new(index, title, attention, Instant::now()));
+        self
+    }
+
+    /// Names the focused pane's cursor row, which the notice stack skips.
+    #[must_use]
+    pub const fn cursor_row(mut self, row: u16) -> Self {
+        self.cursor_row = Some(row);
+        self
+    }
+
+    /// Lights a divider at `points` and reports its resulting visible ratio.
+    #[must_use]
+    pub fn resizing(mut self, points: Vec<Point>, dir: Direction, ratio: f32) -> Self {
+        self.resize = Some((points, dir, ratio));
+        self
+    }
+
     /// The chrome options this scene composes under.
     #[must_use]
     pub fn options(&self, theme: Theme) -> ChromeOptions {
@@ -220,14 +305,37 @@ impl Scene {
         if let Some(clients) = self.clients {
             bar = bar.clients(clients);
         }
-        let mut status = StatusBar::new(&self.tabs, &self.queue, &self.hint);
+        let mut status = StatusBar::new(&self.tabs, &self.queue, &self.hint).mode(self.mode);
         if let Some(name) = &self.name {
             status = status.session(name);
         }
         if let Some(clients) = self.clients {
             status = status.clients(clients);
         }
-        compose_frame(self.size, bar, &panes, status, self.options(theme))
+        if let Some(size) = self.effective {
+            status = status.effective_size(size);
+        }
+        if let Some(repository) = &self.repository {
+            status = status.repository(repository);
+        }
+        if let Some(clock) = &self.clock {
+            status = status.clock(clock);
+        }
+        let mut spans = compose_frame(self.size, bar, &panes, status, self.options(theme));
+
+        // The attached loop layers its own client surfaces over the composed
+        // frame in exactly this order, and a card that shows one is asserting
+        // that layering rather than a helper's isolated output.
+        let rows = toast_rows(self.size, self.toasts.len(), self.cursor_row);
+        for (toast, row) in self.toasts.iter().zip(rows) {
+            spans.push(toast_stack_span(self.size, row, toast, theme));
+        }
+        if let Some((points, dir, ratio)) = &self.resize {
+            spans.extend(resize_affordance_spans(
+                points, *dir, *ratio, self.size, theme,
+            ));
+        }
+        spans
     }
 
     /// Composes and captures the complete cell matrix.
