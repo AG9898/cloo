@@ -1,5 +1,6 @@
 //! Keyboard-first overlays: the command palette, the session switcher, the
-//! profile launcher, the attention queue, and pane details.
+//! profile launcher, the attention queue, pane details, and the runtime
+//! configuration and theme preview.
 //!
 //! `docs/STYLEGUIDE.md` gives every overlay one language — dim the background,
 //! keep a clear selected row, show keyboard hints, dismiss with Escape — so this
@@ -32,6 +33,13 @@
 //!   an identifier against its own table and refuses an unknown one in silence,
 //!   so [`LaunchNotice`] tracks the client's *own* request — never a grid — and
 //!   turns a request that produced no pane into a visible refusal.
+//! - **The configuration surface reports, and never writes.** [`ConfigPreview`]
+//!   is built from the [`VisualConfig`] this client validated and the prefix its
+//!   router resolves against, so it cannot disagree with the frame around it,
+//!   and no outcome it can produce touches a file. Its live preview is drawn by
+//!   the same [`crate::chrome`] frame helpers that draw real panes, which is why
+//!   a no-dim configuration previews an undimmed neighbour without this module
+//!   knowing what dimming is.
 //! - **Acknowledging a queue row is a session action, not a view flag.** The
 //!   server owns [`cloo_proto::PaneAttention::acknowledged`], so
 //!   [`OverlayOutcome::Acknowledge`] names a pane for the wire and the row
@@ -61,10 +69,15 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use cloo_core::keymap::{Key, Keymap, action_name};
-use cloo_core::{Profile, ProfileCommand, ProfileId};
-use cloo_proto::{Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionSummary, Size};
+use cloo_core::{Profile, ProfileCommand, ProfileId, ThemeName, VisualConfig};
+use cloo_proto::{
+    Action, Cell, CellAttrs, Color, PaneId, PaneInfo, Point, SessionSummary, Size, TermCaps,
+};
 
-use crate::chrome::{Attention, QueueEntry, dim_cell_with_theme};
+use crate::chrome::{
+    Attention, ChromeOptions, PaneChrome, QueueEntry, body_span, bottom_frame_cells,
+    dim_cell_with_theme, side_frame_cell, top_frame_cells,
+};
 use crate::input::{OverlayAction, PaletteAction, QueueAction};
 use crate::renderer::Span;
 use crate::theme::{Theme, ThemeToken};
@@ -305,6 +318,11 @@ pub const ADD_PANE_KEY: char = 'a';
 /// count already wears: the key to reach the queue is the mark that says there
 /// is something in it.
 pub const ATTENTION_KEY: char = '!';
+/// The chord that opens the runtime configuration and theme preview.
+///
+/// `,` rather than a letter, because it is the settings chord a terminal user
+/// already expects and it collides with none of the default `[keys]` bindings.
+pub const CONFIG_KEY: char = ',';
 
 /// The bound actions the palette lists, in the order an empty query lists them.
 ///
@@ -349,14 +367,17 @@ pub enum ClientSurface {
     Attention,
     /// The focused pane's details.
     Details,
+    /// The effective runtime configuration and its live theme preview.
+    Config,
 }
 
 /// The client-local surfaces, in the order an empty query lists them.
-const PALETTE_SURFACES: [ClientSurface; 4] = [
+const PALETTE_SURFACES: [ClientSurface; 5] = [
     ClientSurface::Launcher,
     ClientSurface::Sessions,
     ClientSurface::Attention,
     ClientSurface::Details,
+    ClientSurface::Config,
 ];
 
 impl ClientSurface {
@@ -368,6 +389,7 @@ impl ClientSurface {
             Self::Sessions => SESSIONS_KEY,
             Self::Attention => ATTENTION_KEY,
             Self::Details => DETAILS_KEY,
+            Self::Config => CONFIG_KEY,
         }
     }
 
@@ -387,6 +409,7 @@ impl ClientSurface {
             Self::Sessions => "sessions",
             Self::Attention => "attention queue",
             Self::Details => "pane details",
+            Self::Config => "configuration",
         }
     }
 }
@@ -587,6 +610,239 @@ fn bound_key(keymap: &Keymap, action: &Action) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// The configuration and theme surface
+// ---------------------------------------------------------------------------
+
+/// The semantic roles one theme's swatch chips stand for.
+///
+/// The five the handoff's card-06 swatch sets name, expressed as style-guide
+/// roles rather than as the mock's literal hex values, so a theme is previewed
+/// by what its colours *mean* and a 16-colour terminal resolves the same list.
+const SWATCH_TOKENS: [ThemeToken; 5] = [
+    ThemeToken::Accent,
+    ThemeToken::Info,
+    ThemeToken::Success,
+    ThemeToken::Warning,
+    ThemeToken::Error,
+];
+
+/// The chip a swatch is drawn with. ASCII, like every other chrome glyph.
+const SWATCH_GLYPH: &str = "#";
+
+/// The lead marking the theme this client actually resolved.
+///
+/// A theme row's identity cannot rest on its swatches: a terminal without true
+/// colour resolves all four sets to the same semantic answer. The marker sits in
+/// the fixed lead column, which is the one part of a row that never yields to
+/// width, so the active palette is named at every size and every colour depth.
+const ACTIVE_THEME_MARKER: &str = "*";
+
+/// The same width, unmarked, so the swatch columns line up down the list.
+const INACTIVE_THEME_MARKER: &str = " ";
+
+/// The column the theme names are padded to, so the chips form one column.
+const THEME_NAME_WIDTH: usize = 7;
+
+/// The narrowest body a preview pane is still legible in.
+///
+/// Below this a pane header has no room for its index and title at all, and a
+/// preview reduced to two bare glyphs would say less about a theme than the
+/// settings rows it displaced.
+const PREVIEW_MIN_BODY: u16 = 7;
+
+/// The rows the live preview block occupies: its label and a framed pane pair.
+const PREVIEW_ROWS: usize = 4;
+
+/// The sample line drawn inside each preview pane body.
+///
+/// Written with default colours so it resolves through
+/// [`Theme::map_child_cell`] exactly as a child's own default-coloured output
+/// does: the preview shows what a pane body will look like, not a second
+/// palette invented for the settings surface.
+const PREVIEW_BODY: &str = "$ cloo";
+
+/// One line of the configuration surface's list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConfigRow {
+    /// A muted divider naming what follows.
+    Section(&'static str),
+    /// One effective preference and the value this client resolved for it.
+    Setting { name: &'static str, value: String },
+    /// One named theme, its swatch chips, and whether it is the active choice.
+    Theme { name: ThemeName, active: bool },
+}
+
+/// The effective runtime configuration, as a read-only surface.
+///
+/// Deliberately built from the [`VisualConfig`] this client *validated* and the
+/// prefix its router is *actually resolving against*, never from the bytes of a
+/// file: a surface that re-read `config.toml` could disagree with the client
+/// drawing it, which is the one thing a settings view must not do. Nothing here
+/// edits — there is no field to type into and no outcome that writes — so the
+/// surface can only ever report what is already true.
+///
+/// The capabilities are retained because a swatch is a *named theme resolved
+/// for this terminal*: on a terminal that never negotiated true colour the four
+/// swatch sets collapse to the shared 16-colour semantic answer, and the theme
+/// name beside them is what still tells them apart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigPreview {
+    visual: VisualConfig,
+    caps: TermCaps,
+    rows: Vec<ConfigRow>,
+}
+
+impl ConfigPreview {
+    /// Describes the preferences one attached client resolved.
+    #[must_use]
+    pub fn new(visual: VisualConfig, prefix: &str, caps: TermCaps) -> Self {
+        let on = |value: bool| if value { "on" } else { "off" };
+        let mut rows = vec![
+            ConfigRow::Setting {
+                name: "theme ",
+                value: visual.theme.as_str().to_owned(),
+            },
+            ConfigRow::Setting {
+                name: "focus ",
+                value: if visual.dim_unfocused {
+                    "dim unfocused".to_owned()
+                } else {
+                    "no dim".to_owned()
+                },
+            },
+            ConfigRow::Setting {
+                name: "status",
+                value: visual.status.as_str().to_owned(),
+            },
+            ConfigRow::Setting {
+                name: "motion",
+                value: on(visual.motion).to_owned(),
+            },
+            ConfigRow::Setting {
+                name: "reduce",
+                value: on(visual.reduce_motion).to_owned(),
+            },
+            ConfigRow::Setting {
+                name: "keys  ",
+                value: prefix.to_owned(),
+            },
+            ConfigRow::Section("themes"),
+        ];
+        rows.extend(ThemeName::ALL.map(|name| ConfigRow::Theme {
+            name,
+            active: visual.theme.named() == Some(name),
+        }));
+        Self { visual, caps, rows }
+    }
+
+    /// The preferences this surface is reporting.
+    #[must_use]
+    pub const fn visual(&self) -> VisualConfig {
+        self.visual
+    }
+
+    /// One named theme resolved for the terminal this client is attached to.
+    fn swatch(&self, name: ThemeName) -> Theme {
+        Theme::named(name, self.caps)
+    }
+}
+
+/// The live preview block: its label, then a focused and an unfocused pane.
+///
+/// Every cell of the pane pair comes from the production frame helpers
+/// [`top_frame_cells`], [`side_frame_cell`], [`body_span`], and
+/// [`bottom_frame_cells`] under the [`ChromeOptions`] this client is composing
+/// real panes with. That is what makes the preview *truthful*: a no-dim
+/// configuration shows an undimmed neighbour here because the same policy draws
+/// both, rather than because this surface remembered to say so.
+///
+/// An empty result means the box is too narrow for two framed panes; the
+/// surface then spends its rows on the settings it is there to report.
+fn preview_cells(preview: &ConfigPreview, width: u16, theme: Theme) -> Vec<Vec<Cell>> {
+    let total = usize::from(width);
+    let surface = theme.color(ThemeToken::RaisedSurface);
+    // Two framed panes and the one-cell gutter the workspace itself uses.
+    let left = total.saturating_sub(1) / 2;
+    let right = total.saturating_sub(1).saturating_sub(left);
+    let (Ok(left_body), Ok(right_body)) = (
+        u16::try_from(left.saturating_sub(2)),
+        u16::try_from(right.saturating_sub(2)),
+    ) else {
+        return Vec::new();
+    };
+    if left_body < PREVIEW_MIN_BODY || right_body < PREVIEW_MIN_BODY {
+        return Vec::new();
+    }
+
+    let options = ChromeOptions {
+        dim_unfocused: preview.visual.dim_unfocused,
+        theme,
+    };
+    let focused = PaneChrome::new(1, "focused")
+        .attention(Attention::Quiet)
+        .focused(true);
+    let unfocused = PaneChrome::new(2, "unfocused").attention(Attention::Quiet);
+    let gutter = Cell {
+        ch: ' ',
+        fg: theme.color(ThemeToken::DefaultText),
+        bg: surface,
+        attrs: CellAttrs::NONE,
+    };
+
+    let mut block = Vec::with_capacity(PREVIEW_ROWS);
+    block.push(row_cells(
+        &RowSpec {
+            selected: false,
+            lead: Field::new("", Color::Default, CellAttrs::NONE),
+            title: Field::new("preview", theme.color(ThemeToken::Muted), CellAttrs::NONE),
+            extras: Vec::new(),
+        },
+        width,
+        theme,
+    ));
+    let join = |left_cells: Vec<Cell>, right_cells: Vec<Cell>| {
+        let mut row = left_cells;
+        row.push(gutter);
+        row.extend(right_cells);
+        row.truncate(total);
+        pad(&mut row, total, surface, theme);
+        row
+    };
+    block.push(join(
+        top_frame_cells(&focused, left_body, options),
+        top_frame_cells(&unfocused, right_body, options),
+    ));
+    block.push(join(
+        pane_body_row(left_body, true, options),
+        pane_body_row(right_body, false, options),
+    ));
+    block.push(join(
+        bottom_frame_cells(true, left_body, options),
+        bottom_frame_cells(false, right_body, options),
+    ));
+    block
+}
+
+/// One framed body row of a preview pane, sides included.
+fn pane_body_row(body_width: u16, focused: bool, options: ChromeOptions) -> Vec<Cell> {
+    let width = usize::from(body_width);
+    let mut sample = PREVIEW_BODY
+        .chars()
+        .take(width)
+        .map(|ch| Cell {
+            ch,
+            ..Cell::default()
+        })
+        .collect::<Vec<_>>();
+    sample.resize(width, Cell::default());
+
+    let mut row = vec![side_frame_cell(focused, options)];
+    row.extend(body_span(Point::new(0, 0), &sample, focused, options).cells);
+    row.push(side_frame_cell(focused, options));
+    row
+}
+
+// ---------------------------------------------------------------------------
 // The overlay
 // ---------------------------------------------------------------------------
 
@@ -603,6 +859,8 @@ pub enum OverlayKind {
     Attention(Vec<AttentionEntry>),
     /// The pane-details view.
     Details(PaneDetails),
+    /// The effective configuration and its live theme preview.
+    Config(ConfigPreview),
 }
 
 /// An open overlay: a list, a keyboard cursor, and what confirming means.
@@ -710,6 +968,34 @@ impl Overlay {
         }
     }
 
+    /// Opens the effective configuration and theme preview.
+    #[must_use]
+    pub fn config(preview: ConfigPreview) -> Self {
+        Self {
+            kind: OverlayKind::Config(preview),
+            selected: 0,
+        }
+    }
+
+    /// Replaces the reported preferences after a successful daemon reload.
+    ///
+    /// The configuration surface is the second overlay whose contents can change
+    /// while it is open, and for the same reason as the attention queue: the
+    /// values it reports are owned elsewhere. A reload that this client applied
+    /// must be visible here without the user closing and reopening the surface,
+    /// and a reload it could *not* apply must leave every row as it was. The
+    /// cursor keeps its position, because the row list is the same shape.
+    pub fn refresh_config(&mut self, preview: ConfigPreview) {
+        let OverlayKind::Config(current) = &mut self.kind else {
+            return;
+        };
+        *current = preview;
+        let last = self.len().saturating_sub(1);
+        if self.selected > last {
+            self.selected = last;
+        }
+    }
+
     /// What this overlay is showing.
     #[must_use]
     pub const fn kind(&self) -> &OverlayKind {
@@ -728,6 +1014,7 @@ impl Overlay {
             OverlayKind::Launcher(_) => "launch profile",
             OverlayKind::Attention(_) => "attention",
             OverlayKind::Details(_) => "pane details",
+            OverlayKind::Config(_) => "configuration",
         }
     }
 
@@ -744,6 +1031,7 @@ impl Overlay {
             OverlayKind::Launcher(entries) => entries.len(),
             OverlayKind::Attention(entries) => entries.len(),
             OverlayKind::Details(details) => details.fields().len(),
+            OverlayKind::Config(preview) => preview.rows.len(),
         }
     }
 
@@ -758,10 +1046,10 @@ impl Overlay {
 
     /// How many rows of this overlay are chrome rather than list.
     fn chrome_rows(&self) -> usize {
-        if matches!(self.kind, OverlayKind::Palette(_)) {
-            3
-        } else {
-            2
+        match self.kind {
+            OverlayKind::Palette(_) => 3,
+            OverlayKind::Config(_) => 2 + PREVIEW_ROWS,
+            _ => 2,
         }
     }
 
@@ -953,9 +1241,11 @@ impl Overlay {
                 .map_or(OverlayOutcome::Open, |entry| {
                     OverlayOutcome::FocusPane(entry.pane)
                 }),
-            // Details is a reading surface: there is nothing to act on, so
-            // Enter does the only other thing a user could mean by it.
-            OverlayKind::Details(_) => OverlayOutcome::Dismissed,
+            // Details and the configuration surface are reading surfaces: there
+            // is nothing to act on, so Enter does the only other thing a user
+            // could mean by it. Confirming a settings row deliberately does not
+            // *set* anything — the file is the single writer.
+            OverlayKind::Details(_) | OverlayKind::Config(_) => OverlayOutcome::Dismissed,
         }
     }
 
@@ -1046,6 +1336,47 @@ impl Overlay {
                     extras: Vec::new(),
                 }
             }
+            // The setting name leads, so every value lines up in one column,
+            // and a theme row spends its extras on the word `active` *before*
+            // its swatches: a 16-colour terminal resolves all four swatch sets
+            // to the same semantic answer, so the word is what still says which
+            // palette is in use when colour cannot.
+            OverlayKind::Config(preview) => match &preview.rows[index] {
+                ConfigRow::Section(label) => RowSpec {
+                    selected,
+                    lead: Field::new("", Color::Default, CellAttrs::NONE),
+                    title: Field::new(*label, muted, CellAttrs::NONE),
+                    extras: Vec::new(),
+                },
+                ConfigRow::Setting { name, value } => RowSpec {
+                    selected,
+                    lead: Field::new(*name, muted, CellAttrs::NONE),
+                    title: Field::new(value.clone(), primary, CellAttrs::NONE),
+                    extras: Vec::new(),
+                },
+                ConfigRow::Theme { name, active } => {
+                    let swatch = preview.swatch(*name);
+                    let (marker, marker_fg) = if *active {
+                        (ACTIVE_THEME_MARKER, theme.color(ThemeToken::Success))
+                    } else {
+                        (INACTIVE_THEME_MARKER, muted)
+                    };
+                    RowSpec {
+                        selected,
+                        lead: Field::new(marker, marker_fg, CellAttrs::NONE),
+                        title: Field::new(
+                            format!("{:<THEME_NAME_WIDTH$}", name.as_str()),
+                            primary,
+                            CellAttrs::BOLD,
+                        ),
+                        extras: SWATCH_TOKENS
+                            .map(|token| {
+                                Field::new(SWATCH_GLYPH, swatch.color(token), CellAttrs::NONE)
+                            })
+                            .into(),
+                    }
+                }
+            },
         }
     }
 
@@ -1066,6 +1397,11 @@ impl Overlay {
             // cannot find it will never clear the queue.
             OverlayKind::Attention(_) => ["esc close", "enter focus", "a ack"],
             OverlayKind::Details(_) => ["esc close", "enter close", "j/k move"],
+            // `read only` earns the middle slot over navigation: this is the
+            // one surface a user could reasonably expect to type a new value
+            // into, and saying so is cheaper than a refusal they have to
+            // discover by pressing a key.
+            OverlayKind::Config(_) => ["esc close", "read only", "j/k move"],
         }
     }
 
@@ -1501,15 +1837,26 @@ pub fn overlay_cells(overlay: &Overlay, size: Size, theme: Theme) -> Vec<Vec<Cel
         out.push(query);
         list -= 1;
     }
+    // The live preview yields to the list exactly as the query row yields to
+    // the title: a box with no room for both keeps the settings the surface is
+    // there to report, and a box too narrow for two framed panes draws none.
+    let preview = match overlay.kind() {
+        OverlayKind::Config(config) if list > PREVIEW_ROWS => {
+            preview_cells(config, size.cols, theme)
+        }
+        _ => Vec::new(),
+    };
+    list -= preview.len();
     for row in overlay.visible_rows(list, theme) {
         out.push(row_cells(&row, size.cols, theme));
     }
     let surface = theme.color(ThemeToken::RaisedSurface);
-    while out.len() + 1 < rows {
+    while out.len() + preview.len() + 1 < rows {
         let mut blank = Vec::new();
         pad(&mut blank, usize::from(size.cols), surface, theme);
         out.push(blank);
     }
+    out.extend(preview);
     out.push(hint_cells(overlay, size.cols, theme));
     out
 }
@@ -1761,18 +2108,42 @@ mod tests {
         cells.iter().map(|cell| cell.ch).collect()
     }
 
+    fn truecolor() -> TermCaps {
+        TermCaps {
+            truecolor: true,
+            ..TermCaps::default()
+        }
+    }
+
+    fn config() -> Overlay {
+        Overlay::config(ConfigPreview::new(
+            VisualConfig::defaults(),
+            "C-b",
+            truecolor(),
+        ))
+    }
+
+    /// Every drawn row of a configuration box, as text.
+    fn config_rows(overlay: &Overlay, size: Size) -> Vec<String> {
+        overlay_cells(overlay, size, Theme::storm())
+            .iter()
+            .map(|row| text(row).trim_end().to_owned())
+            .collect()
+    }
+
     // -- dismissal ----------------------------------------------------------
 
     /// The one contract every overlay keeps, from every state it can be in:
     /// an overlay that could not be closed would hold the terminal hostage.
     #[test]
     fn every_overlay_is_dismissible_including_an_empty_one() {
-        let cases: [(&str, Overlay); 8] = [
+        let cases: [(&str, Overlay); 9] = [
             ("command palette", palette()),
             ("sessions", sessions()),
             ("launcher", launcher()),
             ("attention queue", attention_queue()),
             ("details", details()),
+            ("configuration", config()),
             ("no sessions", Overlay::sessions(Vec::new())),
             ("no profiles", Overlay::launcher(&[])),
             ("nothing waiting", Overlay::attention(Vec::new())),
@@ -2730,6 +3101,238 @@ mod tests {
         assert_eq!(spans[0].at, Point::new(4, 2));
         assert_eq!(spans[2].at, Point::new(4, 4));
         assert!(spans.iter().all(|span| span.cells.len() == 20));
+    }
+
+    // -- the configuration and theme surface --------------------------------
+
+    /// The whole point of the surface: what it reports is what this client
+    /// resolved, spelled the way the configuration file spells it.
+    #[test]
+    fn config_preview_reports_every_effective_preference() {
+        let visual = VisualConfig {
+            theme: ThemeChoice::Terminal,
+            dim_unfocused: false,
+            status: cloo_core::StatusMode::Powerline,
+            motion: false,
+            reduce_motion: true,
+        };
+        let overlay = Overlay::config(ConfigPreview::new(visual, "C-a", truecolor()));
+        let rows = config_rows(&overlay, Size::new(40, 17));
+        assert_eq!(
+            &rows[1..7],
+            [
+                "> theme  terminal",
+                "  focus  no dim",
+                "  status powerline",
+                "  motion off",
+                "  reduce on",
+                "  keys   C-a",
+            ]
+        );
+        assert_eq!(rows[0], "  configuration 1/11");
+    }
+
+    /// The surface is a report, not an editor: there is no outcome that writes,
+    /// and it says so where a user would look for the verb.
+    #[test]
+    fn config_preview_says_it_is_read_only_and_confirms_to_nothing() {
+        let mut overlay = config();
+        for index in 0..overlay.len() {
+            assert_eq!(overlay.selection(), index);
+            assert_eq!(
+                overlay.confirm(),
+                OverlayOutcome::Dismissed,
+                "row {index} must not act on anything"
+            );
+            overlay.select_next();
+        }
+        assert_eq!(
+            text(&hint_cells(&config(), 34, Theme::storm())),
+            "  esc close read only j/k move    "
+        );
+    }
+
+    /// Every named theme is offered with its own swatch set, and the active one
+    /// is marked in the fixed lead column rather than by colour alone.
+    #[test]
+    fn config_preview_lists_every_named_theme_with_its_own_swatches() {
+        let visual = VisualConfig {
+            theme: ThemeChoice::Named(ThemeName::Nord),
+            ..VisualConfig::defaults()
+        };
+        let overlay = Overlay::config(ConfigPreview::new(visual, "C-b", truecolor()));
+        let rows = config_rows(&overlay, Size::new(40, 17));
+        assert_eq!(rows[7], "  themes");
+        assert_eq!(
+            &rows[8..12],
+            [
+                "    storm   # # # # #",
+                "    night   # # # # #",
+                "    gruvbox # # # # #",
+                "  * nord    # # # # #",
+            ]
+        );
+
+        // Each chip carries its own theme's role colour, not the client's.
+        let cells = overlay_cells(&overlay, Size::new(40, 17), Theme::storm());
+        for (offset, name) in ThemeName::ALL.into_iter().enumerate() {
+            let swatch = Theme::named(name, truecolor());
+            let row = &cells[8 + offset];
+            for (chip, token) in SWATCH_TOKENS.into_iter().enumerate() {
+                let cell = row[12 + chip * 2];
+                assert_eq!(cell.ch, '#', "{name} chip {chip}");
+                assert_eq!(cell.fg, swatch.color(token), "{name} {token:?}");
+            }
+        }
+    }
+
+    /// A terminal that never negotiated true colour collapses all four swatch
+    /// sets onto the shared semantic answer, which is exactly why the marker and
+    /// the theme name — not the chips — carry the identity there.
+    #[test]
+    fn config_preview_swatches_fall_back_to_shared_sixteen_color_semantics() {
+        let overlay = Overlay::config(ConfigPreview::new(
+            VisualConfig::defaults(),
+            "C-b",
+            TermCaps::default(),
+        ));
+        let theme = Theme::new(ThemeChoice::Named(ThemeName::Storm), TermCaps::default());
+        let cells = overlay_cells(&overlay, Size::new(40, 17), theme);
+        let chips = |row: &[Cell]| {
+            (0..SWATCH_TOKENS.len())
+                .map(|chip| row[12 + chip * 2].fg)
+                .collect::<Vec<_>>()
+        };
+        let storm = chips(&cells[8]);
+        assert!(
+            storm
+                .iter()
+                .all(|color| matches!(color, Color::Indexed(index) if *index < 16)),
+            "a 16-colour swatch must not fall through to a 256-colour guess"
+        );
+        for offset in 1..ThemeName::ALL.len() {
+            assert_eq!(chips(&cells[8 + offset]), storm);
+        }
+        assert_eq!(
+            config_rows(&overlay, Size::new(40, 17))[8],
+            "  * storm   # # # # #"
+        );
+    }
+
+    /// The preview is drawn by the production frame helpers, so it cannot claim
+    /// a treatment the real frame would not give.
+    #[test]
+    fn config_preview_draws_its_pane_pair_with_the_production_frame_helpers() {
+        let theme = Theme::storm();
+        let size = Size::new(40, 17);
+        let rows = overlay_cells(&config(), size, theme);
+        let options = ChromeOptions {
+            dim_unfocused: true,
+            theme,
+        };
+        // 40 columns: a 19-wide and a 20-wide frame, plus the one-cell gutter.
+        let focused = PaneChrome::new(1, "focused")
+            .attention(Attention::Quiet)
+            .focused(true);
+        let unfocused = PaneChrome::new(2, "unfocused").attention(Attention::Quiet);
+        assert_eq!(&rows[13][..19], &top_frame_cells(&focused, 17, options)[..]);
+        assert_eq!(
+            &rows[13][20..],
+            &top_frame_cells(&unfocused, 18, options)[..]
+        );
+        assert_eq!(&rows[15][..19], &bottom_frame_cells(true, 17, options)[..]);
+        assert_eq!(&rows[15][20..], &bottom_frame_cells(false, 18, options)[..]);
+        assert_eq!(text(&rows[12]).trim_end(), "  preview");
+    }
+
+    /// A no-dim configuration previews an undimmed neighbour, because one policy
+    /// draws both the preview and the workspace.
+    #[test]
+    fn config_preview_follows_the_focus_preference_it_reports() {
+        let size = Size::new(40, 17);
+        let dimmed = overlay_cells(&config(), size, Theme::storm());
+        let no_dim = VisualConfig {
+            dim_unfocused: false,
+            ..VisualConfig::defaults()
+        };
+        let plain = overlay_cells(
+            &Overlay::config(ConfigPreview::new(no_dim, "C-b", truecolor())),
+            size,
+            Theme::storm(),
+        );
+        assert_eq!(text(&dimmed[15]), text(&plain[15]));
+        assert_ne!(
+            dimmed[15][20..].to_vec(),
+            plain[15][20..].to_vec(),
+            "the unfocused preview pane must follow dim_unfocused"
+        );
+        assert_eq!(
+            dimmed[15][..19].to_vec(),
+            plain[15][..19].to_vec(),
+            "the focused preview pane is never dimmed either way"
+        );
+    }
+
+    /// The preview yields to the settings before the settings yield to it, and a
+    /// box too narrow for two framed panes draws none at all.
+    #[test]
+    fn config_preview_yields_its_pane_pair_before_the_rows_it_reports() {
+        let short = config_rows(&config(), Size::new(40, 5));
+        assert_eq!(
+            short,
+            [
+                "  configuration 1/11",
+                "> theme  storm",
+                "  focus  dim unfocused",
+                "  status minimal",
+                "  esc close read only j/k move",
+            ]
+        );
+
+        let narrow = config_rows(&config(), Size::new(18, 8));
+        assert_eq!(narrow[0], "  configuration");
+        assert!(
+            narrow.iter().all(|row| !row.contains('\u{250c}')),
+            "18 columns cannot hold two legible framed panes: {narrow:?}"
+        );
+        assert_eq!(narrow.last().map(String::as_str), Some("  esc close"));
+    }
+
+    /// A reload this client applied has to reach an open surface; one it could
+    /// not apply must leave every reported value alone.
+    #[test]
+    fn config_preview_refreshes_in_place_and_keeps_its_cursor() {
+        let mut overlay = config();
+        overlay.apply(OverlayAction::Last);
+        let selected = overlay.selection();
+        let replacement = VisualConfig {
+            status: cloo_core::StatusMode::Powerline,
+            ..VisualConfig::defaults()
+        };
+        overlay.refresh_config(ConfigPreview::new(replacement, "C-b", truecolor()));
+        assert_eq!(overlay.selection(), selected);
+        assert_eq!(
+            config_rows(&overlay, Size::new(40, 17))[3],
+            "  status powerline"
+        );
+
+        // A refresh aimed at another surface is not a way to replace its rows.
+        let mut elsewhere = sessions();
+        let before = elsewhere.clone();
+        elsewhere.refresh_config(ConfigPreview::new(replacement, "C-b", truecolor()));
+        assert_eq!(elsewhere, before);
+    }
+
+    /// The palette reaches the surface by the same chord the prefix does.
+    #[test]
+    fn config_preview_is_offered_by_the_palette_while_its_chord_is_free() {
+        assert_eq!(
+            ClientSurface::from_key(CONFIG_KEY),
+            Some(ClientSurface::Config)
+        );
+        let overlay = palette();
+        assert!(palette_labels(&overlay).contains(&"configuration".to_owned()));
+        assert_eq!(palette_key(&overlay, "configuration").as_deref(), Some(","));
     }
 
     #[test]

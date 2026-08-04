@@ -40,8 +40,10 @@ catalog and can move the live client between those sockets. Keyboard and mouse r
 the changed divider and show its visible ratio as card 08 requires. The status row now provides both
 card-07 compositions over the same live local repository and clock data: minimal remains the flat
 default, while the configured powerline preference selects the rich segmented variant described
-below. The configuration preview still needs its card-specific pass. A helper being byte-tested does
-not by itself establish that the attached frame matches the handoff.
+below. The runtime configuration and theme preview card 06 asks for is now a client-local overlay,
+drawing its live pane pair with the production frame helpers. Card 06's reviewed cell golden, like
+card 04's, is still M9-21's. A helper being byte-tested does not by itself establish that the
+attached frame matches the handoff.
 
 The eight handoff cards define the staged acceptance set:
 
@@ -387,9 +389,9 @@ pane needing input retains its state glyph and semantic color after dimming.
 
 ## Overlays and Notifications
 
-The prefix palette, session switcher, profile launcher, attention queue, and pane-details view
-share one overlay language: dim the background, retain a clear selected row, provide keyboard
-hints, and dismiss with Escape. Toasts are concise, stack in a bounded queue, and never cover a
+The prefix palette, session switcher, profile launcher, attention queue, pane-details view, and
+configuration preview share one overlay language: dim the background, retain a clear selected row,
+provide keyboard hints, and dismiss with Escape. Toasts are concise, stack in a bounded queue, and never cover a
 focused harness input indefinitely. Coalesce repeated events from the same pane.
 
 The prefix surface is a searchable command palette, not only a static help list. It opens with the
@@ -411,9 +413,10 @@ frame; a daemon that disappears between inspection and confirmation is removed f
 switcher, leaving the current attachment intact. Confirming the current row simply closes the
 surface. No row kills a daemon, and every switcher key remains client-owned.
 
-The session switcher, profile launcher, pane-details view, attention queue, and command palette use
-one rendering model. An overlay is a title row, a list, and a hint row — plus the palette's own query
-line, which is the only extra chrome row any surface has — each exactly the overlay's
+The session switcher, profile launcher, pane-details view, attention queue, command palette, and
+configuration preview use one rendering model. An overlay is a title row, a list, and a hint row —
+plus the palette's own query line and the configuration surface's live preview block, which are the
+only extra chrome rows any surface has — each exactly the overlay's
 width, drawn over the raised surface with the screen beneath dimmed by the same contrast reduction
 an unfocused pane takes:
 
@@ -477,12 +480,64 @@ The attached client layers an open overlay over the already composed tab, frame,
 status spans: it dims that existing frame without changing any character, then paints the raised
 overlay box above it. Its keys are consumed locally — they never become pane input. The client-local
 entries remain `<prefix> ?` for commands/help, `<prefix> s` for sessions, `<prefix> i` for focused
-pane details, `<prefix> a` for the profile launcher, and `<prefix> !` for the attention queue —
-the queue's chord is the glyph the status row's attention count already wears. Each is claimed only
+pane details, `<prefix> a` for the profile launcher, `<prefix> !` for the attention queue, and
+`<prefix> ,` for the configuration preview — the queue's chord is the glyph the status row's
+attention count already wears, and `,` is the settings chord that collides with no default
+binding. Each is claimed only
 while the keymap leaves that chord unbound, and all use the same Escape dismissal; all but the
 command palette also use the same keyboard vocabulary, and its query is the documented exception.
 A palette row naming one of these surfaces opens it in place, so a chord and a search reach the same
 overlay.
+
+### Configuration and theme preview
+
+Card 06's surface, implemented as of M9-20, is a read-only report of the preferences the attached
+client actually resolved. It never claims to edit the file: there is no field to type into, no
+outcome that writes, and the hint row spends its middle slot on `read only` rather than on
+navigation, because this is the one overlay a user could reasonably expect to set a value from.
+
+```
+  configuration 1/11
+> theme  storm
+  focus  dim unfocused
+  status minimal
+  motion on
+  reduce off
+  keys   C-b
+  themes
+  * storm   # # # # #
+    night   # # # # #
+    gruvbox # # # # #
+    nord    # # # # #
+  preview
+┌> 1 focused     -┐ ┌  2 unfocused    -┐
+│$ cloo           │ │$ cloo            │
+└─────────────────┘ └──────────────────┘
+  esc close read only j/k move
+```
+
+The six settings rows are the effective `[visual]` table plus the prefix this client's router is
+resolving against — not the prefix a newer file names, because a client attached before a `[keys]`
+edit still answers the chord it started with, and naming a chord the client does not answer would be
+worse than naming an older one. Setting names are padded to one column so every value lines up.
+
+Each named theme is offered with five swatch chips, in the semantic order accent, info, success,
+warning, error. A terminal that never negotiated true colour resolves all four swatch sets to the
+same 16-colour semantic answer, which is exactly why the active theme is marked with `*` in the
+fixed lead column: that column never yields to width, so the active palette is named at every size
+and every colour depth. The `terminal` palette-inheritance choice still previews the named themes at
+their own values — browsing a theme is not the same as adopting one.
+
+The live preview is a focused and an unfocused pane drawn by the same `top_frame_cells`,
+`side_frame_cell`, `body_span`, and `bottom_frame_cells` helpers that draw real panes, under the
+`ChromeOptions` the client is composing its actual frame with. A no-dim configuration therefore
+previews an undimmed neighbour because one policy draws both, not because the surface remembered to
+say so, and a `terminal` theme's preview takes the terminal's own `DIM` rendition rather than
+blending toward a frame colour it cannot know. The block yields the way the palette's query line
+does: a box too short for both keeps the settings, and a box too narrow for two legible framed panes
+(under nine columns each) draws none at all. A successful `ConfigReloaded` revision the client
+applied updates an open surface in place; a revision whose file did not validate leaves every
+reported value as it was, because the client is still drawing with them.
 
 The attention surfaces, implemented in `cloo-client`'s `chrome` module as of M2-10, make that
 contract concrete:

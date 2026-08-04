@@ -606,7 +606,8 @@ The command palette is built from the live `cloo_core::keymap::Keymap` and from 
 `Overlay::palette` reads the effective prefix into the title and looks each listed action's chord up
 in the table, so a rebound prefix and a rebound chord are shown verbatim and an unbound action has no
 row. The client-local chords are constants (`HELP_KEY`, `DETAILS_KEY`, `SESSIONS_KEY`,
-`ADD_PANE_KEY`, and `ATTENTION_KEY`) shared with `attach`'s `open_overlay`, which is reached only for
+`ADD_PANE_KEY`, `ATTENTION_KEY`, and `CONFIG_KEY`) shared with `attach`'s `open_overlay`, which is
+reached only for
 a chord the keymap left unbound — so a user who binds `?` keeps their binding, and the palette drops
 the row it would otherwise have claimed. It is also why ordinary shell text opens nothing: a chord
 reaches `open_overlay` only after the prefix has already been resolved.
@@ -682,6 +683,29 @@ lives beside the attention queue's in `cloo-client::input`, because an open over
 keyboard exactly as chrome owns a mouse click over a border; none of it reaches a child. The
 visual contract — the shared width ladder, the text selection marker, the dimmed backdrop — is in
 [`STYLEGUIDE.md`](STYLEGUIDE.md#overlays-and-notifications).
+
+##### The configuration and theme preview (M9-20)
+
+`OverlayKind::Config` holds a `ConfigPreview` built from the `VisualConfig` this client validated and
+the prefix its own `KeyRouter` resolves against — never from a re-read of `config.toml`. That is the
+point: a settings surface that parsed the file itself could disagree with the frame drawn around it,
+and the client is the authority on what it is actually drawing with. Nothing on the type can write,
+so "no file editing" is a property of the surface rather than a rule to remember.
+
+The rows are the effective preferences, one row per named theme with its five semantic swatch chips,
+and — as extra chrome rows below the list, the way the palette's query line is one above it — a live
+preview drawn by `chrome`'s `top_frame_cells`, `side_frame_cell`, `body_span`, and
+`bottom_frame_cells` under the client's own `ChromeOptions`. Reusing the production helpers is what
+makes the preview truthful about focus and dimming without this module knowing what dimming is.
+`Overlay::preferred_rows` therefore asks for its list plus six.
+
+A swatch is a *named theme resolved for this terminal*, so `ConfigPreview` retains the negotiated
+`TermCaps`: without `truecolor` all four sets collapse onto the shared 16-colour semantic answer,
+which is why the active choice is marked in the fixed lead column instead of by colour.
+
+`LiveState::reload_visual` refreshes an open surface through `Overlay::refresh_config` after it has
+applied a newer revision. A revision whose file did not produce a validated `Config` never reaches
+that call, so the surface keeps reporting the preferences still in force.
 
 ##### The attention queue (M9-15, handshake v13)
 

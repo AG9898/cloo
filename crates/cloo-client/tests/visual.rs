@@ -20,10 +20,10 @@ mod harness;
 mod scenes;
 
 use cloo_client::chrome::{PaneChrome, PrefixHint};
-use cloo_client::overlay::{Overlay, SessionEntry, overlay_spans};
+use cloo_client::overlay::{ConfigPreview, Overlay, SessionEntry, overlay_spans};
 use cloo_client::renderer::Span;
 use cloo_client::theme::{Theme, ThemeToken};
-use cloo_core::{ThemeChoice, ThemeName};
+use cloo_core::{ThemeChoice, ThemeName, VisualConfig};
 use cloo_proto::{Cell, CellAttrs, Color, PaneId, Point, SessionSummary, Size, TermCaps};
 use std::path::PathBuf;
 
@@ -425,6 +425,229 @@ fn session_switcher_card_has_legible_empty_and_narrow_frames() {
     assert_eq!(narrow.text_row(0), "  sessions  ");
     assert_eq!(narrow.text_row(1), "> main      ");
     assert_eq!(narrow.text_row(2), "  esc close ");
+}
+
+// ---------------------------------------------------------------------------
+// Card 06 — the runtime configuration and theme preview
+// ---------------------------------------------------------------------------
+
+/// The card's reference geometry: the full surface, list, swatches, and preview.
+const CONFIG_SIZE: Size = Size::new(40, 17);
+
+fn config_surface(visual: VisualConfig, caps: TermCaps) -> Overlay {
+    Overlay::config(ConfigPreview::new(visual, "C-b", caps))
+}
+
+fn config_frame(overlay: &Overlay, size: Size, theme: Theme) -> FrameMatrix {
+    FrameMatrix::capture(size, &overlay_spans(Point::new(0, 0), overlay, size, theme))
+}
+
+/// Every row of the card, as text. Composition, not colour: the same picture is
+/// expected of a truecolor client and its 16-color resolution.
+fn config_card_rows() -> Vec<String> {
+    let mut rows: Vec<String> = [
+        "  configuration 1/11",
+        "> theme  storm",
+        "  focus  dim unfocused",
+        "  status minimal",
+        "  motion on",
+        "  reduce off",
+        "  keys   C-b",
+        "  themes",
+        "  * storm   # # # # #",
+        "    night   # # # # #",
+        "    gruvbox # # # # #",
+        "    nord    # # # # #",
+        "  preview",
+    ]
+    .iter()
+    .map(|row| (*row).to_owned())
+    .collect();
+    rows.push("\u{250c}> 1 focused     -\u{2510} \u{250c}  2 unfocused    -\u{2510}".to_owned());
+    rows.push("\u{2502}$ cloo           \u{2502} \u{2502}$ cloo            \u{2502}".to_owned());
+    rows.push(format!(
+        "\u{2514}{}\u{2518} \u{2514}{}\u{2518}",
+        "\u{2500}".repeat(17),
+        "\u{2500}".repeat(18)
+    ));
+    rows.push("  esc close read only j/k move".to_owned());
+    rows
+}
+
+fn config_text(frame: &FrameMatrix) -> Vec<String> {
+    (0..frame.size().rows)
+        .map(|row| frame.text_row(row).trim_end().to_owned())
+        .collect()
+}
+
+/// The reference truecolor capture: the whole surface, its swatch sets at their
+/// own named values, an accent-bordered focused preview pane, and a dimmed
+/// neighbour that is neither accent nor the plain border colour.
+#[test]
+fn config_preview_card_matches_its_truecolor_composition() {
+    let theme = Theme::storm();
+    let caps = TermCaps {
+        truecolor: true,
+        ..TermCaps::default()
+    };
+    let overlay = config_surface(VisualConfig::defaults(), caps);
+    let frame = config_frame(&overlay, CONFIG_SIZE, theme);
+    assert_eq!(config_text(&frame), config_card_rows());
+
+    // Swatch chips carry the colours of the theme they name, not the client's.
+    for (offset, name) in ThemeName::ALL.into_iter().enumerate() {
+        let swatch = Theme::named(name, caps);
+        let row = 8 + u16::try_from(offset).expect("four themes");
+        for (chip, token) in [
+            ThemeToken::Accent,
+            ThemeToken::Info,
+            ThemeToken::Success,
+            ThemeToken::Warning,
+            ThemeToken::Error,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let col = 12 + u16::try_from(chip * 2).expect("five chips");
+            let cell = frame.cell(col, row);
+            assert_eq!(cell.ch, '#', "{name} chip {chip}");
+            assert_eq!(cell.fg, swatch.color(token), "{name} {token:?}");
+            assert!(
+                matches!(cell.fg, Color::Rgb(_, _, _)),
+                "a truecolor swatch keeps its named RGB"
+            );
+        }
+    }
+
+    // Focus is carried by the border, and the neighbour recedes toward the
+    // frame rather than merely losing its label.
+    let focused_corner = frame.cell(0, 13);
+    let dimmed_corner = frame.cell(20, 13);
+    assert_eq!(focused_corner.fg, theme.color(ThemeToken::Accent));
+    assert_ne!(dimmed_corner.fg, theme.color(ThemeToken::Accent));
+    assert_ne!(
+        dimmed_corner.fg,
+        theme.color(ThemeToken::Border),
+        "the unfocused preview pane is dimmed, not merely unaccented"
+    );
+
+    // The active theme is marked in the lead column, where no width takes it.
+    assert_eq!(frame.cell(2, 8).ch, '*');
+    assert_eq!(frame.cell(2, 8).fg, theme.color(ThemeToken::Success));
+}
+
+/// The same composition on a terminal that never negotiated true colour, where
+/// every chrome colour is an explicit 16-colour answer and the four swatch sets
+/// deliberately collapse onto the shared semantic one.
+#[test]
+fn config_preview_card_resolves_to_sixteen_colors_without_guessing() {
+    let theme = sixteen_color(ThemeName::Storm);
+    let overlay = config_surface(VisualConfig::defaults(), TermCaps::default());
+    let frame = config_frame(&overlay, CONFIG_SIZE, theme);
+    assert_eq!(config_text(&frame), config_card_rows());
+
+    for row in 0..CONFIG_SIZE.rows {
+        for col in 0..CONFIG_SIZE.cols {
+            let cell = frame.cell(col, row);
+            for color in [cell.fg, cell.bg] {
+                // `Color::Default` is the outer terminal's own, which chrome
+                // padding legitimately keeps; anything beyond index 15 would be
+                // a 256-colour guess this client never negotiated.
+                assert!(
+                    matches!(color, Color::Default)
+                        || matches!(color, Color::Indexed(index) if index < 16),
+                    "row {row} col {col} must not fall through to a 256-colour guess: {color:?}"
+                );
+            }
+        }
+    }
+
+    let chips = |row: u16| {
+        (0..5)
+            .map(|chip| frame.cell(12 + chip * 2, row).fg)
+            .collect::<Vec<_>>()
+    };
+    for row in 9..12 {
+        assert_eq!(
+            chips(row),
+            chips(8),
+            "16 colours give every theme the same semantic swatches"
+        );
+    }
+    assert_eq!(
+        frame.cell(2, 8).ch,
+        '*',
+        "the marker still names the active theme"
+    );
+}
+
+/// The palette-inheriting choice keeps the user's own foreground and background
+/// throughout the surface, takes the terminal's own DIM rendition rather than
+/// blending toward a frame colour it cannot know, and still previews the named
+/// themes at their real values.
+#[test]
+fn config_preview_card_inherits_the_outer_terminal_palette() {
+    let caps = TermCaps {
+        truecolor: true,
+        ..TermCaps::default()
+    };
+    let visual = VisualConfig {
+        theme: ThemeChoice::Terminal,
+        ..VisualConfig::defaults()
+    };
+    let frame = config_frame(
+        &config_surface(visual, caps),
+        CONFIG_SIZE,
+        Theme::terminal(),
+    );
+
+    let mut expected = config_card_rows();
+    expected[1] = "> theme  terminal".to_owned();
+    expected[8] = "    storm   # # # # #".to_owned();
+    assert_eq!(config_text(&frame), expected);
+
+    assert_eq!(frame.cell(39, 0).bg, Color::Default);
+    assert_eq!(frame.cell(1, 14).fg, Color::Default);
+    assert!(
+        frame.cell(20, 13).attrs.contains(CellAttrs::DIM),
+        "with no frame colour to blend toward, dimming is the terminal's own"
+    );
+    for (offset, name) in ThemeName::ALL.into_iter().enumerate() {
+        let row = 8 + u16::try_from(offset).expect("four themes");
+        assert_eq!(
+            frame.cell(12, row).fg,
+            Theme::named(name, caps).color(ThemeToken::Accent),
+            "{name} is still previewed at its own value"
+        );
+    }
+}
+
+/// The narrow ladder: the preview yields to the settings the surface exists to
+/// report, and the dismissal hint is the last thing standing.
+#[test]
+fn config_preview_card_degrades_to_its_settings_on_a_narrow_terminal() {
+    let theme = Theme::storm();
+    let overlay = config_surface(VisualConfig::defaults(), TermCaps::default());
+
+    let narrow = config_frame(&overlay, Size::new(22, 9), theme);
+    assert_eq!(config_text(&narrow)[0], "  configuration 1/11");
+    assert_eq!(config_text(&narrow)[1], "> theme  storm");
+    assert!(
+        config_text(&narrow)[5].starts_with('\u{250c}'),
+        "22 columns still hold two framed preview panes"
+    );
+    assert_eq!(config_text(&narrow)[8], "  esc close read only");
+
+    let cramped = config_frame(&overlay, Size::new(18, 9), theme);
+    let rows = config_text(&cramped);
+    assert!(
+        rows.iter().all(|row| !row.contains('\u{250c}')),
+        "a box too narrow for two legible panes spends its rows on settings: {rows:?}"
+    );
+    assert_eq!(rows[0], "  configuration");
+    assert_eq!(rows[6], "  keys   C-b");
+    assert_eq!(rows[7], "  themes");
+    assert_eq!(rows[8], "  esc close");
 }
 
 #[test]

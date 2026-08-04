@@ -51,8 +51,9 @@ use crate::input::{
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase, phase_span};
 use crate::outer::current_size;
 use crate::overlay::{
-    AttentionEntry, ClientSurface, HELP_KEY, LaunchNotice, LaunchRequest, Overlay, OverlayKind,
-    OverlayOutcome, PaneDetails, SessionEntry, backdrop_span, launch_notice_span, overlay_spans,
+    AttentionEntry, ClientSurface, ConfigPreview, HELP_KEY, LaunchNotice, LaunchRequest, Overlay,
+    OverlayKind, OverlayOutcome, PaneDetails, SessionEntry, backdrop_span, launch_notice_span,
+    overlay_spans,
 };
 use crate::raw_mode::{RawMode, RawModeError};
 use crate::renderer::{Cursor, FramePane, Grid, RenderError, Renderer, compose_frame};
@@ -1123,7 +1124,25 @@ impl LiveState {
         // A preference change is not a dismissal: the notices already up keep
         // their own deadlines and only their entrance follows the new setting.
         self.toasts.set_motion(MotionSettings::from_visual(visual));
+        // An open configuration surface reports the values this client is
+        // drawing with, so it has to move with them. A reload the client could
+        // not apply never reaches here, which is what leaves the surface showing
+        // the preferences that are still in force.
+        let preview = self.config_preview();
+        if let Some(overlay) = self.overlay.as_mut() {
+            overlay.refresh_config(preview);
+        }
         true
+    }
+
+    /// The effective preferences this client resolved, as the settings surface
+    /// reports them.
+    ///
+    /// The prefix is the router's own, not the file's: a client attached before
+    /// a `[keys]` edit keeps resolving the prefix it started with, and a surface
+    /// that read the newer file would name a chord this client does not answer.
+    fn config_preview(&self) -> ConfigPreview {
+        ConfigPreview::new(self.visual, &self.prefix, self.caps)
     }
 
     /// The single motion answer derived from the live visual preferences.
@@ -1778,6 +1797,7 @@ impl LiveState {
             ClientSurface::Launcher => Some(Overlay::launcher(&self.profiles)),
             ClientSurface::Sessions => Some(Overlay::sessions(self.sessions.clone())),
             ClientSurface::Attention => Some(Overlay::attention(self.attention_entries())),
+            ClientSurface::Config => Some(Overlay::config(self.config_preview())),
             // The only surface that can fail to open: with no focused pane
             // there is nothing to describe, and a blank details box would be a
             // claim about a pane that is not there.
@@ -4234,6 +4254,96 @@ mod tests {
         assert!(!state.chrome_options().dim_unfocused);
         assert_eq!(state.motion_settings(), MotionSettings::reduced());
         assert_eq!(state.config_revision, 7);
+    }
+
+    /// Every row of the drawn frame, as text, in composition order.
+    fn drawn(state: &LiveState) -> Vec<String> {
+        state
+            .frame()
+            .spans
+            .iter()
+            .map(|span| span.cells.iter().map(|cell| cell.ch).collect())
+            .collect()
+    }
+
+    /// The chord opens the client's own settings surface, and it reports the
+    /// preferences and prefix *this* client resolved rather than a file's.
+    #[test]
+    fn config_preview_opens_from_its_chord_and_reports_the_resolved_preferences() {
+        let keymap = Keymap::defaults();
+        let mut state = overlay_state(20, "M-a").preferences(
+            TermCaps {
+                truecolor: true,
+                ..TermCaps::default()
+            },
+            VisualConfig::defaults(),
+        );
+
+        assert!(state.open_overlay(b",", &keymap));
+        assert!(matches!(
+            state.overlay.as_ref().map(Overlay::kind),
+            Some(OverlayKind::Config(_))
+        ));
+        let rows = drawn(&state);
+        for expected in [
+            "configuration",
+            "theme  storm",
+            "focus  dim unfocused",
+            "keys   M-a",
+            "* storm",
+            "gruvbox",
+            "read only",
+        ] {
+            assert!(
+                rows.iter().any(|row| row.contains(expected)),
+                "the surface must show {expected:?}: {rows:?}"
+            );
+        }
+
+        // Escape is answered locally: the surface closes and nothing is queued
+        // for the wire.
+        assert_eq!(state.apply_overlay_keys(b"\x1b"), OverlayKeys::Consumed);
+        assert!(state.overlay.is_none());
+    }
+
+    /// The reload half of card 06: a revision this client applied is visible in
+    /// the open surface, and one whose file did not validate changes nothing.
+    #[test]
+    fn config_preview_follows_a_valid_reload_and_ignores_an_invalid_one() {
+        let keymap = Keymap::defaults();
+        let mut state = overlay_state(20, "C-b").preferences(
+            TermCaps {
+                truecolor: true,
+                ..TermCaps::default()
+            },
+            VisualConfig::defaults(),
+        );
+        assert!(state.open_overlay(b",", &keymap));
+        let opened = drawn(&state);
+        assert!(opened.iter().any(|row| row.contains("status minimal")));
+
+        let replacement = VisualConfig {
+            theme: cloo_core::ThemeChoice::Named(cloo_core::ThemeName::Nord),
+            status: cloo_core::StatusMode::Powerline,
+            ..VisualConfig::defaults()
+        };
+        assert!(state.reload_visual(4, Some(replacement)));
+        let reloaded = drawn(&state);
+        assert!(
+            reloaded.iter().any(|row| row.contains("status powerline"))
+                && reloaded.iter().any(|row| row.contains("theme  nord"))
+                && reloaded.iter().any(|row| row.contains("* nord")),
+            "an applied reload must reach the open surface: {reloaded:?}"
+        );
+
+        // A daemon revision whose own file did not produce a validated config
+        // leaves every reported value exactly as it was.
+        assert!(!state.reload_visual(5, None));
+        assert_eq!(drawn(&state), reloaded);
+        assert!(matches!(
+            state.overlay.as_ref().map(Overlay::kind),
+            Some(OverlayKind::Config(_))
+        ));
     }
 
     #[test]

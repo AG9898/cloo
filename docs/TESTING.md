@@ -1035,6 +1035,30 @@ attachment to the first daemon then sends `safe` and its child reports exactly `
 is the non-vacuous assertion that neither `j` nor Enter leaked out of the overlay. Prefix detach
 restores the terminal, and both daemon sockets remain connectable afterward.
 
+M9-20 adds the runtime configuration and theme preview under names carrying `config_preview`, so
+`cargo test -p cloo-client config_preview` is the task's own suite. `src/overlay.rs` asserts the
+surface reports exactly the six effective preferences it was built from — a non-default fixture
+covering the terminal theme, no-dim focus, powerline status, motion off, and reduce-motion on — that
+every named theme is offered with its own swatch colours rather than the client's, and that a
+terminal without `truecolor` collapses all four swatch sets onto one 16-colour answer while the `*`
+lead marker still names the active choice. The preview block is asserted *by equality against
+`chrome::top_frame_cells` and `chrome::bottom_frame_cells`* rather than against a copied expectation,
+which is what would fail the moment the surface grew a private frame of its own, and a no-dim
+configuration is proved to change the unfocused preview pane while leaving the focused one alone.
+The read-only contract is asserted as a property: every row of the surface confirms to `Dismissed`,
+and the surface joins the shared "every overlay is dismissible from every state" fixture.
+
+`src/attach.rs` closes the client half: `,` opens the surface, it reports the router's own prefix
+rather than a file's, Escape is consumed locally, an applied `ConfigReloaded` revision updates the
+open surface in place, and a revision whose file did not validate leaves every drawn row byte
+identical — the invalid-reload fixture that fails the moment the surface re-reads configuration for
+itself. `tests/visual.rs` captures card 06 as complete 40x17 frames in Storm truecolor, its
+16-color resolution (where no cell may fall past index 15), and `terminal` palette inheritance
+(default foreground and background throughout, the terminal's own `DIM` for the unfocused pane, and
+named swatches still at their real values), plus the 22- and 18-column narrow ladder where the
+preview yields to the settings and the dismissal hint is last standing. Card 06's reviewed cell
+golden, like card 04's, is M9-21's.
+
 Typed outer-terminal effects are unit tested in `src/effects.rs`: the policy begins deny-all, a
 permitted title and a capable, permitted OSC 52 store produce their exact terminal bytes once,
 and an unsupported, unsafe, policy-denied, or capability-denied effect leaves the output buffer
