@@ -1,13 +1,13 @@
 # PRD — cloo
 
-> **Status** (2026-08-04)
+> **Status** (2026-08-05)
 >
 > | Track | State |
 > |---|---|
 > | Shipped | `clooterminal` 0.0.4 installs a working Linux x64 `cloo` command (glibc 2.34+); 0.0.1 was a name-reservation placeholder. `cloo` 0.0.1 on crates.io is still a placeholder. |
 > | Implemented in the tree | M0–M9: the daemon/session model, public daemon lifecycle, attach transport, multipane workspace primitives, chrome composition, attached-client CLI loop, live visual states, deterministic compatibility fixtures, supported-target packaging, external brand application, and the complete eight-card high-fidelity terminal UI are built and tested. |
 > | Current CLI | `cloo` attaches to the persistent `default` workspace, creating its background daemon when none is listening (M8-01); `cloo <program> [args…]` launches the M0 local one-pane path; `cloo server [session]` owns a foreground daemon session; and `cloo attach [session]` joins it with the composed multipane frame, decoded input, resize, and layout controls. |
-> | Next | M9 is complete: every handoff card is live in the attached client and asserted by a reviewed cell golden and an outer-pseudoterminal fixture. Manual release validation and registry publishing remain maintainer-owned actions. |
+> | Next | M10 makes every pane visible in the active tab update live while preserving one focused input target and incremental, non-flashing rendering. Manual release validation and registry publishing remain maintainer-owned actions. |
 > | Packaging | M7-04 supplies the package structure. The working npm distribution is published directly from a maintainer terminal and currently carries a Linux x64 native dependency only; other prebuilt targets remain deferred. M7-05 adds the approved product mark to the distribution README. |
 > | Remaining release work | The pre-release product work through M9 is done. Publishing to npm or crates.io still requires explicit maintainer authorization. |
 
@@ -157,6 +157,24 @@ Storm themes map child default foreground/background cells to the selected pane 
 roles. Explicit child colors remain application-owned. A terminal-inheritance option preserves
 the outer terminal's defaults for users who prefer them.
 
+### Phase 6 — M10: keep every visible pane live
+
+**Planned.** A multipane agent workspace must show progress in every pane visible in the active
+tab without requiring the user to cycle focus. PTYs already remain alive and are pumped
+independently; M10 extends the active-tab projection and damage path so the client receives and
+caches the current grid for every visible pane.
+
+Focus remains singular. The focused pane alone receives keyboard input and terminal focus, owns
+copy mode and application mouse routing, and presents the actionable outer cursor. Unfocused panes
+continue to repaint their changed content but receive none of those privileges. Inactive tabs keep
+running server-side and receive a complete active-tab resync only when selected.
+
+Live output must not look like polling. Ordinary output repaints only changed rows through the
+coalesced damage path: it never clears, flashes, pulses, or animates a pane, and it never redraws an
+unchanged neighbouring pane. Attach, lag recovery, tab selection, and geometry changes may require
+a full pane picture, but the client composes that picture as one hidden-cursor frame rather than a
+visible clear-then-redraw sequence.
+
 ### Out of Scope
 
 Explicitly not in v1:
@@ -180,6 +198,9 @@ Explicitly not in v1:
 - The author can run many Codex and Claude Code panes, locate a named task and every
   attention-needing pane without reading each transcript, and use zoom when a harness needs more
   room.
+- Every pane visible in the active tab shows new output without a focus change; an unfocused
+  pane's ordinary output changes only its damaged rows and produces no pane flash, clear, or
+  output-triggered animation.
 - Codex and Claude Code remain usable through split, focus, resize, detach, and reattach; optional
   outer-terminal graphics may degrade without breaking the harness.
 - The author uses cloo as their only multiplexer for a full week without reaching for tmux.

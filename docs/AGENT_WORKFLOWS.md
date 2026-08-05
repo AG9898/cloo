@@ -12,6 +12,19 @@ Claude Code, or another interactive program; each keeps its own PTY and survives
 Profiles make common launches quick, while explicit metadata and attention states make the right
 pane discoverable without inspecting every transcript.
 
+### Live visible panes
+
+Every pane visible in the active tab remains observable without focus cycling. The daemon pumps
+all pane PTYs, and the attached projection sends changed rows for each visible pane at the shared
+frame cadence. Inactive tabs keep running but do not stream grids until selected, when every newly
+visible pane is fully seeded.
+
+Observation does not broaden authority. Exactly one pane remains focused for keyboard input,
+application mouse routing, focus reporting, copy mode, and the outer cursor. An unfocused agent's
+new output updates its body without receiving input and without changing its attention state.
+Incremental damage must look like ordinary terminal output: no periodic pane clear, flash, pulse,
+or output-triggered animation is part of the agent-workspace vocabulary.
+
 ## Profiles
 
 A profile supplies a local command template and presentation defaults. The v1 built-ins are
@@ -284,9 +297,11 @@ Before a supported profile is claimed compatible, test it manually in an install
 1. Launch in one pane, then in a split layout.
 2. Send normal and large bracketed pastes; verify extended-key shortcuts.
 3. Exercise focus, mouse, alternate screen, zoom, and repeated resize.
-4. Detach and reattach while the harness is active.
-5. Verify an attention event appears once and can be acknowledged.
-6. Verify unsupported outer-terminal effects degrade without corrupting the pane.
+4. Keep focus in one pane while another visible harness produces output; verify that output remains
+   live without receiving input, flashing, or repainting an unchanged neighbour.
+5. Detach and reattach while the harness is active.
+6. Verify an attention event appears once and can be acknowledged.
+7. Verify unsupported outer-terminal effects degrade without corrupting the pane.
 
 The deterministic escape-sequence fixture suite described in [`TESTING.md`](TESTING.md) is the
 automated gate. As of M7-02 it lives in `crates/cloo-server/tests/compat.rs`, with one scripted

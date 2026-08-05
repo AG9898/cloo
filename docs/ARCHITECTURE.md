@@ -221,7 +221,9 @@ recoverable direction to be inconsistent in.
 appearance. The conversion from emulator cells to wire cells lives in `cloo-core::grid` — the one
 crate that sees both vocabularies. At M1-04 the daemon's `DamageTracker` compares those captures
 only at its frame boundary and publishes the changed rows; the type a client applies does not
-change.
+change. M10 collects one such capture for every pane resolved in the active tab, keyed by
+`PaneId`; inactive-tab reactors keep pumping but are not captured for an attached view until their
+tab becomes active.
 
 #### Socket lifecycle
 
@@ -282,8 +284,8 @@ to report to.
 `conn::session_snapshot` is what an attach delivers. A client caches the visible grid and the
 daemon's explicit projections, never a second session model, so it needs the whole picture the
 moment it connects. `WorkspaceStatus` arrives first, followed by the same message types an
-incremental update uses — `Layout`, then `Panes`, then `Attention`, then `Damage`, then `Modes`,
-then `CursorMoved` — so a resync and a
+incremental update uses — `Layout`, then `Panes`, then `Attention`, then one `Damage` per visible
+pane, then focused-pane `Modes` and `CursorMoved` — so a resync and a
 damage frame stay one code path on the client. Geometry comes first so rows never arrive with
 nowhere to land, and identity and attention come before contents so a pane header has something to
 say before there is anything to draw it around.
@@ -303,8 +305,10 @@ the PTY for a bug to take.
 As of M1-04, the daemon accepts connections continuously and gives each attached client its own
 socket task and bounded `broadcast` receiver. The coordinator is the only task that captures the
 session: on a dirty frame tick it compares the new snapshot to the last published one and sends a
-single ordered batch — layout, changed rows, modes, cursor — without awaiting any socket. A client
-whose receiver reports lag discards the partial backlog and asks the coordinator for a full
+single ordered batch — layout, changed rows for every visible pane, focused modes, focused cursor —
+without awaiting any socket. The damage baseline is per `PaneId`: a new or resized pane sends all
+of its rows, a changed pane sends only its changed rows, and an unchanged neighbour sends none. A
+client whose receiver reports lag discards the partial backlog and asks the coordinator for a full
 snapshot; a slow terminal can therefore delay only its own resync, never the session task.
 
 The session geometry is the component-wise minimum of usable attached-client sizes. When a client
@@ -347,6 +351,11 @@ in-process one-pane launcher requests the unframed session form and retains its 
 Within a pane, `PtyReactor::resize` keeps the grid-then-ioctl order. A degenerate area is ignored rather
 than refused: a client that briefly reports zero rows mid-drag has no bearing on a child that is
 running fine, and refusing would turn a cosmetic glitch into a dead session.
+
+M10 changes `SessionSnapshot` from one focused `PaneSnapshot` to a `PaneId`-keyed picture of every
+pane in that resolved active-tab layout. Geometry, metadata, attention, and grids therefore name
+the same visible set from the same actor turn. Modes, copy state, and the cursor remain singular
+focused-pane projections; making a grid observable does not make its child an input target.
 
 Protocol v12 makes the attached-session `PaneRect` projection explicitly interior geometry: its
 position and size name the child grid after the daemon's frame inset, never the surrounding client
@@ -539,6 +548,13 @@ unit test against an exact expected byte string. The caller writes the buffer wh
 coalesced row indices and never clears the outer terminal. The local composition path uses the
 same split, so a complete snapshot that contains only unchanged rows still costs no repaint.
 
+M10 applies that incremental path independently to every visible pane. Output in an unfocused
+pane invalidates only the rows named for that pane; it does not clear or repaint the whole pane,
+redraw an unchanged neighbour, or start a focus/motion transition. Even a necessary full picture
+after attach, lag recovery, tab selection, or geometry change is emitted as one hidden-cursor
+composed frame, never a visible clear followed later by content. Live observation therefore has
+no polling flash or periodic refresh treatment.
+
 Three rendering invariants:
 
 - **Frame order is hide, clear, paint, reset, place, show.** Nothing is ever seen half-drawn.
@@ -586,6 +602,10 @@ text label, then the title truncates, and the state glyph is the last thing stan
 never the only signal: every attention state carries an ASCII glyph and, wherever it fits, its text
 label. Focus is not an attention state; it changes the accent and the marker and never the glyph.
 See [`STYLEGUIDE.md`](STYLEGUIDE.md) and `DECISIONS.md` RESOLVED-14.
+
+Focus is also not a liveness gate. An unfocused pane uses the neutral frame and optional dimming
+while its cached body continues to accept and render server damage. Only the focused pane owns the
+outer cursor, input-mode projection, and copy-mode surface.
 
 Named themes map child `Color::Default` cells to their pane surface and default text at render time,
 without mutating the client's grid cache. Explicit child colors pass through unchanged.
@@ -1376,8 +1396,9 @@ never guesses one from the grid.
 ordered bar, and a later `Tabs` update replaces the client's cache when creation, close, rename,
 or selection changes it. The session actor projects it from `cloo-core::session::Session` in the
 same turn as the active tab's snapshot; inactive tabs keep their PTYs and continue pumping, but
-only the active tab's layout, grid, metadata, attention, cursor, and modes are sent. A switch
-therefore changes view state and active geometry, never a child's identity or process lifetime.
+only the active tab's layout, visible-pane grids, metadata, attention, focused cursor, and focused
+modes are sent. A switch therefore changes view state and active geometry, fully seeds every pane
+now visible, and never changes a child's identity or process lifetime.
 
 ### Framing
 
@@ -1415,6 +1436,11 @@ server relays it in `Refused { reason }` and closes the connection. The adapter 
 shares the same number and the same check — `AdapterMessage::Hello` carries it and
 `AdapterReply::Ready` echoes it — because both protocols are built from this one crate and two
 version constants could only ever disagree by accident.
+
+M10 advances the handshake from v13 to v14 even though it reuses `Damage { pane, rows }`: an
+attach/resync batch now promises damage for every visible pane rather than only the focused pane,
+which is a semantic protocol change that stale peers must not silently interpret under the old
+contract.
 
 ### Types on the wire
 

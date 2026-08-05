@@ -85,7 +85,13 @@ the status row, and the line being typed into are the three places a notice is n
 
 - **Focus:** the focused pane has an accent border; unfocused panes are dimmed. Dimming is a
   contrast reduction toward the frame background, not alpha. Implementations must retain
-  readable text and must offer a no-dim accessibility configuration.
+  readable text and must offer a no-dim accessibility configuration. It is never a paused state:
+  every pane visible in the active tab continues to show live output while exactly one pane owns
+  input and the actionable cursor.
+- **Live output:** ordinary pane damage has no visual effect beyond the cells that changed. It
+  never clears, flashes, pulses, or animates a pane, and output in one pane never repaints an
+  unchanged neighbour. A full picture required by attach, resync, tab selection, or geometry is
+  composed under the hidden cursor and presented as one frame, not as a visible clear-then-redraw.
 - **Status:** one always-on row is the default. The high-fidelity minimal form uses flat,
   visually separated segments; the powerline form is available when glyph support is known.
   A compact ASCII line is the narrow or limited-capability fallback, not the reference form.
