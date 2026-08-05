@@ -74,6 +74,7 @@
 //! theme = "storm"                # a named palette, or `terminal` to inherit
 //! dim_unfocused = true           # `false` is the no-dim accessibility option
 //! status = "minimal"             # or `powerline`
+//! borders = "square"             # or `rounded`, or `ascii`
 //! motion = true                  # `false` animates nothing at all
 //! reduce_motion = false          # `true` settles every transition immediately
 //! ```
@@ -267,6 +268,88 @@ impl fmt::Display for StatusMode {
     }
 }
 
+/// Which glyph set draws a pane's frame corners and edges.
+///
+/// The handoff's rounded corners are the one "impossible" treatment a cell can
+/// in fact express: `╭╮╰╯` are ordinary box-drawing characters, not a sub-cell
+/// radius. This is therefore a presentation preference on exactly the powerline
+/// precedent — the data, geometry, and every cell *position* are identical
+/// across all three, so only the character in a corner or edge cell changes.
+///
+/// [`Self::Ascii`] is the documented degradation for a terminal whose font has
+/// no box-drawing coverage at all; frame colour and the focus marker carry focus
+/// unchanged there, which is what the style guide already requires.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BorderStyle {
+    /// `┌┐└┘` square corners. The conservative default.
+    #[default]
+    Square,
+    /// `╭╮╰╯` rounded corners, the handoff's own treatment at one-cell radius.
+    Rounded,
+    /// `+`, `-`, and `|` — no box-drawing coverage assumed.
+    Ascii,
+}
+
+impl BorderStyle {
+    /// Every border style in stable configuration order.
+    pub const ALL: [Self; 3] = [Self::Square, Self::Rounded, Self::Ascii];
+
+    /// The stable configuration spelling for this style.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Square => "square",
+            Self::Rounded => "rounded",
+            Self::Ascii => "ascii",
+        }
+    }
+
+    /// Parses one configuration spelling.
+    #[must_use]
+    pub const fn parse(value: &str) -> Option<Self> {
+        match value.as_bytes() {
+            b"square" => Some(Self::Square),
+            b"rounded" => Some(Self::Rounded),
+            b"ascii" => Some(Self::Ascii),
+            _ => None,
+        }
+    }
+
+    /// This style's top-left, top-right, bottom-left, and bottom-right corners.
+    #[must_use]
+    pub const fn corners(self) -> [char; 4] {
+        match self {
+            Self::Square => ['┌', '┐', '└', '┘'],
+            Self::Rounded => ['╭', '╮', '╰', '╯'],
+            Self::Ascii => ['+', '+', '+', '+'],
+        }
+    }
+
+    /// This style's horizontal edge character.
+    #[must_use]
+    pub const fn horizontal(self) -> char {
+        match self {
+            Self::Square | Self::Rounded => '─',
+            Self::Ascii => '-',
+        }
+    }
+
+    /// This style's vertical edge character.
+    #[must_use]
+    pub const fn vertical(self) -> char {
+        match self {
+            Self::Square | Self::Rounded => '│',
+            Self::Ascii => '|',
+        }
+    }
+}
+
+impl fmt::Display for BorderStyle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The validated `[visual]` table: how this client should look.
 ///
 /// Every field is client-local. Nothing here reaches session state, so two
@@ -283,6 +366,8 @@ pub struct VisualConfig {
     pub dim_unfocused: bool,
     /// Which status-row composition to draw.
     pub status: StatusMode,
+    /// Which glyph set draws pane frame corners and edges.
+    pub borders: BorderStyle,
     /// Whether layout transitions animate at all.
     pub motion: bool,
     /// Whether a transition settles immediately instead of ramping.
@@ -303,6 +388,7 @@ impl VisualConfig {
             theme: ThemeChoice::Named(crate::theme::ThemeName::Storm),
             dim_unfocused: true,
             status: StatusMode::Minimal,
+            borders: BorderStyle::Square,
             motion: true,
             reduce_motion: false,
         }
@@ -436,6 +522,8 @@ struct RawVisual {
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
+    borders: Option<String>,
+    #[serde(default)]
     motion: Option<bool>,
     #[serde(default)]
     reduce_motion: Option<bool>,
@@ -459,6 +547,12 @@ impl RawVisual {
         if let Some(written) = self.status {
             visual.status = StatusMode::parse(&written).ok_or(ConfigWarning::BadVisual {
                 field: "status",
+                value: written,
+            })?;
+        }
+        if let Some(written) = self.borders {
+            visual.borders = BorderStyle::parse(&written).ok_or(ConfigWarning::BadVisual {
+                field: "borders",
                 value: written,
             })?;
         }
@@ -1198,6 +1292,7 @@ mod tests {
             theme = "nord"
             dim_unfocused = false
             status = "powerline"
+            borders = "rounded"
             motion = true
             reduce_motion = true
             "#,
@@ -1210,6 +1305,7 @@ mod tests {
                 theme: ThemeChoice::Named(ThemeName::Nord),
                 dim_unfocused: false,
                 status: StatusMode::Powerline,
+                borders: BorderStyle::Rounded,
                 motion: true,
                 reduce_motion: true,
             }

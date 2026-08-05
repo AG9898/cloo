@@ -25,7 +25,7 @@ use cloo_client::input::PaneArea;
 use cloo_client::renderer::{FramePane, Grid, Span, compose_frame};
 use cloo_client::status::RepositoryStatus;
 use cloo_client::theme::Theme;
-use cloo_core::StatusMode;
+use cloo_core::{BorderStyle, StatusMode};
 use cloo_proto::{
     Cell, CellAttrs, Color, Direction, PaneId, Point, RowUpdate, Size, TabId, TabSummary,
 };
@@ -131,6 +131,7 @@ pub struct Scene {
     queue: AttentionQueue,
     hint: PrefixHint,
     dim_unfocused: bool,
+    border_style: BorderStyle,
     /// Which of card 07's two status compositions the client is configured for.
     mode: StatusMode,
     /// The client's own local wall-clock reading, when one was taken.
@@ -160,6 +161,7 @@ impl Scene {
             queue: AttentionQueue::new(),
             hint: PrefixHint::default(),
             dim_unfocused: true,
+            border_style: BorderStyle::Square,
             mode: StatusMode::Minimal,
             clock: None,
             repository: None,
@@ -214,6 +216,13 @@ impl Scene {
     #[must_use]
     pub fn no_dim(mut self) -> Self {
         self.dim_unfocused = false;
+        self
+    }
+
+    /// Composes this scene with one border glyph set.
+    #[must_use]
+    pub fn borders(mut self, borders: BorderStyle) -> Self {
+        self.border_style = borders;
         self
     }
 
@@ -287,6 +296,7 @@ impl Scene {
         ChromeOptions {
             dim_unfocused: self.dim_unfocused,
             theme,
+            borders: self.border_style,
         }
     }
 

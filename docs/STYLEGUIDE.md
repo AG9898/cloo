@@ -25,8 +25,8 @@ many concurrent coding-agent panes without turning the multiplexer into a dashbo
 ## Acceptance Contract and Delivery State
 
 The handoff is the authoritative visual target wherever a terminal cell can express it. Terminal
-constraints permit explicit adaptations — square corners instead of rounded ones, cell gutters
-instead of pixel gaps, no shadows, and the user's terminal font — but they do not permit replacing
+constraints permit explicit adaptations — cell gutters instead of pixel gaps, no shadows, and the
+user's terminal font — but they do not permit replacing
 the handoff's hierarchy with an unrelated sparse composition. Every intentional adaptation must be
 named here.
 
@@ -68,7 +68,7 @@ terminal cell cannot, and what cloo draws instead. Nothing else in the handoff i
 
 | Handoff treatment | Terminal equivalent | Why |
 |---|---|---|
-| Rounded corners | `┌ ┐ └ ┘` square box-drawing corners, ASCII-degradable | A cell has no sub-cell geometry |
+| Rounded corners | `╭ ╮ ╰ ╯` at one-cell radius when `[visual] borders` opts in; `┌ ┐ └ ┘` by default; `+ - \|` where box drawing is unavailable | A cell has no *arbitrary* radius, but a one-cell rounded corner is an ordinary box-drawing glyph rather than an adaptation |
 | Pixel gaps between panes | One-cell gutter column or row | Spacing is quantized to cells |
 | Drop shadows behind overlays | The raised surface plus the same contrast reduction an unfocused pane takes | A cell has no alpha |
 | Alpha-blended dimming | An exact blend toward the frame background for 24-bit colour; the terminal's own `DIM` rendition for a palette index or the terminal default | cloo cannot know the appearance of a colour it did not choose |
@@ -152,10 +152,17 @@ session state.
 
 ## Geometry and Chrome
 
-- Render a one-cell gutter between panes. Do not imitate the mock's rounded corners or shadows.
+- Render a one-cell gutter between panes. Do not imitate the mock's shadows.
 - Draw a complete rectangular pane frame. Its top edge contains the one-row header; its side and
   bottom edges remain visible around the body. Box-drawing glyphs may degrade to ASCII while frame
   color and text markers continue to carry focus.
+- `[visual] borders` selects the frame glyph set: `square` (`┌┐└┘`, the default), `rounded`
+  (`╭╮╰╯`, the handoff's own corner at one-cell radius), or `ascii` (`+ - |`, the documented
+  degradation for a font with no box-drawing coverage). It is a *character* choice only — every
+  style occupies the same cells, so frame geometry, colour, rendition, the width ladder, and mouse
+  hit-testing are identical across all three, and `crates/cloo-client/tests/visual.rs` asserts
+  exactly that. Overlay surfaces are drawn from the raised surface rather than a box, so this
+  preference does not reach them. See [`DECISIONS.md`](DECISIONS.md) RESOLVED-20.
 - A pane header is one framed row: pane index, profile/name, optional task label, and concise state.
 - The always-on status bar is one row. It prioritizes session, active tab, attention count, and
   prefix hint; clock, client/repository detail, inactive tabs, and titles yield in that order.

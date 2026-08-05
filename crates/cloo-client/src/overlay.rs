@@ -777,6 +777,7 @@ fn preview_cells(preview: &ConfigPreview, width: u16, theme: Theme) -> Vec<Vec<C
     let options = ChromeOptions {
         dim_unfocused: preview.visual.dim_unfocused,
         theme,
+        borders: preview.visual.borders,
     };
     let focused = PaneChrome::new(1, "focused")
         .attention(Attention::Quiet)
@@ -3113,6 +3114,7 @@ mod tests {
             theme: ThemeChoice::Terminal,
             dim_unfocused: false,
             status: cloo_core::StatusMode::Powerline,
+            borders: cloo_core::BorderStyle::Rounded,
             motion: false,
             reduce_motion: true,
         };
@@ -3229,6 +3231,7 @@ mod tests {
         let options = ChromeOptions {
             dim_unfocused: true,
             theme,
+            borders: cloo_core::BorderStyle::Square,
         };
         // 40 columns: a 19-wide and a 20-wide frame, plus the one-cell gutter.
         let focused = PaneChrome::new(1, "focused")

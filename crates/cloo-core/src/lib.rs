@@ -53,7 +53,7 @@ pub mod session;
 pub mod tab;
 pub mod theme;
 
-pub use config::{Config, ConfigError, ConfigWarning, StatusMode, VisualConfig};
+pub use config::{BorderStyle, Config, ConfigError, ConfigWarning, StatusMode, VisualConfig};
 pub use copy_mode::{
     CopyMode, CopyMotion, CopyPoint, CopySelection, SearchDirection, SearchError, SearchMatch,
     SearchState,

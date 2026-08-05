@@ -1155,6 +1155,7 @@ impl LiveState {
         ChromeOptions {
             dim_unfocused: self.visual.dim_unfocused,
             theme: self.theme,
+            borders: self.visual.borders,
         }
     }
 
@@ -4177,6 +4178,7 @@ mod tests {
             theme: cloo_core::ThemeChoice::Named(cloo_core::ThemeName::Nord),
             dim_unfocused: false,
             status: cloo_core::StatusMode::Powerline,
+            borders: cloo_core::BorderStyle::Rounded,
             motion: false,
             reduce_motion: false,
         };
@@ -4244,6 +4246,7 @@ mod tests {
             theme: cloo_core::ThemeChoice::Terminal,
             dim_unfocused: false,
             status: cloo_core::StatusMode::Powerline,
+            borders: cloo_core::BorderStyle::Ascii,
             motion: true,
             reduce_motion: true,
         };

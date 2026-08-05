@@ -605,3 +605,37 @@ Asserting colour in the pseudoterminal fixture was rejected as duplicated, weake
 **Affects:** [`TESTING.md`](TESTING.md#m9-visual-acceptance),
 [`STYLEGUIDE.md`](STYLEGUIDE.md#acceptance-contract-and-delivery-state),
 `crates/cloo-client/tests/visual/`, `crates/cloo/tests/visual_attach.rs`.
+
+### RESOLVED-20 — A rounded corner is a glyph choice, not a terminal adaptation
+
+**Resolved:** 2026-08-05
+
+**Decision:** The handoff's rounded corners are drawn as rounded corners. `[visual] borders`
+selects the pane frame's glyph set — `square` (`┌┐└┘`, the conservative default), `rounded`
+(`╭╮╰╯`), or `ascii` (`+ - |`) — as a client-local presentation preference on the same footing as
+`[visual] status`. The three styles are one composition: every style occupies exactly the same
+cells, so frame geometry, colour, rendition, the documented width ladder, and mouse hit-testing are
+identical across all of them, and only a corner or edge cell's character may differ.
+`crates/cloo-client/tests/visual.rs` asserts that invariant directly rather than trusting it.
+
+**Why:** `U+256D`–`U+2570` are ordinary box-drawing characters. The previous style guide listed
+rounded corners among the treatments "a cell cannot express" and adapted them to square ones, but
+what a cell actually lacks is an *arbitrary* radius; a one-cell radius was always available and was
+being declined by an overgeneralised constraint. Since the handoff is authoritative wherever a cell
+can express it, and a cell can express this, the adaptation was not permitted in the first place.
+Making it a preference rather than an unconditional switch keeps the default conservative for fonts
+with thin box-drawing coverage while letting the reference treatment be reached.
+
+**Alternatives rejected:** Rounding unconditionally would change every existing frame on a font
+cloo cannot inspect. Gating on a detected `Capability` was rejected because glyph coverage is a
+font property, not a terminal-protocol one, and the `Capability` enum mirrors `TermCaps` field for
+field — the same reasoning that already makes powerline separators a preference rather than a
+negotiated capability. Rounding the overlay surfaces was out of scope: they are drawn from the
+raised surface and have no box edge to round, which is a separate gap with separate levers.
+
+**Affects:** [`STYLEGUIDE.md`](STYLEGUIDE.md#intentional-terminal-adaptations),
+[`ARCHITECTURE.md`](ARCHITECTURE.md), `crates/cloo-core/src/config.rs`,
+`crates/cloo-client/src/chrome.rs`, `crates/cloo-client/src/overlay.rs`,
+`crates/cloo-client/tests/visual.rs`. This narrows RESOLVED-17's adaptation table without changing
+its two-level acceptance contract. The `ascii` style also implements the style guide's
+long-documented box-drawing degradation, which had no implementation before.

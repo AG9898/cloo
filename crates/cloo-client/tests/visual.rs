@@ -24,7 +24,7 @@ use cloo_client::input::PaletteAction;
 use cloo_client::overlay::{ConfigPreview, Overlay, SessionEntry, overlay_spans};
 use cloo_client::renderer::Span;
 use cloo_client::theme::{Theme, ThemeToken};
-use cloo_core::{Keymap, StatusMode, ThemeChoice, ThemeName, VisualConfig};
+use cloo_core::{BorderStyle, Keymap, StatusMode, ThemeChoice, ThemeName, VisualConfig};
 use cloo_proto::{
     Cell, CellAttrs, Color, Direction, PaneId, Point, SessionSummary, Size, TermCaps,
 };
@@ -1744,4 +1744,80 @@ fn a_frame_of_the_wrong_geometry_is_refused_before_any_cell_is_compared() {
 
     assert!(report.contains("expected 5x2"), "{report}");
     assert!(report.contains("drew 4x2"), "{report}");
+}
+
+// ---------------------------------------------------------------------------
+// Border style prototype
+// ---------------------------------------------------------------------------
+
+/// Every cell of a scene composed under one border style.
+fn bordered(scene: &Scene, style: BorderStyle, theme: Theme) -> FrameMatrix {
+    scene.clone().borders(style).frame(theme)
+}
+
+/// A border style changes characters in frame cells and nothing else.
+///
+/// This is the whole claim the preference rests on: the three styles are one
+/// composition, so a frame's geometry, colours, renditions, and therefore its
+/// mouse hit-testing are identical across all of them. Only a corner or edge
+/// cell's `ch` may differ, and only into that style's own glyph set.
+#[test]
+fn a_border_style_changes_only_frame_characters() {
+    let theme = Theme::storm();
+    let scene = workspace();
+    let square = bordered(&scene, BorderStyle::Square, theme);
+    let size = square.size();
+
+    for style in [BorderStyle::Rounded, BorderStyle::Ascii] {
+        let other = bordered(&scene, style, theme);
+        assert_eq!(other.size(), size, "{style} resized the frame");
+
+        let square_glyphs: Vec<char> = BorderStyle::Square
+            .corners()
+            .into_iter()
+            .chain([
+                BorderStyle::Square.horizontal(),
+                BorderStyle::Square.vertical(),
+            ])
+            .collect();
+
+        for row in 0..size.rows {
+            for col in 0..size.cols {
+                let a = square.cell(col, row);
+                let b = other.cell(col, row);
+                assert_eq!(a.fg, b.fg, "{style} changed a colour at {col},{row}");
+                assert_eq!(a.bg, b.bg, "{style} changed a colour at {col},{row}");
+                assert_eq!(
+                    a.attrs, b.attrs,
+                    "{style} changed a rendition at {col},{row}"
+                );
+                if a.ch != b.ch {
+                    assert!(
+                        square_glyphs.contains(&a.ch),
+                        "{style} changed a non-frame cell at {col},{row}: {:?} -> {:?}",
+                        a.ch,
+                        b.ch
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Prints card 01 under all three styles, for review against the handoff.
+///
+/// Run with `cargo test -p cloo-client --test visual border_style_prototype
+/// -- --nocapture`. This asserts nothing a reviewer could not see; the
+/// assertion that matters is the one above.
+#[test]
+fn border_style_prototype() {
+    let theme = Theme::storm();
+    let scene = workspace();
+    for style in BorderStyle::ALL {
+        let frame = bordered(&scene, style, theme);
+        println!("\n=== card 01 · borders = \"{style}\" ===");
+        for row in 0..frame.size().rows {
+            println!("{}", frame.text_row(row));
+        }
+    }
 }

@@ -34,7 +34,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use cloo_core::StatusMode;
+use cloo_core::{BorderStyle, StatusMode};
 use cloo_proto::{Cell, CellAttrs, Color, Direction, Point, Size, TabSummary};
 
 use crate::motion::{Motion, MotionKind, MotionSettings, Phase};
@@ -176,6 +176,12 @@ pub struct ChromeOptions {
     pub dim_unfocused: bool,
     /// The client-local theme for this chrome pass.
     pub theme: Theme,
+    /// Which glyph set draws frame corners and edges.
+    ///
+    /// Purely a character choice: every style occupies the same cells, so a
+    /// frame's geometry, hit-testing, and width ladder are identical across all
+    /// three.
+    pub borders: BorderStyle,
 }
 
 impl Default for ChromeOptions {
@@ -183,6 +189,7 @@ impl Default for ChromeOptions {
         Self {
             dim_unfocused: true,
             theme: Theme::storm(),
+            borders: BorderStyle::Square,
         }
     }
 }
@@ -194,6 +201,7 @@ impl ChromeOptions {
         Self {
             dim_unfocused: false,
             theme: Theme::storm(),
+            borders: BorderStyle::Square,
         }
     }
 
@@ -201,6 +209,13 @@ impl ChromeOptions {
     #[must_use]
     pub const fn with_theme(mut self, theme: Theme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    /// Applies one border glyph set, preserving every other preference.
+    #[must_use]
+    pub const fn with_borders(mut self, borders: BorderStyle) -> Self {
+        self.borders = borders;
         self
     }
 }
@@ -771,29 +786,31 @@ pub fn header_span(at: Point, chrome: &PaneChrome, width: u16, options: ChromeOp
 /// second title row. The returned width is `body_width + 2`.
 #[must_use]
 pub fn top_frame_cells(chrome: &PaneChrome, body_width: u16, options: ChromeOptions) -> Vec<Cell> {
+    let [top_left, top_right, _, _] = options.borders.corners();
     let mut cells = Vec::with_capacity(usize::from(body_width).saturating_add(2));
-    cells.push(frame_cell('┌', chrome.focused, options));
+    cells.push(frame_cell(top_left, chrome.focused, options));
     cells.extend(header_cells(chrome, body_width, options));
-    cells.push(frame_cell('┐', chrome.focused, options));
+    cells.push(frame_cell(top_right, chrome.focused, options));
     cells
 }
 
 /// Builds one vertical pane-frame edge cell.
 #[must_use]
 pub fn side_frame_cell(focused: bool, options: ChromeOptions) -> Cell {
-    frame_cell('│', focused, options)
+    frame_cell(options.borders.vertical(), focused, options)
 }
 
 /// Builds the pane's complete bottom frame edge.
 #[must_use]
 pub fn bottom_frame_cells(focused: bool, body_width: u16, options: ChromeOptions) -> Vec<Cell> {
+    let [_, _, bottom_left, bottom_right] = options.borders.corners();
     let mut cells = Vec::with_capacity(usize::from(body_width).saturating_add(2));
-    cells.push(frame_cell('└', focused, options));
+    cells.push(frame_cell(bottom_left, focused, options));
     cells.extend(std::iter::repeat_n(
-        frame_cell('─', focused, options),
+        frame_cell(options.borders.horizontal(), focused, options),
         usize::from(body_width),
     ));
-    cells.push(frame_cell('┘', focused, options));
+    cells.push(frame_cell(bottom_right, focused, options));
     cells
 }
 
