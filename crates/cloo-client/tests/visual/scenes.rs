@@ -161,7 +161,10 @@ impl Scene {
             queue: AttentionQueue::new(),
             hint: PrefixHint::default(),
             dim_unfocused: true,
-            border_style: BorderStyle::Square,
+            // The shipped default, so a golden asserts the appearance a user
+            // actually gets. `borders()` overrides it where a card is about the
+            // preference itself.
+            border_style: BorderStyle::default(),
             mode: StatusMode::Minimal,
             clock: None,
             repository: None,

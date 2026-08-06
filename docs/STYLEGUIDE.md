@@ -68,7 +68,7 @@ terminal cell cannot, and what cloo draws instead. Nothing else in the handoff i
 
 | Handoff treatment | Terminal equivalent | Why |
 |---|---|---|
-| Rounded corners | `╭ ╮ ╰ ╯` at one-cell radius when `[visual] borders` opts in; `┌ ┐ └ ┘` by default; `+ - \|` where box drawing is unavailable | A cell has no *arbitrary* radius, but a one-cell rounded corner is an ordinary box-drawing glyph rather than an adaptation |
+| Rounded corners | `╭ ╮ ╰ ╯` at one-cell radius, the default; `┌ ┐ └ ┘` where a font's box-drawing coverage is thin; `+ - \|` where box drawing is unavailable | A cell has no *arbitrary* radius, but a one-cell rounded corner is an ordinary box-drawing glyph rather than an adaptation |
 | Pixel gaps between panes | One-cell gutter column or row | Spacing is quantized to cells |
 | Drop shadows behind overlays | The raised surface plus the same contrast reduction an unfocused pane takes | A cell has no alpha |
 | Alpha-blended dimming | An exact blend toward the frame background for 24-bit colour; the terminal's own `DIM` rendition for a palette index or the terminal default | cloo cannot know the appearance of a colour it did not choose |
@@ -156,9 +156,12 @@ session state.
 - Draw a complete rectangular pane frame. Its top edge contains the one-row header; its side and
   bottom edges remain visible around the body. Box-drawing glyphs may degrade to ASCII while frame
   color and text markers continue to carry focus.
-- `[visual] borders` selects the frame glyph set: `square` (`┌┐└┘`, the default), `rounded`
-  (`╭╮╰╯`, the handoff's own corner at one-cell radius), or `ascii` (`+ - |`, the documented
-  degradation for a font with no box-drawing coverage). It is a *character* choice only — every
+- `[visual] borders` selects the frame glyph set: `rounded` (`╭╮╰╯`, the handoff's own corner at
+  one-cell radius, and the default), `square` (`┌┐└┘`, for a font whose box-drawing coverage is
+  thin), or `ascii` (`+ - |`, the documented degradation for a font with no box-drawing coverage
+  at all). Rounded is the default because a one-cell radius is an ordinary glyph, so the reference
+  appearance is what cloo ships rather than something a user opts into.
+  It is a *character* choice only — every
   style occupies the same cells, so frame geometry, colour, rendition, the width ladder, and mouse
   hit-testing are identical across all three, and `crates/cloo-client/tests/visual.rs` asserts
   exactly that. Overlay surfaces are drawn from the raised surface rather than a box, so this
@@ -532,9 +535,9 @@ navigation, because this is the one overlay a user could reasonably expect to se
     gruvbox # # # # #
     nord    # # # # #
   preview
-┌> 1 focused     -┐ ┌  2 unfocused    -┐
+╭> 1 focused     -╮ ╭  2 unfocused    -╮
 │$ cloo           │ │$ cloo            │
-└─────────────────┘ └──────────────────┘
+╰─────────────────╯ ╰──────────────────╯
   esc close read only j/k move
 ```
 

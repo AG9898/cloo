@@ -269,7 +269,7 @@ fn workspace_golden() -> ExpectedFrame {
             "SSSSSTTTTTTT,,,,,,,,,,,,wwwwwwwwwwwwwwww",
         )
         .row(
-            "┌> 1 shell                    ? unknown┐",
+            "╭> 1 shell                    ? unknown╮",
             "FaammBBBBBssssssssssssssssssssmmmmmmmmmF",
         )
         .row(
@@ -289,7 +289,7 @@ fn workspace_golden() -> ExpectedFrame {
             "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F",
         )
         .row(
-            "└──────────────────────────────────────┘",
+            "╰──────────────────────────────────────╯",
             "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
         )
         .row(
@@ -594,7 +594,7 @@ fn vertical_split_golden() -> ExpectedFrame {
             "SSSSSTTTTTTT,,,,,,,,,,,mmmmmmmmmmmmmmmmm",
         )
         .row(
-            "┌> 1 shell       ?┐ ┌  2 claude       !┐",
+            "╭> 1 shell       ?╮ ╭  2 claude       !╮",
             "FaammBBBBB,,,,,,,mF_fbbkkPPPPPPxxxxxxxHf",
         )
         .row(
@@ -606,7 +606,7 @@ fn vertical_split_golden() -> ExpectedFrame {
         .row(body, body_keys)
         .row(body, body_keys)
         .row(
-            "└─────────────────┘ └──────────────────┘",
+            "╰─────────────────╯ ╰──────────────────╯",
             "FFFFFFFFFFFFFFFFFFF_ffffffffffffffffffff",
         )
         .row(
@@ -694,7 +694,7 @@ fn nested_workspace_golden() -> ExpectedFrame {
         // documented placement, not a collision: a notice may pass in front of a
         // harness, and only the focused pane's cursor row is protected.
         .row(
-            "┌> 1 shell       ?┐claude ! needs input┐",
+            "╭> 1 shell       ?╮claude ! needs input╮",
             "FaammBBBBB,,,,,,,mFpppppp,wwwwwwwwwwwwwf",
         )
         .row(
@@ -707,11 +707,11 @@ fn nested_workspace_golden() -> ExpectedFrame {
         )
         .row(body, body_keys)
         .row(
-            "│                 │ └──────────────────┘",
+            "│                 │ ╰──────────────────╯",
             "F~~~~~~~~~~~~~~~~~F_ffffffffffffffffffff",
         )
         .row(
-            "│                 │ ┌  3 build x failed┐",
+            "│                 │ ╭  3 build x failed╮",
             "F~~~~~~~~~~~~~~~~~F_fbbkkPPPPPxZZZZZZZZf",
         )
         .row(
@@ -721,7 +721,7 @@ fn nested_workspace_golden() -> ExpectedFrame {
         .row(body, body_keys)
         .row(body, body_keys)
         .row(
-            "└─────────────────┘ └──────────────────┘",
+            "╰─────────────────╯ ╰──────────────────╯",
             "FFFFFFFFFFFFFFFFFFF_ffffffffffffffffffff",
         )
         .row(
@@ -851,7 +851,7 @@ fn resizing_split_golden() -> ExpectedFrame {
             "SSSSSTTTTTTT,,,,,,,,,,,mmmmmmmmmmmmmmmmm",
         )
         .row(
-            "┌> 1 shell       ?┐│┌  2 claude       !┐",
+            "╭> 1 shell       ?╮│╭  2 claude       !╮",
             "FaammBBBBB,,,,,,,mFLfbbkkPPPPPPxxxxxxxHf",
         )
         .row(
@@ -863,7 +863,7 @@ fn resizing_split_golden() -> ExpectedFrame {
         .row(body, body_keys)
         .row(body, body_keys)
         .row(
-            "└─────────────────┘│└──────────────────┘",
+            "╰─────────────────╯│╰──────────────────╯",
             "FFFFFFFFFFFFFFFFFFFLffffffffffffffffffff",
         )
         .row(
@@ -1234,10 +1234,10 @@ fn config_card_rows() -> Vec<String> {
     .iter()
     .map(|row| (*row).to_owned())
     .collect();
-    rows.push("\u{250c}> 1 focused     -\u{2510} \u{250c}  2 unfocused    -\u{2510}".to_owned());
+    rows.push("\u{256d}> 1 focused     -\u{256e} \u{256d}  2 unfocused    -\u{256e}".to_owned());
     rows.push("\u{2502}$ cloo           \u{2502} \u{2502}$ cloo            \u{2502}".to_owned());
     rows.push(format!(
-        "\u{2514}{}\u{2518} \u{2514}{}\u{2518}",
+        "\u{2570}{}\u{256f} \u{2570}{}\u{256f}",
         "\u{2500}".repeat(17),
         "\u{2500}".repeat(18)
     ));
@@ -1398,7 +1398,7 @@ fn config_preview_golden() -> ExpectedFrame {
             "rrmmmmmmmddddddddddddddddddddddddddddddd",
         )
         .row(
-            "┌> 1 focused     -┐ ┌  2 unfocused    -┐",
+            "╭> 1 focused     -╮ ╭  2 unfocused    -╮",
             "FbbuuBBBBBBB,,,,,uFdfgghhiiiiiiiiijjjjhf",
         )
         .row(
@@ -1406,7 +1406,7 @@ fn config_preview_golden() -> ExpectedFrame {
             "F~~~~~~~~~~~~~~~~~Fdfllllllllllllllllllf",
         )
         .row(
-            "└─────────────────┘ └──────────────────┘",
+            "╰─────────────────╯ ╰──────────────────╯",
             "FFFFFFFFFFFFFFFFFFFdffffffffffffffffffff",
         )
         .row(
@@ -1587,7 +1587,7 @@ fn config_preview_card_degrades_to_its_settings_on_a_narrow_terminal() {
     assert_eq!(config_text(&narrow)[0], "  configuration 1/11");
     assert_eq!(config_text(&narrow)[1], "> theme  storm");
     assert!(
-        config_text(&narrow)[5].starts_with('\u{250c}'),
+        config_text(&narrow)[5].starts_with('\u{256d}'),
         "22 columns still hold two framed preview panes"
     );
     assert_eq!(config_text(&narrow)[8], "  esc close read only");
@@ -1595,7 +1595,7 @@ fn config_preview_card_degrades_to_its_settings_on_a_narrow_terminal() {
     let cramped = config_frame(&overlay, Size::new(18, 9), theme);
     let rows = config_text(&cramped);
     assert!(
-        rows.iter().all(|row| !row.contains('\u{250c}')),
+        rows.iter().all(|row| !row.contains('\u{256d}')),
         "a box too narrow for two legible panes spends its rows on settings: {rows:?}"
     );
     assert_eq!(rows[0], "  configuration");

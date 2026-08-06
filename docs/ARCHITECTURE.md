@@ -1128,7 +1128,7 @@ M9-02 adds the third table, `[visual]`, reached through `Config::visual()` as a 
 theme = "storm"                # a named palette, or `terminal` to inherit
 dim_unfocused = true           # `false` is the no-dim accessibility option
 status = "minimal"             # or `powerline`
-borders = "square"             # or `rounded`, or `ascii`
+borders = "rounded"            # or `square`, or `ascii`
 motion = true                  # `false` animates nothing at all
 reduce_motion = false          # `true` settles every transition immediately
 ```

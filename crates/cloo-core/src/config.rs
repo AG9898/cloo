@@ -74,7 +74,7 @@
 //! theme = "storm"                # a named palette, or `terminal` to inherit
 //! dim_unfocused = true           # `false` is the no-dim accessibility option
 //! status = "minimal"             # or `powerline`
-//! borders = "square"             # or `rounded`, or `ascii`
+//! borders = "rounded"            # or `square`, or `ascii`
 //! motion = true                  # `false` animates nothing at all
 //! reduce_motion = false          # `true` settles every transition immediately
 //! ```
@@ -281,10 +281,13 @@ impl fmt::Display for StatusMode {
 /// unchanged there, which is what the style guide already requires.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BorderStyle {
-    /// `┌┐└┘` square corners. The conservative default.
-    #[default]
+    /// `┌┐└┘` square corners, for a font whose box-drawing coverage is thin.
     Square,
-    /// `╭╮╰╯` rounded corners, the handoff's own treatment at one-cell radius.
+    /// `╭╮╰╯` rounded corners, the reference treatment at one-cell radius.
+    ///
+    /// The default: a one-cell radius is an ordinary glyph, so the reference
+    /// appearance is the one cloo ships with rather than one a user opts into.
+    #[default]
     Rounded,
     /// `+`, `-`, and `|` — no box-drawing coverage assumed.
     Ascii,
@@ -388,7 +391,7 @@ impl VisualConfig {
             theme: ThemeChoice::Named(crate::theme::ThemeName::Storm),
             dim_unfocused: true,
             status: StatusMode::Minimal,
-            borders: BorderStyle::Square,
+            borders: BorderStyle::Rounded,
             motion: true,
             reduce_motion: false,
         }

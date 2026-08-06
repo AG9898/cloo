@@ -1411,7 +1411,7 @@ mod tests {
 
         // Pane one's header sits on the row directly above its grid.
         assert_eq!(spans[1].at, Point::new(0, 1));
-        assert_eq!(text_of(&spans[1].cells), "┌> 1 on ?┐");
+        assert_eq!(text_of(&spans[1].cells), "╭> 1 on ?╮");
         assert_eq!(
             spans[2].cells[0].fg,
             crate::theme::Theme::storm().color(crate::theme::ThemeToken::Accent),

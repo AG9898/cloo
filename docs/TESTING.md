@@ -147,6 +147,14 @@ M9-21 closes the set. `tests/visual.rs` now carries a reviewed truecolor cell go
 16-color resolution for every one of the eight cards, and `crates/cloo/tests/visual_attach.rs`
 drives the shipped binary into each of those states over a real pseudoterminal.
 
+The goldens compose at the *shipped* appearance defaults rather than at a style the harness picked,
+so a card asserts what a user actually gets; `Scene::borders` overrides that only where a card is
+about the border preference itself. Because `VisualConfig::defaults` and `ChromeOptions` are both
+`const fn` and so cannot call `Default::default()`, they restate those defaults independently, and
+`chrome.rs` holds them in step with an explicit equality test. RESOLVED-21 records why: when the
+default border style changed, the two disagreed, and the client composed rounded frames while the
+goldens still expected square ones.
+
 The client-side half adds four things to the harness. `SemanticStyle::dimmed` expresses the
 unfocused-pane treatment as the production policy applied to the *resolved* cell rather than as a
 second set of literal colours, which is the only way one golden can describe an unfocused pane at

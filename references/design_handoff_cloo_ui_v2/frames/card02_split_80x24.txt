@@ -1,0 +1,122 @@
+# cloo — Card 02: vertical split, 80×24 four-pane floor
+# ExpectedFrame format: row line, then parallel style-key line, then legend.
+# Theme: Storm (truecolor). Borders: rounded ╭╮╰╯.
+# Source of truth. The HTML viewer is generated FROM this, never the reverse.
+
+cols: 80   rows: 24
+
+row[00]: " dev  1 edit  >2 agents                                        4 panes  1 client"
+key[00]: "SSSSSiiiiiiii,TTTVVVVVV,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,,iiiiiiiiiiiiiiiii"
+
+row[01]: "╭> 1 shell                   ? unknown╮ ╭  2 claude               ! needs input╮"
+key[01]: "Faam,BBBBB,,,,,,,,,,,,,,,,,,,mmmmmmmmmF_fbbkxPPPPPPxxxxxxxxxxxxxxxHHHHHHHHHHHHHf"
+
+row[02]: "│$ cargo test                         │ │apply the patch to chrome.rs?         │"
+key[02]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[03]: "│   Compiling cloo v0.1.0             │ │                                      │"
+key[03]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[04]: "│    Finished test profile            │ │  1 file changed  +12 -3              │"
+key[04]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[05]: "│     Running unittests               │ │  [y] apply  [n] skip  [e] edit       │"
+key[05]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[06]: "│test chrome::header ... ok           │ │                                      │"
+key[06]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[07]: "│test layout::split ... ok            │ │                                      │"
+key[07]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[08]: "│                                     │ │                                      │"
+key[08]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[09]: "│$                                    │ │                                      │"
+key[09]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[10]: "│                                     │ │                                      │"
+key[10]: "F~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~F_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[11]: "╰─────────────────────────────────────╯ ╰──────────────────────────────────────╯"
+key[11]: "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF_ffffffffffffffffffffffffffffffffffffffff"
+
+row[12]: "╭  3 build                    x failed╮ ╭  4 test                       + ready╮"
+key[12]: "fbbkxPPPPPxxxxxxxxxxxxxxxxxxxxZZZZZZZZf_fbbkxPPPPxxxxxxxxxxxxxxxxxxxxxxxeeeeeeef"
+
+row[13]: "│error[E0308]: mismatched types       │ │running 42 tests                      │"
+key[13]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[14]: "│  --> src/renderer.rs:214:9          │ │                                      │"
+key[14]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[15]: "│   expected Span, found Cell         │ │test result: ok                       │"
+key[15]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[16]: "│                                     │ │42 passed  0 failed                   │"
+key[16]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[17]: "│error: could not compile cloo        │ │                                      │"
+key[17]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[18]: "│                                     │ │finished in 3.14s                     │"
+key[18]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[19]: "│                                     │ │                                      │"
+key[19]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[20]: "│                                     │ │                                      │"
+key[20]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[21]: "│                                     │ │                                      │"
+key[21]: "fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf_fyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyf"
+
+row[22]: "╰─────────────────────────────────────╯ ╰──────────────────────────────────────╯"
+key[22]: "fffffffffffffffffffffffffffffffffffffff_ffffffffffffffffffffffffffffffffffffffff"
+
+row[23]: " s dev   1 edit  >2 agents  1! 1x 1+         git main +2   1 client  C-b  14:38 "
+key[23]: "SSSSSSSmmmmmmmmm,TNUVVVVVV,,WW,YY,gg,,,,,,,,,ggg,pppp,ww,,,mmmmmmmm,,ppp,,ccccc,"
+
+legend:
+  _ = (DefaultText, (term default bg))  NONE
+  F = (Accent, Frame)  NONE  — focused pane frame ╭╮╰╯│─
+  ~ = (DefaultText, Surface)  NONE  — focused pane body
+  a = (Accent, Surface)  NONE  — focus prompt >
+  B = (Accent, Surface)  BOLD  — focused pane title
+  m = (Muted, Surface)  NONE  — pane index / secondary
+  , = (DefaultText, Surface)  NONE  — focused header gap
+  f = (Border, Frame)  DIM   — unfocused pane frame
+  y = (DefaultText, Surface)  DIM   — unfocused pane body
+  b = (Border, Surface)  DIM   — unfocused header gap
+  k = (Muted, Surface)  DIM   — unfocused pane index
+  P = (Primary, Surface)  DIM   — unfocused pane title
+  x = (DefaultText, Surface)  DIM   — unfocused header gap
+  H = (Warning, Surface)  DIM   — unfocused state: needs-input (! amber)
+  Z = (Error, Surface)  DIM   — unfocused state: failed (x red)
+  e = (Success, Surface)  DIM   — unfocused state: ready (+ green)
+  S = (Surface, Accent)  BOLD  — session badge (reverse block)
+  i = (Muted, Surface)  NONE  — tab-row meta
+  T = (Accent, RaisedSurface)  BOLD UNDERLINE — active tab caret >
+  N = (Info, RaisedSurface)  BOLD UNDERLINE — active tab count
+  V = (Primary, RaisedSurface)  BOLD UNDERLINE — active tab label
+  U = (Muted, RaisedSurface)  BOLD UNDERLINE — active tab gap
+  W = (Warning, Surface)  BOLD  — attention: needs-input tally 1!
+  Y = (Error, Surface)  BOLD  — attention: failed tally 1x
+  g = (Success, Surface)  BOLD  — attention: ready tally 1+ / git label
+  p = (Primary, Surface)  NONE  — git branch / prefix hint
+  w = (Warning, Surface)  NONE  — git dirty +2
+  c = (Primary, Surface)  BOLD  — clock
+
+# --- Degradation: pane header (RESOLVED-14) ---
+# yield order: task label -> state label -> title -> (state glyph kept last)
+#  50w  "> 3 claude - refactor the layout   ! needs input"
+#  38w  "> 3 claude             ! needs input"
+#  28w  "> 3 claude              !"
+#  14w  "> 3 clau   !"
+#   6w  "> 3 !"
+
+# --- Degradation: minimal status row ---
+# yield order: clock -> clients -> git -> prefix -> attention labels -> glyph floor
+#  40w  " s dev  >2 agents  1! 1x 1+         C-b "
+#  12w  " s >2 1! C-b"
+#   4w  "s>!b"   (documented ASCII floor)

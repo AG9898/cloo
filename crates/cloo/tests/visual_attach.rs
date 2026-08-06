@@ -509,8 +509,8 @@ fn card_01_one_pane_composes_tab_frame_and_status_rows_on_a_real_terminal() {
             "one-pane-ok",
             " dev ",
             ">1 api",
-            "\u{250c}> 1 api",
-            "\u{2514}\u{2500}",
+            "\u{256d}> 1 api",
+            "\u{2570}\u{2500}",
             "C-b split % stack \" help ?",
         ],
         "the composed one-pane frame",
@@ -542,11 +542,11 @@ fn cards_02_and_03_split_and_nest_through_the_live_keymap() {
     // command this fixture sent on the wire itself.
     tty.chord(b'%');
     let split = tty.expect_all(
-        &["2 panes", "\u{250c}  1 api", "\u{250c}> 2 api"],
+        &["2 panes", "\u{256d}  1 api", "\u{256d}> 2 api"],
         "the vertical split",
     );
     assert!(
-        split.contains("\u{2514}\u{2500}"),
+        split.contains("\u{2570}\u{2500}"),
         "both allocations keep a complete frame; saw:\n{split}"
     );
 
@@ -556,9 +556,9 @@ fn cards_02_and_03_split_and_nest_through_the_live_keymap() {
     tty.expect_all(
         &[
             "3 panes",
-            "\u{250c}  1 api",
-            "\u{250c}  2 api",
-            "\u{250c}> 3 api",
+            "\u{256d}  1 api",
+            "\u{256d}  2 api",
+            "\u{256d}> 3 api",
         ],
         "the nested workspace",
     );
@@ -761,7 +761,7 @@ fn card_08_a_keyboard_resize_lights_the_divider_without_mouse_reporting() {
     tty.expect("resize-ready", "the initial workspace");
 
     tty.chord(b'%');
-    tty.expect_all(&["2 panes", "\u{250c}> 2 api"], "the split workspace");
+    tty.expect_all(&["2 panes", "\u{256d}> 2 api"], "the split workspace");
 
     tty.type_bytes(&[PREFIX, 0x1b, b'[', b'D']);
     let resizing = tty.expect("resize \u{b7} ratio 0.", "the active resize affordance");

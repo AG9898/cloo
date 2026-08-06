@@ -189,7 +189,7 @@ impl Default for ChromeOptions {
         Self {
             dim_unfocused: true,
             theme: Theme::storm(),
-            borders: BorderStyle::Square,
+            borders: BorderStyle::Rounded,
         }
     }
 }
@@ -201,7 +201,7 @@ impl ChromeOptions {
         Self {
             dim_unfocused: false,
             theme: Theme::storm(),
-            borders: BorderStyle::Square,
+            borders: BorderStyle::Rounded,
         }
     }
 
@@ -2387,6 +2387,29 @@ mod tests {
     /// The header's text, with styling discarded.
     fn text_of(cells: &[Cell]) -> String {
         cells.iter().map(|c| c.ch).collect()
+    }
+
+    /// `ChromeOptions` restates the appearance defaults `VisualConfig` owns,
+    /// because one is a render-pass value and the other is a parsed file. Both
+    /// are `const`, so neither can call `Default::default()` to stay in step —
+    /// which leaves them free to drift, and they have. This is the guard.
+    #[test]
+    fn the_chrome_defaults_agree_with_the_configured_appearance_defaults() {
+        let configured = cloo_core::VisualConfig::defaults();
+        let chrome = ChromeOptions::default();
+        assert_eq!(
+            chrome.borders, configured.borders,
+            "a frame would ship in a style the config file's defaults do not name"
+        );
+        assert_eq!(
+            chrome.dim_unfocused, configured.dim_unfocused,
+            "the no-dim accessibility default must not depend on which type is asked"
+        );
+        assert_eq!(
+            ChromeOptions::no_dim().borders,
+            configured.borders,
+            "the no-dim fallback restates the border default a third time"
+        );
     }
 
     /// The first cell holding `ch`.

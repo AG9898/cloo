@@ -99,6 +99,41 @@ the terminal must resolve this first.
 
 ## Resolved Decisions
 
+### RESOLVED-21 — The rounded frame is the default, not an opt-in
+
+**Resolved:** 2026-08-06
+
+**Decision:** `[visual] borders` defaults to `rounded` (`╭╮╰╯`). `square` (`┌┐└┘`) remains
+available for a font whose box-drawing coverage is thin, and `ascii` (`+ - |`) for one with none.
+RESOLVED-20's substance is untouched: the three styles are still one composition, still differ
+only in a corner or edge cell's character, and `crates/cloo-client/tests/visual.rs` still asserts
+that invariant directly. Only which of them a user gets without saying anything has changed.
+
+**Why:** The project owner prefers the rounded frame, and the second design handoff draws its
+reference frames that way. RESOLVED-20 kept the default square out of caution about fonts cloo
+cannot inspect, but priced that caution as though rounding were irreversible. It is a one-key
+configuration change, and a user whose font renders `╭` poorly can write `borders = "square"`.
+Shipping the reference appearance by default is worth more than protecting an unmeasured minority
+from something they can undo in one line.
+
+**Alternatives rejected:** Detecting glyph coverage stays rejected for RESOLVED-20's reason —
+coverage is a font property, not a terminal-protocol one. Keeping square while documenting rounded
+as recommended was rejected because the default nobody changes is the appearance the product
+actually has.
+
+**Affects:** `crates/cloo-core/src/config.rs`, `crates/cloo-client/src/chrome.rs`,
+`crates/cloo-client/src/overlay.rs`, `crates/cloo-client/tests/visual/scenes.rs`,
+`crates/cloo-client/tests/visual.rs`, `crates/cloo/tests/visual_attach.rs`,
+[`STYLEGUIDE.md`](STYLEGUIDE.md), [`ARCHITECTURE.md`](ARCHITECTURE.md). Supersedes RESOLVED-20's
+choice of default and nothing else.
+
+The flip surfaced that the appearance default was written out in three independent places —
+`VisualConfig::defaults`, `ChromeOptions`, and the golden harness — which were free to disagree,
+and during this change briefly did, so the client composed rounded frames while its own goldens
+still expected square ones. The harness now derives its style from the default. The other two
+cannot: both are `const fn`, and `Default::default()` is not callable in a const context. They
+are held in step by an explicit test instead, which is the only mechanism available to them.
+
 ### RESOLVED-19 — The high-fidelity handoff is the terminal UI acceptance contract
 
 **Date:** 2026-07-28
@@ -611,7 +646,8 @@ Asserting colour in the pseudoterminal fixture was rejected as duplicated, weake
 **Resolved:** 2026-08-05
 
 **Decision:** The handoff's rounded corners are drawn as rounded corners. `[visual] borders`
-selects the pane frame's glyph set — `square` (`┌┐└┘`, the conservative default), `rounded`
+selects the pane frame's glyph set — `square` (`┌┐└┘`, the conservative default at the time; see
+RESOLVED-21, which makes `rounded` the default), `rounded`
 (`╭╮╰╯`), or `ascii` (`+ - |`) — as a client-local presentation preference on the same footing as
 `[visual] status`. The three styles are one composition: every style occupies exactly the same
 cells, so frame geometry, colour, rendition, the documented width ladder, and mouse hit-testing are

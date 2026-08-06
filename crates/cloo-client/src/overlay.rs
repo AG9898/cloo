@@ -3228,11 +3228,10 @@ mod tests {
         let theme = Theme::storm();
         let size = Size::new(40, 17);
         let rows = overlay_cells(&config(), size, theme);
-        let options = ChromeOptions {
-            dim_unfocused: true,
-            theme,
-            borders: cloo_core::BorderStyle::Square,
-        };
+        // The options the client composes its real frame with, not a set this
+        // test chose: the claim is that the preview takes the *same* treatment,
+        // so pinning a border style here would let the two drift apart silently.
+        let options = ChromeOptions::default().with_theme(theme);
         // 40 columns: a 19-wide and a 20-wide frame, plus the one-cell gutter.
         let focused = PaneChrome::new(1, "focused")
             .attention(Attention::Quiet)
@@ -3295,7 +3294,7 @@ mod tests {
         let narrow = config_rows(&config(), Size::new(18, 8));
         assert_eq!(narrow[0], "  configuration");
         assert!(
-            narrow.iter().all(|row| !row.contains('\u{250c}')),
+            narrow.iter().all(|row| !row.contains('\u{256d}')),
             "18 columns cannot hold two legible framed panes: {narrow:?}"
         );
         assert_eq!(narrow.last().map(String::as_str), Some("  esc close"));
